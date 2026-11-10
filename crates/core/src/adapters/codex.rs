@@ -8,9 +8,10 @@ use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 use crate::slug::slugify;
 
+use super::sections::{self, block_span, region_span, InstructionFile, BLOCK_BEGIN, BLOCK_END};
+
 const AGENT: &str = "codex";
-const BLOCK_BEGIN: &str = "<!-- nativemem:begin -->";
-const BLOCK_END: &str = "<!-- nativemem:end -->";
+const INSTRUCTION_FILE: &str = "AGENTS.md";
 const INDEX_FILE: &str = "MEMORY.md";
 const SCOPE_FILE: &str = "scope.json";
 const TASK_GROUP: &str = "# Task Group:";
@@ -56,6 +57,7 @@ pub struct CodexAdapter {
     home: PathBuf,
     state_dir: PathBuf,
     backups: BackupSession,
+    instructions: InstructionFile,
 }
 
 struct Replica {
@@ -76,35 +78,6 @@ struct OriginalBlock {
 struct Originals {
     blocks: Vec<OriginalBlock>,
     skipped: Vec<(String, String)>,
-}
-
-fn encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
-fn decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = s.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 fn take_line(text: &str) -> Option<(&str, &str)> {
@@ -129,9 +102,8 @@ fn render(key: &ItemKey, item: &Item) -> String {
     let name = oneline(&item.name);
     let description = oneline(&item.description);
     let mut s = format!(
-        "<!-- nativemem origin={} id={} -->\n# {name}\n\n{description}\n\n",
-        encode(key.origin.as_str()),
-        encode(&key.native_id),
+        "{}\n# {name}\n\n{description}\n\n",
+        sections::marker(key.origin.as_str(), &key.native_id),
     );
     match &item.category {
         Some(c) => s.push_str(&format!("Category: {c}\n\n")),
@@ -145,10 +117,7 @@ fn render(key: &ItemKey, item: &Item) -> String {
 
 fn parse_replica(text: &str) -> Option<Replica> {
     let (marker, rest) = take_line(text)?;
-    let inner = marker
-        .strip_prefix("<!-- nativemem origin=")?
-        .strip_suffix(" -->")?;
-    let (origin, id) = inner.split_once(" id=")?;
+    let (origin, id) = sections::parse_marker(marker)?;
     let (heading, rest) = take_line(rest)?;
     let name = heading.strip_prefix("# ")?;
     let (blank, rest) = take_line(rest)?;
@@ -174,8 +143,8 @@ fn parse_replica(text: &str) -> Option<Replica> {
         rest = after;
     }
     Some(Replica {
-        origin: decode(origin)?,
-        id: decode(id)?,
+        origin,
+        id,
         name: name.to_string(),
         description: description.to_string(),
         category,
@@ -278,21 +247,23 @@ fn routing_block(projects: &[(String, PathBuf)]) -> String {
     s
 }
 
-/// Byte span of the managed block, end marker included.
-fn block_span(text: &str) -> Result<Option<(usize, usize)>> {
-    let Some(start) = text.find(BLOCK_BEGIN) else {
-        return Ok(None);
-    };
-    let end = text[start..]
-        .find(BLOCK_END)
-        .ok_or_else(|| Error::Parse("AGENTS.md: nativemem block has no end marker".into()))?;
-    Ok(Some((start, start + end + BLOCK_END.len())))
-}
-
 fn splice_block(text: &str, block: Option<&str>) -> Result<String> {
-    Ok(match (block_span(text)?, block) {
-        (Some((s, e)), Some(b)) => format!("{}{b}{}", &text[..s], &text[e..]),
-        (None, Some(b)) => {
+    Ok(match (block_span(text)?, block, region_span(text)?) {
+        (Some((s, e)), Some(b), _) => format!("{}{b}{}", &text[..s], &text[e..]),
+        // The instruction region stays the last managed region of the file.
+        (None, Some(b), Some((r, _))) => {
+            let (before, rest) = text.split_at(r);
+            let lead = if before.is_empty() || before.ends_with("\n\n") {
+                ""
+            } else if before.ends_with('\n') {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            let gap = if before.is_empty() { "\n" } else { "\n\n" };
+            format!("{before}{lead}{b}{gap}{rest}")
+        }
+        (None, Some(b), None) => {
             let sep = if text.is_empty() {
                 ""
             } else if text.ends_with('\n') {
@@ -302,7 +273,7 @@ fn splice_block(text: &str, block: Option<&str>) -> Result<String> {
             };
             format!("{text}{sep}{b}\n")
         }
-        (Some((s, e)), None) => {
+        (Some((s, e)), None, _) => {
             let mut before = &text[..s];
             if before.ends_with("\n\n") {
                 before = &before[..before.len() - 1];
@@ -310,7 +281,7 @@ fn splice_block(text: &str, block: Option<&str>) -> Result<String> {
             let after = text[e..].strip_prefix('\n').unwrap_or(&text[e..]);
             format!("{before}{after}")
         }
-        (None, None) => text.to_string(),
+        (None, None, _) => text.to_string(),
     })
 }
 
@@ -361,6 +332,13 @@ fn parse_originals(text: &str) -> Originals {
 impl CodexAdapter {
     pub fn new(codex_home: PathBuf, state_dir: PathBuf, backups: BackupSession) -> Self {
         CodexAdapter {
+            instructions: InstructionFile::new(
+                Self::agent(),
+                codex_home.clone(),
+                state_dir.clone(),
+                backups.clone(),
+                INSTRUCTION_FILE,
+            ),
             home: codex_home,
             state_dir,
             backups,
@@ -478,10 +456,14 @@ impl Adapter for CodexAdapter {
                 replica_of: None,
             });
         }
+        out.extend(self.instructions.scan()?);
         Ok(out)
     }
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
+        if item.kind == Kind::Instruction {
+            return self.instructions.write_replica(key, item);
+        }
         let Scope::Project(cwd) = &item.scope else {
             return Err(Error::unsupported(AGENT, "write_replica global scope"));
         };
@@ -515,11 +497,17 @@ impl Adapter for CodexAdapter {
         Ok((format!("{project}/{file}"), path))
     }
 
-    fn write_original(&self, _native_id: &str, _item: &Item) -> Result<()> {
+    fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+        if self.instructions.owns(native_id) {
+            return self.instructions.write_original(native_id, item);
+        }
         Err(Error::unsupported(AGENT, "write_original"))
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
+        if self.instructions.owns(native_id) {
+            return self.instructions.remove(native_id);
+        }
         if native_id.contains('#') {
             return Err(Error::unsupported(AGENT, "remove original"));
         }
@@ -942,6 +930,75 @@ mod tests {
         ));
         assert!(matches!(
             f.a.remove("/w/app#x"),
+            Err(Error::Unsupported { .. })
+        ));
+    }
+
+    fn instruction(heading: &str, body: &str) -> Item {
+        Item {
+            kind: Kind::Instruction,
+            scope: Scope::Global,
+            name: slugify(heading),
+            description: heading.into(),
+            category: None,
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn instruction_originals_skip_the_routing_block_and_the_region() {
+        let f = fx();
+        fs::write(
+            f.home.join("AGENTS.md"),
+            format!(
+                "# Mine\n\n## Style\nbe terse\n\n{BLOCK_BEGIN}\n## Project memory (managed by nativemem)\n- /x → /y\n{BLOCK_END}\n"
+            ),
+        )
+        .unwrap();
+        f.a.write_replica(&key("CLAUDE.md#a"), &instruction("A", "a body"))
+            .unwrap();
+        let items = f.a.scan().unwrap();
+        let ids: Vec<_> = items.iter().map(|o| o.native_id.as_str()).collect();
+        assert_eq!(ids, ["AGENTS.md#style", "AGENTS.md#claude:CLAUDE.md#a"]);
+        assert!(items[0].replica_of.is_none());
+        assert!(items[1].replica_of.is_some());
+    }
+
+    #[test]
+    fn routing_block_goes_before_an_existing_region_and_leaves_it_alone() {
+        let f = fx();
+        f.a.write_replica(&key("CLAUDE.md#a"), &instruction("A", "a body"))
+            .unwrap();
+        let region_only = agents(&f);
+        f.a.write_replica(&key("m"), &item("/w/a", "M", None, "m"))
+            .unwrap();
+        let both = agents(&f);
+        let block = both.find(BLOCK_BEGIN).unwrap();
+        let region = both.find("<!-- nativemem:instructions:begin -->").unwrap();
+        assert!(block < region);
+        assert!(both.ends_with(&region_only));
+        let (id, _) =
+            f.a.write_replica(&key("m"), &item("/w/a", "M", None, "m2"))
+                .unwrap();
+        f.a.remove(&id).unwrap();
+        assert_eq!(agents(&f), region_only);
+    }
+
+    #[test]
+    fn instruction_originals_are_editable_but_memory_originals_are_not() {
+        let f = fx();
+        fs::write(f.home.join("AGENTS.md"), "## Style\nold\n\n## Keep\nk\n").unwrap();
+        f.a.write_original("AGENTS.md#style", &instruction("Style", "new"))
+            .unwrap();
+        assert_eq!(agents(&f), "## Style\nnew\n\n## Keep\nk\n");
+        f.a.remove("AGENTS.md#style").unwrap();
+        assert_eq!(agents(&f), "## Keep\nk\n");
+        assert!(matches!(
+            f.a.write_original("/w/app#fix-login", &item("/w/app", "n", None, "b")),
+            Err(Error::Unsupported { .. })
+        ));
+        assert!(matches!(
+            f.a.remove("/w/app#fix-login"),
             Err(Error::Unsupported { .. })
         ));
     }

@@ -10,6 +10,14 @@ struct CategoryTag: View {
     }
 }
 
+struct InstructionTag: View {
+    var body: some View {
+        Text("Instruction")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+}
+
 struct ItemListView: View {
     @Bindable var model: AppModel
 

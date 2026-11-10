@@ -1,5 +1,5 @@
 { "items": [
-    { "agent": "claude", "native_id": "-Users-x-app/feedback_tests.md",
+    { "agent": "claude", "native_id": "-Users-x-app/feedback_tests.md", "kind": "memory",
       "path": "/Users/x/.claude/projects/-Users-x-app/memory/feedback_tests.md",
       "scope": { "type": "project", "path": "/Users/x/app" },
       "name": "feedback-tests", "description": "Run the fast suite first",

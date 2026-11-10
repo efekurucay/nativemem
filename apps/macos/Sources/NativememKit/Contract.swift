@@ -16,8 +16,12 @@ public struct ItemRef: Codable, Hashable, Sendable {
 }
 
 public struct Item: Codable, Hashable, Sendable {
+    public static let memoryKind = "memory"
+    public static let instructionKind = "instruction"
+
     public var agent: String
     public var nativeId: String
+    public var kind: String
     public var path: String
     public var scope: Scope
     public var name: String
@@ -27,13 +31,16 @@ public struct Item: Codable, Hashable, Sendable {
     public var replicaOf: ItemRef?
     public var hash: String
 
+    public var isInstruction: Bool { kind == Item.instructionKind }
+
     public init(
-        agent: String, nativeId: String, path: String, scope: Scope, name: String,
-        description: String? = nil, category: String? = nil, body: String = "",
+        agent: String, nativeId: String, kind: String = Item.memoryKind, path: String, scope: Scope,
+        name: String, description: String? = nil, category: String? = nil, body: String = "",
         replicaOf: ItemRef? = nil, hash: String = ""
     ) {
         self.agent = agent
         self.nativeId = nativeId
+        self.kind = kind
         self.path = path
         self.scope = scope
         self.name = name
@@ -42,6 +49,22 @@ public struct Item: Codable, Hashable, Sendable {
         self.body = body
         self.replicaOf = replicaOf
         self.hash = hash
+    }
+
+    /// `kind` defaults to memory when the CLI output does not carry it.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        agent = try container.decode(String.self, forKey: .agent)
+        nativeId = try container.decode(String.self, forKey: .nativeId)
+        kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? Item.memoryKind
+        path = try container.decode(String.self, forKey: .path)
+        scope = try container.decode(Scope.self, forKey: .scope)
+        name = try container.decode(String.self, forKey: .name)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        category = try container.decodeIfPresent(String.self, forKey: .category)
+        body = try container.decode(String.self, forKey: .body)
+        replicaOf = try container.decodeIfPresent(ItemRef.self, forKey: .replicaOf)
+        hash = try container.decode(String.self, forKey: .hash)
     }
 }
 

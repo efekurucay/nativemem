@@ -10,7 +10,7 @@ use nativemem_core::engine::{self, Action, ApplyOptions, Note};
 use nativemem_core::error::{Error, Result};
 use nativemem_core::fsx::BackupSession;
 use nativemem_core::ledger::Ledger;
-use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Observed, Scope};
+use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Kind, Observed, Scope};
 use serde_json::{json, Value};
 
 #[cfg(target_os = "macos")]
@@ -298,6 +298,7 @@ fn items(claude: &ClaudeAdapter, codex: &CodexAdapter, json: bool) -> Result<()>
                 json!({
                     "agent": o.agent.as_str(),
                     "native_id": o.native_id,
+                    "kind": o.item.kind.as_str(),
                     "path": o.path.display().to_string(),
                     "scope": scope_json(&o.item.scope),
                     "name": o.item.name,
@@ -316,7 +317,13 @@ fn items(claude: &ClaudeAdapter, codex: &CodexAdapter, json: bool) -> Result<()>
                 Scope::Global => "global".to_string(),
                 Scope::Project(p) => p.display().to_string(),
             };
-            println!("{}  {}  {}", o.agent, scope, o.item.name);
+            println!(
+                "{}  {}  {}  {}",
+                o.agent,
+                o.item.kind.as_str(),
+                scope,
+                o.item.name
+            );
         }
     }
     Ok(())
@@ -396,6 +403,18 @@ fn edit(
     if current.replica_of.is_some() {
         return Err(Failure::Replica);
     }
+    let (name, description, category) = if current.item.kind == Kind::Instruction {
+        if name != current.item.name || description != current.item.description {
+            return Err(Failure::Coded {
+                code: "invalid",
+                message: "the heading cannot be changed from here; edit it in the file itself"
+                    .into(),
+            });
+        }
+        (name, description, None)
+    } else {
+        (name, description, category)
+    };
     let item = Item {
         kind: current.item.kind,
         scope: current.item.scope,

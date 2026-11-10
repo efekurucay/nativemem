@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::error::{Error, Result};
 use crate::ledger::{ItemRow, Ledger, ReplicaRow};
-use crate::model::{content_hash, Adapter, AgentId, Item, ItemKey, Observed, Scope};
+use crate::model::{content_hash, Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -447,10 +447,18 @@ fn plan_key(
         plan.actions.push(Action::WriteBack {
             key: key.clone(),
             from: c.agent.clone(),
-            item: c
-                .obs
-                .map(|o| o.item.clone())
-                .unwrap_or_else(|| orig.item.clone()),
+            item: c.obs.map_or_else(
+                || orig.item.clone(),
+                |o| match o.item.kind {
+                    // The heading is the identity of an instruction section; only the body travels.
+                    Kind::Instruction => Item {
+                        name: orig.item.name.clone(),
+                        description: orig.item.description.clone(),
+                        ..o.item.clone()
+                    },
+                    Kind::Memory => o.item.clone(),
+                },
+            ),
             targets,
         });
         return Ok(());
@@ -1075,5 +1083,232 @@ mod tests {
         fs::remove_dir_all(f.codex_root.join("memories")).unwrap();
         fs::write(f.codex_root.join("memories"), "not a dir").unwrap();
         assert!(plan(&f.adapters(), &f.ledger).is_err());
+    }
+
+    const RULES: &str = "# Rules\n@RTK.md\n\n## Alpha\nalpha body\n\n## Beta\nbeta line\n\n### Sub\nsub text\n\n## Gamma\n```sh\n## not a heading\n```\ngamma end\n";
+
+    impl Fx {
+        fn claude_md(&self) -> String {
+            fs::read_to_string(self.claude_root.join("CLAUDE.md")).unwrap_or_default()
+        }
+
+        fn write_claude_md(&self, text: &str) {
+            fs::write(self.claude_root.join("CLAUDE.md"), text).unwrap();
+        }
+
+        fn write_agents_md(&self, text: &str) {
+            fs::write(self.codex_root.join("AGENTS.md"), text).unwrap();
+        }
+
+        fn instruction_names(&self, agent: &dyn Adapter) -> Vec<String> {
+            agent
+                .scan()
+                .unwrap()
+                .into_iter()
+                .filter(|o| o.item.kind == Kind::Instruction)
+                .map(|o| {
+                    format!(
+                        "{}{}",
+                        o.item.name,
+                        if o.replica_of.is_some() { "*" } else { "" }
+                    )
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn claude_sections_reach_codex_and_second_plan_is_empty() {
+        let f = fx();
+        f.write_claude_md(RULES);
+        let r = f.sync();
+        assert_eq!(r.done.len(), 3);
+        assert_eq!(f.claude_md(), RULES);
+        let agents = f.agents_md();
+        assert!(agents.starts_with("<!-- nativemem:instructions:begin -->\n"));
+        assert_eq!(agents.matches("<!-- nativemem origin=claude").count(), 3);
+        assert!(agents.contains("## Gamma\n\n```sh\n## not a heading\n```\ngamma end\n"));
+        assert!(agents.contains("### Sub\nsub text"));
+        assert_eq!(f.instruction_names(&f.codex), ["alpha*", "beta*", "gamma*"]);
+        assert_eq!(f.ledger.list_items().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn preamble_only_and_missing_files_sync_nothing() {
+        let f = fx();
+        assert!(f.plan().is_empty());
+        f.write_claude_md("# Title\n@RTK.md\nintro\n");
+        f.write_agents_md("# Codex notes\n");
+        assert!(f.plan().is_empty());
+        assert!(!f
+            .claude_root
+            .join("CLAUDE.md")
+            .with_extension("bak")
+            .exists());
+    }
+
+    #[test]
+    fn codex_section_reaches_claude_and_routing_block_is_no_section() {
+        let f = fx();
+        let agents = "# Mine\n\n## Style\nbe terse\n\n<!-- nativemem:begin -->\n## Project memory (managed by nativemem)\n- /x → /y\n<!-- nativemem:end -->\n";
+        f.write_agents_md(agents);
+        f.write_claude_md("# Claude\n");
+        f.sync();
+        assert_eq!(f.instruction_names(&f.codex), ["style"]);
+        assert_eq!(f.instruction_names(&f.claude), ["style*"]);
+        assert_eq!(f.agents_md(), agents);
+        let claude = f.claude_md();
+        assert!(claude.starts_with("# Claude\n\n<!-- nativemem:instructions:begin -->\n"));
+        assert!(claude.contains("origin=codex id=AGENTS.md%23style -->\n## Style\n\nbe terse\n"));
+        assert!(!claude.contains("Project memory"));
+    }
+
+    #[test]
+    fn routing_block_and_instruction_region_coexist_in_order() {
+        let f = fx();
+        let user = "# Mine\n\n## Style\nbe terse\n";
+        f.write_agents_md(user);
+        f.write_claude_md(RULES);
+        f.add("a.md", "alpha", "user", "alpha body");
+        f.sync();
+        let agents = f.agents_md();
+        assert!(agents.starts_with(user));
+        let block = agents.find("<!-- nativemem:begin -->").unwrap();
+        let region = agents
+            .find("<!-- nativemem:instructions:begin -->")
+            .unwrap();
+        assert!(block < region, "{agents}");
+        assert_eq!(f.instruction_names(&f.codex).len(), 4);
+
+        // Removing the memory removes the block and leaves the region intact.
+        fs::remove_file(f.claude_mem().join("a.md")).unwrap();
+        f.sync();
+        let agents = f.agents_md();
+        assert!(!agents.contains("nativemem:begin"));
+        assert!(agents.starts_with(&format!("{user}\n<!-- nativemem:instructions:begin -->")));
+        assert_eq!(agents.matches("<!-- nativemem origin=claude").count(), 3);
+    }
+
+    #[test]
+    fn replica_edit_writes_back_to_the_original() {
+        let f = fx();
+        f.write_claude_md(RULES);
+        f.sync();
+        replace_in(
+            &f.codex_root.join("AGENTS.md"),
+            "beta line",
+            "beta changed\nsecond",
+        );
+        assert!(f.plan().to_string().contains("~ claude  global  beta"));
+        f.sync();
+        assert_eq!(
+            f.claude_md(),
+            RULES.replace("beta line", "beta changed\nsecond")
+        );
+        assert!(f.state.join("backups/T/claude/CLAUDE.md").is_file());
+    }
+
+    #[test]
+    fn instruction_original_edit_updates_replica() {
+        let f = fx();
+        f.write_claude_md(RULES);
+        f.sync();
+        f.write_claude_md(&RULES.replace("alpha body", "alpha new"));
+        f.sync();
+        assert!(f.agents_md().contains("alpha new"));
+        assert!(!f.agents_md().contains("alpha body"));
+    }
+
+    #[test]
+    fn replica_heading_edit_is_restored() {
+        let f = fx();
+        f.write_claude_md(RULES);
+        f.sync();
+        let before = f.agents_md();
+        replace_in(&f.codex_root.join("AGENTS.md"), "## Beta", "## Renamed");
+        f.sync();
+        assert_eq!(f.agents_md(), before);
+        assert_eq!(f.claude_md(), RULES);
+    }
+
+    #[test]
+    fn both_sides_changed_is_a_conflict() {
+        let f = fx();
+        f.write_claude_md(RULES);
+        f.sync();
+        f.write_claude_md(&RULES.replace("alpha body", "claude side"));
+        replace_in(&f.codex_root.join("AGENTS.md"), "alpha body", "codex side");
+        let p = f.plan();
+        assert!(matches!(p.notes[..], [Note::Conflict { .. }]), "{p}");
+        assert!(p.actions.is_empty());
+    }
+
+    #[test]
+    fn deleting_original_sections_removes_replicas_and_empty_region() {
+        let f = fx();
+        f.write_claude_md(RULES);
+        f.sync();
+        f.write_claude_md("# Rules\n@RTK.md\n\n## Alpha\nalpha body\n");
+        f.sync();
+        assert_eq!(f.instruction_names(&f.codex), ["alpha*"]);
+        f.write_claude_md("# Rules\n@RTK.md\n");
+        f.sync();
+        assert_eq!(f.agents_md(), "");
+        assert_eq!(f.claude_md(), "# Rules\n@RTK.md\n");
+    }
+
+    #[test]
+    fn deleting_a_replica_section_removes_the_original_with_backup() {
+        let f = fx();
+        f.write_claude_md(RULES);
+        f.sync();
+        let agents = f.agents_md();
+        let start = agents
+            .find("<!-- nativemem origin=claude id=CLAUDE.md%23beta")
+            .unwrap();
+        let end = agents
+            .find("<!-- nativemem origin=claude id=CLAUDE.md%23gamma")
+            .unwrap();
+        f.write_agents_md(&format!("{}{}", &agents[..start], &agents[end..]));
+        f.sync();
+        assert_eq!(f.instruction_names(&f.claude), ["alpha", "gamma"]);
+        let claude = f.claude_md();
+        assert!(!claude.contains("## Beta") && !claude.contains("beta line"));
+        assert!(claude.starts_with("# Rules\n@RTK.md\n\n## Alpha\nalpha body\n\n## Gamma\n"));
+        let backup = fs::read_to_string(f.state.join("backups/T/claude/CLAUDE.md")).unwrap();
+        assert_eq!(backup, RULES);
+        assert_eq!(f.agents_md().matches("<!-- nativemem origin=").count(), 2);
+    }
+
+    #[test]
+    fn duplicate_headings_and_empty_bodies_sync() {
+        let f = fx();
+        let text = "## Same\none\n\n## Same\ntwo\n\n## Empty\n\n## Tail\nt\n";
+        f.write_claude_md(text);
+        f.sync();
+        assert_eq!(
+            f.instruction_names(&f.codex),
+            ["empty*", "same*", "same*", "tail*"]
+        );
+        replace_in(
+            &f.codex_root.join("AGENTS.md"),
+            "## Empty\n",
+            "## Empty\n\nfilled\n",
+        );
+        f.sync();
+        assert_eq!(
+            f.claude_md(),
+            "## Same\none\n\n## Same\ntwo\n\n## Empty\n\nfilled\n\n## Tail\nt\n"
+        );
+    }
+
+    #[test]
+    fn memory_and_instruction_with_same_name_do_not_collide() {
+        let f = fx();
+        f.add("a.md", "alpha", "user", "memory alpha");
+        f.write_claude_md("## Alpha\ninstruction alpha\n");
+        f.sync();
+        assert_eq!(f.ledger.list_items().unwrap().len(), 2);
+        assert!(f.agents_md().contains("instruction alpha"));
     }
 }

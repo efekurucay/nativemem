@@ -33,6 +33,21 @@ func fixtureItems() throws -> [Item] {
         #expect(items[2].category == nil)
     }
 
+    @Test func kindDefaultsToMemoryWhenAbsent() throws {
+        let items = try fixtureItems()
+        #expect(items[0].kind == "memory")
+        #expect(items[2].kind == "memory")
+        #expect(!items[2].isInstruction)
+    }
+
+    @Test func decodesInstructionItems() throws {
+        let items = try decodeContract(ItemsDocument.self, from: fixture("instruction_items")).items
+        #expect(items.map(\.kind) == ["instruction", "instruction"])
+        #expect(items.allSatisfy { $0.isInstruction })
+        #expect(items[0].category == nil)
+        #expect(items[1].replicaOf == ItemRef(origin: "claude", nativeId: "CLAUDE.md#style"))
+    }
+
     @Test func decodesSyncPlan() throws {
         let plan = try decodeContract(SyncPlan.self, from: fixture("sync"))
         #expect(!plan.applied)

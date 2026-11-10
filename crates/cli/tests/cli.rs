@@ -175,6 +175,7 @@ fn items_json_before_and_after_apply() {
     assert_eq!(doc["items"].as_array().unwrap().len(), 1);
     let orig = find(&doc, "claude");
     assert_eq!(orig["native_id"], "-w-app/a.md");
+    assert_eq!(orig["kind"], "memory");
     assert_eq!(
         orig["scope"],
         json!({ "type": "project", "path": "/w/app" })
@@ -200,8 +201,8 @@ fn items_json_before_and_after_apply() {
 
     let o = run(&f.claude, &f.codex, &f.state, &["items"]);
     let out = text(&o);
-    assert!(out.contains("claude  /w/app  alpha"), "{out}");
-    assert!(out.contains("codex  /w/app  alpha"), "{out}");
+    assert!(out.contains("claude  memory  /w/app  alpha"), "{out}");
+    assert!(out.contains("codex  memory  /w/app  alpha"), "{out}");
 }
 
 #[test]
@@ -668,4 +669,85 @@ mod schedule {
         assert_eq!(d["interval_minutes"], 30);
         assert_eq!(d["log_tail"], serde_json::json!(["3", "4", "5", "6", "7"]));
     }
+}
+
+const CLAUDE_MD: &str = "# Mine\n@RTK.md\n\n## Style\nbe terse\n\n## Tests\nrun them\n";
+
+#[test]
+fn instruction_items_carry_kind_and_count_in_status() {
+    let f = Fx::new();
+    fs::write(f.claude.join("CLAUDE.md"), CLAUDE_MD).unwrap();
+    let (_, doc) = f.json(&["items", "--json"]);
+    let list = doc["items"].as_array().unwrap();
+    assert!(list.iter().all(|i| i["kind"].is_string()));
+    let style = list
+        .iter()
+        .find(|i| i["native_id"] == "CLAUDE.md#style")
+        .unwrap();
+    assert_eq!(style["kind"], "instruction");
+    assert_eq!(style["scope"], json!({ "type": "global" }));
+    assert_eq!(style["body"], "be terse");
+    assert_eq!(style["description"], "Style");
+    assert!(style["category"].is_null());
+
+    let (_, status) = f.json(&["status", "--json"]);
+    assert_eq!(status["agents"][0]["originals"], 3);
+
+    let out = text(&run(&f.claude, &f.codex, &f.state, &["items"]));
+    assert!(out.contains("claude  instruction  global  style"), "{out}");
+
+    f.json(&["sync", "--apply", "--json"]);
+    let (_, doc) = f.json(&["items", "--json"]);
+    let replica = doc["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["agent"] == "codex" && i["kind"] == "instruction")
+        .unwrap();
+    assert_eq!(replica["replica_of"]["origin"], "claude");
+}
+
+#[test]
+fn edit_instruction_changes_body_only() {
+    let f = Fx::new();
+    fs::write(f.claude.join("CLAUDE.md"), CLAUDE_MD).unwrap();
+    let (code, doc) = edit(
+        &f,
+        "claude",
+        "CLAUDE.md#style",
+        r#"{ "name": "style", "description": "Style", "category": "user", "body": "be brief" }"#,
+    );
+    assert_eq!(code, Some(0), "{doc}");
+    assert_eq!(
+        fs::read_to_string(f.claude.join("CLAUDE.md")).unwrap(),
+        CLAUDE_MD.replace("be terse", "be brief")
+    );
+    let (_, items) = f.json(&["items", "--json"]);
+    let style = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["native_id"] == "CLAUDE.md#style")
+        .unwrap();
+    assert_eq!(doc["hash"], style["hash"]);
+}
+
+#[test]
+fn edit_instruction_heading_is_invalid_and_writes_nothing() {
+    let f = Fx::new();
+    fs::write(f.claude.join("CLAUDE.md"), CLAUDE_MD).unwrap();
+    for changed in [
+        r#"{ "name": "other", "description": "Style", "category": null, "body": "x" }"#,
+        r#"{ "name": "style", "description": "Other", "category": null, "body": "x" }"#,
+    ] {
+        let (code, doc) = edit(&f, "claude", "CLAUDE.md#style", changed);
+        assert_eq!(code, Some(1));
+        assert_eq!(doc["code"], "invalid");
+        assert!(doc["error"].as_str().unwrap().contains("heading"));
+    }
+    assert_eq!(
+        fs::read_to_string(f.claude.join("CLAUDE.md")).unwrap(),
+        CLAUDE_MD
+    );
+    assert!(!f.state.join("backups").exists());
 }

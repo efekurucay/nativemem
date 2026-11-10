@@ -84,7 +84,8 @@ fn format_utc(secs: u64) -> String {
     )
 }
 
-/// Copy `path` to `<state_dir>/backups/<stamp>/<agent>/<path relative to root>`.
+/// Copy `path` to `<state_dir>/backups/<stamp>/<agent>/<path relative to root>` unless the run
+/// already made that copy.
 pub fn backup(
     session: &BackupSession,
     state_dir: &Path,
@@ -106,6 +107,10 @@ pub fn backup(
         .join(session.stamp())
         .join(agent.as_str())
         .join(rel);
+    // The first copy of a run holds the state before any of its writes.
+    if dest.exists() {
+        return Ok(dest);
+    }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
     }

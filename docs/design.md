@@ -13,7 +13,7 @@ skills, chat sessions) across many agents. This document covers the first releas
 ## First release scope
 
 - Agents: Claude Code and Codex CLI.
-- Resource kind: learned memory items.
+- Resource kinds: learned memory items and global instruction sections.
 - Behaviour: faithful replication. Adds, edits and deletes propagate in both directions.
   Text is never rewritten and scope (which project an item belongs to) is preserved.
 - Deterministic. No LLM calls.
@@ -47,7 +47,7 @@ resource kind later means adding an adapter or a `Kind` variant; the engine does
 ```rust
 pub struct AgentId(pub String);              // "claude", "codex"
 pub enum Scope { Global, Project(PathBuf) }  // Project = absolute working directory
-pub enum Kind { Memory }                     // more kinds later
+pub enum Kind { Memory, Instruction }        // more kinds later
 
 pub struct Item {
     pub kind: Kind,
@@ -206,3 +206,32 @@ Tasks 2 and 3 are independent and touch different files.
 ## Left to the builder
 
 Error type design, module-internal structure, slug function details, output formatting.
+
+## Instruction sections (global scope)
+
+`Kind::Instruction`. One item is one top-level section of a global instruction file: the text from a
+`## ` heading through the line before the next `## ` heading. Files: Claude `<claude_home>/CLAUDE.md`,
+Codex `<codex_home>/AGENTS.md`. Scope is always `Global`; project-level instruction files live inside
+repositories and are never read or written.
+
+- Parsing: split at lines starting with `## ` that are outside fenced code blocks (``` or ~~~).
+  Everything before the first section (title, `@imports`, intro) is preamble: never an item, never
+  modified. `description` = heading text, `name` = `slugify(heading)`, `body` = text after the heading
+  line with leading and trailing blank lines trimmed, `category` = None. `native_id` =
+  `<file name>#<name>`, with `-2`, `-3` for duplicate headings.
+- Managed regions are excluded from original detection: the instruction region below and the Codex
+  routing block (`<!-- nativemem:begin -->` .. `<!-- nativemem:end -->`).
+- Replicas live in one region at the end of the file, between `<!-- nativemem:instructions:begin -->`
+  and `<!-- nativemem:instructions:end -->`. Each replica is a marker line
+  `<!-- nativemem origin=<agent> id=<encoded native_id> -->` (same encoding as memory markers), then
+  `## <heading>`, a blank line and the body. Replicas are sorted by (origin, native_id). The region is
+  created with the first replica and removed with the last; the blank line the tool adds before it goes
+  with it. Bytes outside the region are never changed by replica writes.
+- `write_original` on an instruction section rewrites its body in place and keeps the heading line;
+  everything else in the file stays byte-for-byte. `remove` deletes the section. Both back up the file
+  first. Both adapters support this for instruction originals; Codex-generated memory originals stay
+  unsupported.
+- The heading is part of identity. Editing a heading by hand is a delete plus an add. The CLI `edit`
+  command changes the body only for instruction items and answers code `invalid` when the submitted
+  `name` or `description` differs from the current ones.
+- The `items --json` contract gains a `"kind"` field (`"memory"` or `"instruction"`) on every entry.

@@ -7,6 +7,9 @@ use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 use crate::slug::slugify;
 
+use super::sections::InstructionFile;
+
+const INSTRUCTION_FILE: &str = "CLAUDE.md";
 const INDEX_FILE: &str = "MEMORY.md";
 const ORIGIN_KEY: &str = "nativemem_origin";
 const NEW_INDEX: &str = "# Memory Index\n\n";
@@ -16,6 +19,7 @@ pub struct ClaudeAdapter {
     state_dir: PathBuf,
     backups: BackupSession,
     fs_root: Option<PathBuf>,
+    instructions: InstructionFile,
 }
 
 /// Directory listings allowed per project name before the name is treated as unresolved.
@@ -36,6 +40,13 @@ struct Doc {
 impl ClaudeAdapter {
     pub fn new(claude_home: PathBuf, state_dir: PathBuf, backups: BackupSession) -> Self {
         ClaudeAdapter {
+            instructions: InstructionFile::new(
+                AgentId::new("claude"),
+                claude_home.clone(),
+                state_dir.clone(),
+                backups.clone(),
+                INSTRUCTION_FILE,
+            ),
             claude_home,
             state_dir,
             backups,
@@ -126,6 +137,7 @@ impl ClaudeAdapter {
                 });
             }
         }
+        scan.items.extend(self.instructions.scan()?);
         Ok(scan)
     }
 
@@ -286,6 +298,9 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
+        if item.kind == Kind::Instruction {
+            return self.instructions.write_replica(key, item);
+        }
         let Scope::Project(cwd) = &item.scope else {
             return Err(Error::unsupported("claude", "write_replica global scope"));
         };
@@ -341,6 +356,9 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+        if self.instructions.owns(native_id) {
+            return self.instructions.write_original(native_id, item);
+        }
         let (dir, file) = self.split_native_id(native_id)?;
         let mem = self.projects_dir().join(dir).join("memory");
         let path = mem.join(file);
@@ -358,6 +376,9 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
+        if self.instructions.owns(native_id) {
+            return self.instructions.remove(native_id);
+        }
         let (dir, file) = self.split_native_id(native_id)?;
         let mem = self.projects_dir().join(dir).join("memory");
         fsx::remove_with_backup(
@@ -1242,5 +1263,94 @@ mod tests {
         );
         let scanned = f.adapter.scan().unwrap();
         assert!(scanned.iter().all(|o| o.item.category.is_none()));
+    }
+
+    fn instruction(heading: &str, body: &str) -> Item {
+        Item {
+            kind: Kind::Instruction,
+            scope: Scope::Global,
+            name: slugify(heading),
+            description: heading.into(),
+            category: None,
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn missing_claude_md_means_no_instruction_items() {
+        let f = fx();
+        assert!(f.adapter.scan().unwrap().is_empty());
+    }
+
+    #[test]
+    fn instruction_originals_and_replicas_are_scanned() {
+        let f = fx();
+        let text = "# T\n\n## Mine\nmy body\n\n<!-- nativemem:instructions:begin -->\n<!-- nativemem origin=codex id=AGENTS.md%23theirs -->\n## Theirs\n\nbody\n<!-- nativemem:instructions:end -->\n";
+        fs::write(f.root.join("CLAUDE.md"), text).unwrap();
+        let items = f.adapter.scan().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].native_id, "CLAUDE.md#mine");
+        assert_eq!(items[0].item.kind, Kind::Instruction);
+        assert_eq!(items[0].item.scope, Scope::Global);
+        assert_eq!(items[0].item.body, "my body");
+        assert!(items[0].replica_of.is_none());
+        assert_eq!(items[1].native_id, "CLAUDE.md#codex:AGENTS.md#theirs");
+        assert_eq!(items[1].replica_of, Some(key("codex", "AGENTS.md#theirs")));
+        assert_eq!(items[1].item.name, "theirs");
+    }
+
+    #[test]
+    fn instruction_replica_creates_claude_md_with_only_the_region() {
+        let f = fx();
+        let (id, path) = f
+            .adapter
+            .write_replica(&key("codex", "AGENTS.md#a"), &instruction("A", "body"))
+            .unwrap();
+        assert_eq!(id, "CLAUDE.md#codex:AGENTS.md#a");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("<!-- nativemem:instructions:begin -->\n"));
+        assert!(text.ends_with("<!-- nativemem:instructions:end -->\n"));
+        assert!(!f.state.join("backups").exists());
+        f.adapter.remove(&id).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        assert!(f.state.join("backups/T/claude/CLAUDE.md").is_file());
+    }
+
+    #[test]
+    fn instruction_write_original_and_remove_keep_other_bytes() {
+        let f = fx();
+        let text = "# T\n@RTK.md\n\n## A\nold\n\n## B\nkeep\n";
+        fs::write(f.root.join("CLAUDE.md"), text).unwrap();
+        f.adapter
+            .write_original("CLAUDE.md#a", &instruction("A", "new"))
+            .unwrap();
+        let after = fs::read_to_string(f.root.join("CLAUDE.md")).unwrap();
+        assert_eq!(after, text.replace("old", "new"));
+        assert_eq!(
+            fs::read_to_string(f.state.join("backups/T/claude/CLAUDE.md")).unwrap(),
+            text
+        );
+        f.adapter.remove("CLAUDE.md#a").unwrap();
+        assert_eq!(
+            fs::read_to_string(f.root.join("CLAUDE.md")).unwrap(),
+            "# T\n@RTK.md\n\n## B\nkeep\n"
+        );
+        assert!(f.adapter.remove("CLAUDE.md#a").is_err());
+    }
+
+    #[test]
+    fn instruction_items_are_global_only() {
+        let f = fx();
+        let mut it = instruction("A", "b");
+        it.scope = Scope::Project(PathBuf::from("/w"));
+        assert!(matches!(
+            f.adapter.write_replica(&key("codex", "AGENTS.md#a"), &it),
+            Err(Error::Unsupported { .. })
+        ));
+        fs::write(f.root.join("CLAUDE.md"), "## A\nb\n").unwrap();
+        assert!(matches!(
+            f.adapter.write_original("CLAUDE.md#a", &it),
+            Err(Error::Unsupported { .. })
+        ));
     }
 }

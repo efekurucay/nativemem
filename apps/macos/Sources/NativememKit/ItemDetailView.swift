@@ -62,7 +62,9 @@ struct ItemDetailView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         Text(item.primary.name).font(.title2.bold())
-                        if let category = item.primary.category {
+                        if item.primary.isInstruction {
+                            InstructionTag()
+                        } else if let category = item.primary.category {
                             CategoryTag(category: category)
                         }
                     }
@@ -98,23 +100,31 @@ struct ItemDetailView: View {
                     TextField("Name", text: nameBinding)
                         .labelsHidden()
                         .textFieldStyle(.roundedBorder)
+                        .disabled(isInstruction)
                 }
                 field("Description") {
                     TextField("Description", text: descriptionBinding, axis: .vertical)
                         .labelsHidden()
                         .lineLimit(1...4)
                         .textFieldStyle(.roundedBorder)
+                        .disabled(isInstruction)
                 }
-                field("Category") {
-                    Picker("Category", selection: categoryBinding) {
-                        Text("None").tag(String?.none)
-                        ForEach(categoryOptions, id: \.self) { category in
-                            Text(category.capitalized).tag(String?.some(category))
+                if isInstruction {
+                    Text("Edit the heading in the file itself")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    field("Category") {
+                        Picker("Category", selection: categoryBinding) {
+                            Text("None").tag(String?.none)
+                            ForEach(categoryOptions, id: \.self) { category in
+                                Text(category.capitalized).tag(String?.some(category))
+                            }
                         }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
@@ -155,6 +165,8 @@ struct ItemDetailView: View {
             content()
         }
     }
+
+    private var isInstruction: Bool { item.primary.isInstruction }
 
     private var categoryOptions: [String] {
         let standard = ["user", "feedback", "project", "reference"]

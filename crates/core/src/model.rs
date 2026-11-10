@@ -33,18 +33,21 @@ pub enum Scope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Kind {
     Memory,
+    Instruction,
 }
 
 impl Kind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Kind::Memory => "memory",
+            Kind::Instruction => "instruction",
         }
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
         match s {
             "memory" => Some(Kind::Memory),
+            "instruction" => Some(Kind::Instruction),
             _ => None,
         }
     }
@@ -125,6 +128,14 @@ mod tests {
             category: Some("user".into()),
             body: "line1\nline2".into(),
         }
+    }
+
+    #[test]
+    fn kind_text_round_trips() {
+        for k in [Kind::Memory, Kind::Instruction] {
+            assert_eq!(Kind::parse(k.as_str()), Some(k));
+        }
+        assert_eq!(Kind::parse("other"), None);
     }
 
     #[test]

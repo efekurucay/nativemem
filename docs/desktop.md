@@ -116,13 +116,13 @@ exit and `{"error": "<message>", "code": "<snake_case code>"}` on stdout. Exit c
 `nativemem items --json`
 ```json
 { "items": [
-    { "agent": "claude", "native_id": "-Users-x-app/feedback_tests.md",
+    { "agent": "claude", "native_id": "-Users-x-app/feedback_tests.md", "kind": "memory",
       "path": "/Users/x/.claude/projects/-Users-x-app/memory/feedback_tests.md",
       "scope": { "type": "project", "path": "/Users/x/app" },
       "name": "feedback-tests", "description": "Run the fast suite first",
       "category": "feedback", "body": "…markdown…",
       "replica_of": null, "hash": "ab12…" },
-    { "agent": "codex", "native_id": "app-1a2b3c4d/feedback-tests.md",
+    { "agent": "codex", "native_id": "app-1a2b3c4d/feedback-tests.md", "kind": "memory",
       "path": "/Users/x/.codex/memories/extensions/nativemem/resources/app-1a2b3c4d/feedback-tests.md",
       "scope": { "type": "project", "path": "/Users/x/app" },
       "name": "feedback-tests", "description": "Run the fast suite first",
@@ -130,6 +130,9 @@ exit and `{"error": "<message>", "code": "<snake_case code>"}` on stdout. Exit c
       "replica_of": { "origin": "claude", "native_id": "-Users-x-app/feedback_tests.md" },
       "hash": "ab12…" } ] }
 ```
+`kind` is `memory` or `instruction`. An instruction item is one `## ` section of a global
+instruction file (`CLAUDE.md`, `AGENTS.md`): `native_id` is `<file>#<slug>`, `scope` is global,
+`description` is the heading text and `category` is `null`.
 `scope` is `{ "type": "global" }` for global items. `category` may be `null`.
 
 `nativemem sync --json` (preview) and `nativemem sync --apply --json`
@@ -166,7 +169,8 @@ document on stdin:
 ```
 Rewrites that original entry in place (with backup). It does not sync; the next sync carries
 the change to the copies. Editing an entry the agent regenerates itself fails with code
-`unsupported`.
+`unsupported`. For an instruction item only `body` changes; if `name` or `description` differs
+from the current values the command writes nothing and fails with code `invalid`.
 
 ## App structure
 

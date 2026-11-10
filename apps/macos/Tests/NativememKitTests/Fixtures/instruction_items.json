@@ -1,0 +1,14 @@
+{ "items": [
+    { "agent": "claude", "native_id": "CLAUDE.md#style", "kind": "instruction",
+      "path": "/Users/x/.claude/CLAUDE.md",
+      "scope": { "type": "global" },
+      "name": "style", "description": "Style",
+      "category": null, "body": "Be terse",
+      "replica_of": null, "hash": "ef56" },
+    { "agent": "codex", "native_id": "AGENTS.md#claude:CLAUDE.md#style", "kind": "instruction",
+      "path": "/Users/x/.codex/AGENTS.md",
+      "scope": { "type": "global" },
+      "name": "style", "description": "Style",
+      "category": null, "body": "Be terse",
+      "replica_of": { "origin": "claude", "native_id": "CLAUDE.md#style" },
+      "hash": "ef56" } ] }

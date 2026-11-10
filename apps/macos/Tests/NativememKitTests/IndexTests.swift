@@ -13,6 +13,24 @@ import Testing
         #expect(folded.primary.agent == "claude")
     }
 
+    @Test func instructionItemsLiveUnderGlobalAndFoldCopies() throws {
+        let entries = try decodeContract(ItemsDocument.self, from: fixture("instruction_items")).items
+        let index = MemoryIndex(entries: entries)
+        #expect(index.items.count == 1)
+        #expect(index.items[0].primary.isInstruction)
+        #expect(index.items[0].copies.map(\.agent) == ["codex"])
+        #expect(index.items(in: .global).count == 1)
+        #expect(index.projects.map(\.key.title) == ["Global"])
+        #expect(index.items.contains { $0.project.path == nil })
+    }
+
+    @Test func instructionEditDraftKeepsHeadingFields() throws {
+        let entries = try decodeContract(ItemsDocument.self, from: fixture("instruction_items")).items
+        let item = try #require(MemoryIndex(entries: entries).items.first)
+        let document = EditDraft(item: item).document
+        #expect(document == EditDocument(name: "style", description: "Style", category: nil, body: "Be terse"))
+    }
+
     @Test func orphanCopyStandsAlone() throws {
         let entries = try fixtureItems().filter { $0.agent != "claude" || $0.scope.type == "global" }
         let index = MemoryIndex(entries: entries)
