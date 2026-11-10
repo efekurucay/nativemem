@@ -284,6 +284,7 @@ impl Runner {
 }
 
 /// Completes when this process receives SIGTERM or SIGINT; pending forever when they cannot be watched.
+#[cfg(unix)]
 async fn interrupted() {
     use tokio::signal::unix::{signal, SignalKind};
     let (Ok(mut term), Ok(mut int)) = (
@@ -295,6 +296,14 @@ async fn interrupted() {
     tokio::select! {
         _ = term.recv() => {}
         _ = int.recv() => {}
+    }
+}
+
+/// Completes on Ctrl-C; pending forever when it cannot be watched.
+#[cfg(not(unix))]
+async fn interrupted() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
     }
 }
 
