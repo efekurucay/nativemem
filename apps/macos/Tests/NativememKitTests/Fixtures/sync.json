@@ -1,0 +1,7 @@
+{ "applied": false,
+  "actions": [
+    { "op": "add", "agent": "codex", "name": "feedback-tests",
+      "scope": { "type": "project", "path": "/Users/x/app" },
+      "origin": { "origin": "claude", "native_id": "-Users-x-app/feedback_tests.md" } } ],
+  "notes": [ { "kind": "conflict", "message": "both changed" } ],
+  "summary": { "add": 1, "update": 0, "remove": 0, "conflicts": 1, "skipped": 0 } }

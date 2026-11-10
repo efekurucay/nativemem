@@ -1,0 +1,5 @@
+{ "agents": [
+    { "id": "claude", "originals": 399, "replicas": 0,
+      "skipped": [ { "label": "-Users-x-old", "reason": "no cwd in jsonl ..." } ] },
+    { "id": "codex", "originals": 0, "replicas": 399, "skipped": [] } ],
+  "ledger_items": 399 }
