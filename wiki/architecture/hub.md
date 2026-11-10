@@ -265,7 +265,8 @@ args = []                      # extra harness flags, placed before the prompt
 - A run starts in `cwd` (an absolute path of an existing directory; the hub process's directory when
   omitted) in its own process group. At most 4 runs go at once per hub process; the others wait for a slot,
   and the wait does not count against the timeout. At `timeout_secs` the whole process group is killed
-  (`GroupGuard` in `crates/hub/src/runner.rs`; so it is when the call is cancelled).
+  (`GroupGuard` in `crates/hub/src/runner.rs`; so it is when the call is cancelled, and when
+  `nativemem subagent run` receives SIGTERM or SIGINT).
 - A subagent cannot start subagents. The child gets `NATIVEMEM_SUBAGENT_DEPTH` = the parent's value plus one
   (0 when unset); a run whose level would reach 2 is refused with an error result and nothing is started.
   The hub that a subagent's own agent starts therefore lists the tools and refuses to run them. A value that
@@ -304,6 +305,23 @@ The "MCP & Integrations" screen of the app runs these commands with `--json` and
   dictionary keys.
 
 Tests: `McpContractTests`, `McpStateTests`, `McpDraftTests` in `apps/macos/Tests/NativememKitTests/`.
+
+The "Subagents" screen runs `nativemem subagent ... --json` and holds no subagent logic
+(`apps/macos/Sources/NativememKit/SubagentModel.swift`; screen described in `docs/desktop.md`).
+
+- Create and Save send the stdin JSON of `subagent add` / `subagent edit <name>`; `exists`, `not_installed`
+  and `invalid` are shown inline in the sheet. The harness menu lists the agents that `status` reports.
+  The sheet takes the timeout in minutes and sends `timeout_secs` (`SubagentDraft.timeoutSecs`).
+- "Try it" runs `subagent run <name> --prompt-file - [--cwd=<folder>] --json` with the prompt on stdin
+  (`NativememCLI.subagentTry`). A failed run is a result with `ok` false (exit code 2), not an error.
+  Cancel cancels the waiting task, which terminates the CLI process (`RunningProcess` in
+  `NativememCLI.swift`); the CLI then ends the harness's process group (`Runner::run_blocking` watches
+  SIGTERM and SIGINT; test `terminating_a_run_ends_the_harness_too`). Leaving the subagent cancels a run
+  in progress.
+
+Tests: `SubagentContractTests`, `SubagentDraftTests`, `SubagentTrialTests` (a script stands in for the
+`nativemem` binary; no agent is started). Fixtures are the real CLI output over temp roots with fake
+harness scripts.
 
 ## Import
 
@@ -359,6 +377,9 @@ Tests: `crates/hub/tests/import.rs`, `import_previews_then_applies_from_the_four
 - `docs/desktop.md`
 - `apps/macos/Sources/NativememKit/McpModel.swift`
 - `apps/macos/Sources/NativememKit/McpContract.swift`
+- `apps/macos/Sources/NativememKit/SubagentModel.swift`
+- `apps/macos/Sources/NativememKit/SubagentContract.swift`
+- `apps/macos/Sources/NativememKit/NativememCLI.swift`
 
 ## Rules
 
@@ -382,6 +403,7 @@ Tests: `crates/hub/tests/import.rs`, `import_previews_then_applies_from_the_four
 - [ ] `crates/hub/tests/oauth.rs` and `crates/hub/tests/register.rs` pass without network or real agent homes
 - [ ] `crates/hub/tests/subagents.rs` and `crates/cli/tests/subagent.rs` pass without a real agent binary
 - [ ] No test or fixture contains a real token
+- [ ] The `subagent` fixtures in `apps/macos/Tests/NativememKitTests/Fixtures/` come from the real CLI over temp roots and fake scripts
 
 ## Related docs
 

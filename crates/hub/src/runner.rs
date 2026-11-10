@@ -262,7 +262,8 @@ impl Runner {
         }
     }
 
-    /// `run` for callers without an async runtime.
+    /// `run` for callers without an async runtime. SIGTERM or SIGINT ends the run and the
+    /// harness's process group, so a caller that stops the process leaves nothing running.
     pub fn run_blocking(
         &self,
         spec: &SubagentSpec,
@@ -273,7 +274,27 @@ impl Runner {
             .enable_all()
             .build()
             .map_err(|e| HubError::Invalid(format!("cannot start the async runtime: {e}")))?;
-        Ok(runtime.block_on(self.run(spec, prompt, cwd)))
+        Ok(runtime.block_on(async {
+            tokio::select! {
+                report = self.run(spec, prompt, cwd) => report,
+                () = interrupted() => RunReport::failed("the run was cancelled", None, Instant::now()),
+            }
+        }))
+    }
+}
+
+/// Completes when this process receives SIGTERM or SIGINT; pending forever when they cannot be watched.
+async fn interrupted() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (Ok(mut term), Ok(mut int)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
     }
 }
 

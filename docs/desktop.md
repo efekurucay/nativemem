@@ -17,6 +17,8 @@ command and shows the result. The app holds no logic of its own about agents or 
 6. Press Sync: see the plan in plain words, then apply it.
 7. See the MCP servers the hub holds, test them, sign in to the ones that need it, add, edit,
    remove and import servers, and choose which agents use the hub.
+8. Define subagents (a coding agent with a model of the user's choice that every agent using the hub
+   can call as a tool) and try one with a prompt.
 
 ## Look and feel
 
@@ -54,6 +56,7 @@ hand-drawn borders, dividers or backgrounds.
   not under "Global" or a project.
 - An "MCP & Integrations" row below that, always shown, with a badge counting the servers that need
   sign-in or are in error.
+- A "Subagents" row below that, always shown, with a badge counting the defined subagents.
 
 **Item list** (a folder is selected)
 - Items of that folder and everything below it. When they come from more than one project, the
@@ -128,6 +131,33 @@ hand-drawn borders, dividers or backgrounds.
   secrets will be kept in the keychain, the servers already in the hub, the conflicts (not
   imported), the skipped entries with their reason and the warnings. "Apply" (disabled when nothing is
   new) runs `mcp import --apply --json`, shows what was imported and reloads the screen.
+
+**Subagents** ("Subagents" row selected)
+- Everything on this screen runs `nativemem subagent ... --json`; the app holds no subagent logic. The
+  toolbar carries "New subagent…". Without subagents the screen says "No subagents yet" and what a
+  subagent is.
+- List (left): one row each with the name and, in secondary text, the agent that runs it ("Claude Code",
+  "Codex", "OpenCode", "Pi") and the model.
+- Detail (right): the name, the description, the buttons "Edit…" and "Remove…", then a box with the
+  agent, the model, the timeout ("15 minutes"), the extra arguments (one per line, when there are any)
+  and the instructions in a monospaced font (when set). "Remove…" asks first: "Your agents can no
+  longer call it as a tool."
+- Box "Try it": a prompt editor, an optional "Working folder" ("Not set" until one is chosen with
+  "Choose…", an `NSOpenPanel` for a directory; "Clear" removes it) and "Run" (disabled while the prompt is
+  empty). Run starts `subagent run <name> --prompt-file - [--cwd=<folder>] --json` with the prompt on
+  stdin. While it runs the box shows a spinner and "Cancel"; Cancel terminates the command, and the
+  command ends the harness it started. Leaving the subagent (or the screen) cancels a run in progress.
+  The result is the answer, selectable and rendered like a memory body, with "Done in 8.4 s."; or, when
+  the run failed, the error text (the harness's exit code and the end of its stderr, a timeout, a missing
+  executable) with "Stopped after 8.4 s."; or "Cancelled.". Nothing of a run is saved.
+- "New subagent…" and "Edit…" open one sheet: name (fixed when editing), agent (a menu of the agents
+  that `status` lists; an edited subagent keeps its own agent in the menu), model (monospaced text
+  field, in the agent's own syntax), description, instructions (monospaced editor, optional), timeout in
+  minutes (a fraction is allowed; 15 by default) and extra arguments (one per line, optional). Create /
+  Save runs `subagent add` / `subagent edit <name>` with the JSON document on stdin; the button stays
+  disabled until name, agent, model, description and a positive timeout are filled. A CLI error
+  (`exists`, `not_installed`, `invalid`) is shown inline and nothing is closed. Footer: "Every agent that
+  uses the hub can call it as a tool."
 
 **Detail column** (an item is selected)
 - Name as title, description below, category tag.
@@ -518,6 +548,8 @@ On failure `ok` is false, `text` is empty and `error` says why: the harness's ex
 of its stderr, a timeout, a missing executable, or the nesting limit. `exit_code` is the harness's exit
 code, null when it was killed. The exit code of the command is 2 when `ok` is false. `text` is cut at 50 KB
 with a note. A run started from inside a subagent (`NATIVEMEM_SUBAGENT_DEPTH` is 1 or more) is refused.
+`SIGTERM` or `SIGINT` sent to `subagent run` ends the harness and everything it started; the command
+then prints a result with `ok` false and `error` "the run was cancelled" (exit code 2).
 `add`, `edit` and `remove` take the state lock; `list` and `run` do not.
 
 ## App structure
@@ -541,11 +573,18 @@ Swift package at `apps/macos` (SwiftUI app, macOS 14+, Swift 6, no third-party d
   `McpImportSession` (preview then apply). The `mcp` documents are decoded by `decodeMcp`
   (`McpContract.swift`), not `decodeContract`: environment variable and header names are dictionary
   keys, and the snake-case key strategy would rewrite them.
+- `SubagentModel` (the Subagents screen: the definitions, remove, save through `subagent add` / `subagent edit`),
+  `SubagentTrial` (the "Try it" box of one subagent: prompt, folder, the running command and its result,
+  Cancel), `SubagentDraft` (what the New subagent and Edit sheet collects: validation, the minutes typed
+  turned into `timeout_secs`, the document for the CLI). `NativememCLI` ends the command it runs when the
+  task that waits for it is cancelled (`CancellationError`).
 - Views: `SidebarView`, `ItemListView`, `ItemDetailView`, `SessionDetailView`, `OverviewView`, `SyncSheet`,
-  `NewEntrySheet`, `McpView` (agents box, server list, server detail), `McpServerSheet`, `McpImportSheet`.
+  `NewEntrySheet`, `McpView` (agents box, server list, server detail), `McpServerSheet`, `McpImportSheet`,
+  `SubagentView` (list, detail, Try it), `SubagentSheet`.
 - `scripts/bundle.sh`: builds release and assembles `build/nativemem.app` (Info.plist, the
   executable, and the `nativemem` CLI binary copied next to it when
   `../../target/release/nativemem` exists).
 - Tests: decoding of each contract document from fixture JSON (one file per shape, the `mcp`
-  documents included); grouping and folding logic; the New entry draft; the server state, the badge
-  count and the server draft.
+  documents included, and the `subagent` documents, run results and errors); grouping and folding logic;
+  the New entry draft; the server state, the badge count and the server draft; the subagent draft; the
+  Try it box against a script that stands in for the `nativemem` binary.

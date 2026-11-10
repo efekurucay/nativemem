@@ -67,7 +67,7 @@ sidebar groups memory by project folder and lists skills on their own row, and t
 shows an item (a skill's `SKILL.md`, read-only), which agents hold it and where it came from. A
 project folder also lists its chat sessions, newest first, with the transcript shown read-only. It can
 preview and apply a sync, create a memory entry or a global instruction section in any agent,
-delete an item, and shows what `doctor` reports. The "MCP & Integrations" row manages the MCP hub: its servers, sign-in, import, and which agents use it. The app runs the embedded `nativemem` CLI for every action and holds no sync
+delete an item, and shows what `doctor` reports. The "MCP & Integrations" row manages the MCP hub: its servers, sign-in, import, and which agents use it. The "Subagents" row defines subagents and tries one with a prompt. The app runs the embedded `nativemem` CLI for every action and holds no sync
 logic of its own. See [docs/desktop.md](docs/desktop.md).
 
 Build it with `apps/macos/scripts/bundle.sh` (output: `apps/macos/build/nativemem.app`). The app

@@ -84,6 +84,8 @@ public struct ContentView: View {
             OverviewView(model: model)
         case .mcp:
             McpView(model: model.mcp)
+        case .subagents:
+            SubagentView(model: model.subagents, installedAgents: model.installedAgents)
         case .global, .skills, .folder, .folderOnly:
             HSplitView {
                 ItemListView(model: model)

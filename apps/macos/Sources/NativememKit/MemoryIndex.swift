@@ -127,7 +127,7 @@ public struct MemoryIndex: Sendable {
 
     static func contains(_ path: String?, in selection: SidebarSelection) -> Bool {
         switch selection {
-        case .overview, .skills, .mcp: false
+        case .overview, .skills, .mcp, .subagents: false
         case .global: path == nil
         case .folderOnly(let root): path == root
         case .folder(let root):

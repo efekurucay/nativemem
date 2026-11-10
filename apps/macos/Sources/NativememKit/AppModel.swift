@@ -6,6 +6,7 @@ public enum SidebarSelection: Hashable, Sendable {
     case global
     case skills
     case mcp
+    case subagents
     case folder(path: String)
     case folderOnly(path: String)
 }
@@ -50,9 +51,13 @@ public final class AppModel {
     public private(set) var doctor: DoctorDocument?
     public private(set) var isLoading = false
     public private(set) var cli: NativememCLI? {
-        didSet { mcp.cli = cli }
+        didSet {
+            mcp.cli = cli
+            subagents.cli = cli
+        }
     }
     public let mcp = McpModel()
+    public let subagents = SubagentModel()
     public var errorMessage: String?
 
     public var sidebar: SidebarSelection? = .overview
@@ -73,6 +78,7 @@ public final class AppModel {
     public init() {
         cli = NativememCLI.locateOnThisMachine().map(NativememCLI.init(binary:))
         mcp.cli = cli
+        subagents.cli = cli
     }
 
     public var isFiltering: Bool {
@@ -168,6 +174,7 @@ public final class AppModel {
             errorMessage = error.localizedDescription
         }
         await mcp.reload()
+        await subagents.reload()
     }
 
     public func delete(_ item: LogicalItem) async {

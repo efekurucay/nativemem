@@ -294,6 +294,60 @@ fn run_prints_the_answer_or_the_failure() {
 }
 
 #[test]
+fn terminating_a_run_ends_the_harness_too() {
+    let fx = Fx::new();
+    let pid_file = fx.root.join("harness.pid");
+    fx.harness(
+        "pi",
+        &format!("echo $$ > {}\n/bin/sleep 60\n", pid_file.display()),
+    );
+    fx.json(&["add", "--json"], &spec("slow", "pi"));
+
+    let mut child = fx
+        .command(&["run", "slow", "--prompt-file", "-", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"go").unwrap();
+    let harness_pid = loop {
+        if let Some(pid) = fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let alive = |pid: u32| {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(alive(harness_pid));
+    Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["error"], "the run was cancelled");
+    for _ in 0..100 {
+        if !alive(harness_pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the harness is still running");
+}
+
+#[test]
 fn writing_commands_are_refused_while_the_state_lock_is_held() {
     let fx = Fx::new();
     fx.harness("pi", "echo ok\n");

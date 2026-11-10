@@ -100,6 +100,9 @@ nativemem-sync/
 │   │   ├── McpContract.swift, McpCLI.swift  Codable types of the `mcp` documents, server state and badge count; the `mcp` commands
 │   │   ├── McpModel.swift, McpDraft.swift  the MCP & Integrations screen state and import flow; the Add server / Edit draft
 │   │   ├── McpView.swift, McpServerSheet.swift, McpImportSheet.swift  agents box, server list and detail; the Add / Edit sheet; the import sheet
+│   │   ├── SubagentContract.swift, SubagentCLI.swift  Codable types of the `subagent` documents and run results; the `subagent` commands
+│   │   ├── SubagentModel.swift, SubagentDraft.swift  the Subagents screen state and its Try it run; the New subagent / Edit draft
+│   │   ├── SubagentView.swift, SubagentSheet.swift  list, detail and Try it box; the New / Edit sheet
 │   │   ├── NativememCLI.swift    finds and runs the binary, decodes JSON
 │   │   ├── Contract.swift        Codable types mirroring the CLI JSON contract
 │   │   ├── AppModel.swift        observable state, grouping, copy folding

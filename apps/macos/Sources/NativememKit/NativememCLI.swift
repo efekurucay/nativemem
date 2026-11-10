@@ -151,32 +151,69 @@ public struct NativememCLI: Sendable {
         }
     }
 
+    /// Cancelling the calling task terminates the process; the call then throws `CancellationError`.
     private func execute(_ arguments: [String], stdin: Data?) async throws -> (Data, Int32) {
         let binary = binary
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = binary
-                process.arguments = arguments
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = FileHandle.nullDevice
-                let input = Pipe()
-                process.standardInput = stdin == nil ? FileHandle.nullDevice : input
-                do {
-                    try process.run()
-                    if let stdin {
-                        try? input.fileHandleForWriting.write(contentsOf: stdin)
-                        try? input.fileHandleForWriting.close()
+        let running = RunningProcess()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let process = Process()
+                    process.executableURL = binary
+                    process.arguments = arguments
+                    let pipe = Pipe()
+                    process.standardOutput = pipe
+                    process.standardError = FileHandle.nullDevice
+                    let input = Pipe()
+                    process.standardInput = stdin == nil ? FileHandle.nullDevice : input
+                    do {
+                        try running.start(process)
+                        if let stdin {
+                            try? input.fileHandleForWriting.write(contentsOf: stdin)
+                            try? input.fileHandleForWriting.close()
+                        }
+                        // Drain before waiting: output can exceed the pipe buffer.
+                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                        process.waitUntilExit()
+                        if running.wasCancelled {
+                            continuation.resume(throwing: CancellationError())
+                        } else {
+                            continuation.resume(returning: (data, process.terminationStatus))
+                        }
+                    } catch {
+                        continuation.resume(throwing: error)
                     }
-                    // Drain before waiting: output can exceed the pipe buffer.
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    process.waitUntilExit()
-                    continuation.resume(returning: (data, process.terminationStatus))
-                } catch {
-                    continuation.resume(throwing: error)
                 }
             }
+        } onCancel: {
+            running.cancel()
+        }
+    }
+}
+
+/// The process of one command, so the task that waits for it can end it.
+private final class RunningProcess: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancelled = false
+
+    var wasCancelled: Bool {
+        lock.withLock { cancelled }
+    }
+
+    /// Starts the process unless the task was cancelled before it got here.
+    func start(_ process: Process) throws {
+        try lock.withLock {
+            if cancelled { throw CancellationError() }
+            try process.run()
+            self.process = process
+        }
+    }
+
+    func cancel() {
+        lock.withLock {
+            cancelled = true
+            process?.terminate()
         }
     }
 }

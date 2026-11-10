@@ -1,0 +1,1 @@
+{"subagents":[{"name":"code-review","harness":"claude","model":"sonnet","description":"Reviews a diff for bugs","timeout_secs":900,"args":["--allowed-tools","Read"],"instructions":"Be terse."},{"name":"scout","harness":"pi","model":"anthropic/claude-haiku-4-5","description":"Finds code","timeout_secs":900,"args":[]}]}
