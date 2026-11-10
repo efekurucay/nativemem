@@ -270,6 +270,7 @@ fn codex_rollout_ledger_and_layout_drift_is_caught() {
     assert!(ledger_check.observed.contains("added keys: brand_new"));
 }
 
+#[cfg(unix)]
 fn fake_executable(dir: &Path, name: &str, install: &str) -> std::ffi::OsString {
     let target = dir.join(install);
     fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -280,6 +281,7 @@ fn fake_executable(dir: &Path, name: &str, install: &str) -> std::ffi::OsString 
     bin.into_os_string()
 }
 
+#[cfg(unix)]
 #[test]
 fn pi_probes_pass_on_the_fixtures_and_read_the_package_version() {
     let t = tempfile::tempdir().unwrap();
@@ -332,6 +334,7 @@ fn pi_header_entry_and_directory_drift_is_caught() {
     assert!(blocked.supports(Kind::Instruction, &Scope::Global));
 }
 
+#[cfg(unix)]
 #[test]
 fn opencode_probes_cover_the_config_dir_and_agents_file() {
     let t = tempfile::tempdir().unwrap();

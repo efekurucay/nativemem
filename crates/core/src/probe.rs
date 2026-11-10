@@ -150,6 +150,7 @@ mod tests {
         assert_eq!(got.len(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolves_symlinked_executables_without_running_them() {
         let t = tempfile::tempdir().unwrap();
