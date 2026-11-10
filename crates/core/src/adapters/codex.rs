@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,6 +15,7 @@ use super::codex_imports;
 use super::codex_probes;
 use super::codex_rollout;
 use super::codex_sessions::CodexSessions;
+use super::codex_threads;
 #[cfg(test)]
 use super::memory_store::{parse_replica, render};
 use super::memory_store::{read_opt, MemoryStore};
@@ -56,6 +58,8 @@ pub struct CodexAdapter {
     sessions: Option<CodexSessions>,
     claude_home: Option<PathBuf>,
     session_writes: bool,
+    /// Rollouts written in this run whose `threads` row `finish` refreshes.
+    written: RefCell<Vec<PathBuf>>,
     blocked: Vec<Kind>,
 }
 
@@ -141,7 +145,8 @@ impl CodexAdapter {
             backups,
             sessions: None,
             claude_home: None,
-            session_writes: true,
+            session_writes: false,
+            written: RefCell::new(Vec::new()),
             blocked: Vec::new(),
         }
     }
@@ -152,11 +157,15 @@ impl CodexAdapter {
         self
     }
 
-    /// Codex lists a thread only when its state database has a row for it, so session replicas
-    /// are written only while the caller can also maintain that row.
+    /// Whether session replicas are written into Codex; off unless the caller opts in. Codex lists a thread only when its
+    /// state database has a row for it; `finish` maintains that row.
     pub fn with_session_writes(mut self, enabled: bool) -> Self {
         self.session_writes = enabled;
         self
+    }
+
+    pub fn session_writes_enabled(&self) -> bool {
+        self.session_writes
     }
 
     /// Where Claude Code's transcripts live. Codex's importer ledger records the bytes of the
@@ -211,6 +220,7 @@ impl CodexAdapter {
                 codex_imports::upsert(&self.home, &self.state_dir, &self.backups, record)?;
             }
         }
+        self.written.borrow_mut().push(path.clone());
         let native_id = path
             .strip_prefix(&root)
             .unwrap_or(&path)
@@ -295,6 +305,26 @@ impl Adapter for CodexAdapter {
                 .ok()
                 .and_then(|t| t.lines().next().map(str::to_string))
                 .is_some_and(|first| !first.contains(codex_rollout::ORIGIN_KEY))
+    }
+
+    /// Writes the `threads` rows of the replica rollouts; a busy database is left for the next run.
+    fn finish(&self) -> Result<Vec<(String, String)>> {
+        let written = self.written.take();
+        if self.sessions.is_none() || !self.session_writes || self.blocked.contains(&Kind::Session)
+        {
+            return Ok(Vec::new());
+        }
+        let busy = codex_threads::sync_rows(
+            &self.home,
+            &self.state_dir,
+            &self.backups,
+            &written,
+            codex_threads::BUSY_TIMEOUT,
+        )?;
+        Ok(busy
+            .map(|reason| ("state database".to_string(), reason))
+            .into_iter()
+            .collect())
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {

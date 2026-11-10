@@ -187,31 +187,43 @@ impl CodexHome {
         path
     }
 
-    /// Writes `state_<number>.sqlite` with the `threads` table the adapter expects, plus the
-    /// `extra` column definitions (`name TYPE`) appended to it.
+    /// Writes `state_<number>.sqlite` with the structure of Codex's `threads` table (tables it
+    /// references, indexes and triggers, no rows), plus the `extra` column definitions
+    /// (`name TYPE [NOT NULL DEFAULT x]`) added to it.
     pub fn write_state_db(&self, number: u32, extra: &[&str]) {
-        use crate::adapters::codex_probes::THREADS_COLUMNS;
-        let mut columns: Vec<String> = THREADS_COLUMNS
-            .iter()
-            .map(|c| {
-                let parts: Vec<&str> = c.splitn(4, ':').collect();
-                let mut def = format!("{} {}", parts[0], parts[1]);
-                if parts[2] == "1" {
-                    def.push_str(" NOT NULL");
-                }
-                if !parts[3].is_empty() {
-                    def.push_str(&format!(" DEFAULT {}", parts[3]));
-                }
-                def
-            })
-            .collect();
-        columns.extend(extra.iter().map(|c| c.to_string()));
         fs::create_dir_all(&self.root).unwrap();
         let db = self.root.join(format!("state_{number}.sqlite"));
         let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch(include_str!("testkit_codex_state.sql"))
+            .unwrap();
+        for column in extra {
+            conn.execute(&format!("ALTER TABLE threads ADD COLUMN {column}"), [])
+                .unwrap();
+        }
+    }
+
+    /// The ids in the `threads` table of `state_<number>.sqlite`, sorted.
+    pub fn thread_ids(&self, number: u32) -> Vec<String> {
+        let conn =
+            rusqlite::Connection::open(self.root.join(format!("state_{number}.sqlite"))).unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM threads ORDER BY id").unwrap();
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        ids
+    }
+
+    /// Inserts a row for a thread Codex itself created.
+    pub fn insert_thread(&self, number: u32, id: &str, cwd: &Path) {
+        let conn =
+            rusqlite::Connection::open(self.root.join(format!("state_{number}.sqlite"))).unwrap();
         conn.execute(
-            &format!("CREATE TABLE threads ({})", columns.join(", ")),
-            [],
+            "INSERT INTO threads (id, rollout_path, created_at, updated_at, source, \
+             model_provider, cwd, title, sandbox_policy, approval_mode, preview) \
+             VALUES (?1, 'p', 1, 2, 'vscode', 'openai', ?2, 't', 'x', 'y', 'q')",
+            rusqlite::params![id, cwd.to_string_lossy()],
         )
         .unwrap();
     }

@@ -149,7 +149,7 @@ One entry per agent in the order claude, codex, opencode, pi (`--agent <id>` kee
 `status` is `ok`, `updated`, `action_required` or `not_installed`; `paused` lists the kinds
 (`memory`, `instruction`, `session`) that failing checks stop. `prompt` is present only for
 `action_required`. `notices` are informational lines (the app shows them as secondary text in the
-agent's Overview box); they never change `status`. `doctor --accept <agent> --json` records the failing checks' observed values
+agent's Overview box; Codex carries `session writes are off; set NATIVEMEM_CODEX_SESSION_WRITES=on to let nativemem write sessions into Codex` until that switch is on); they never change `status`. `doctor --accept <agent> --json` records the failing checks' observed values
 as reviewed, returns the document after that and adds
 `"accepted": [ { "agent": "codex", "check": "codex.threads_columns", "observed": "…" } ]`.
 An agent without a home directory fails with code `not_installed`.

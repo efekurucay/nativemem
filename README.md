@@ -84,8 +84,16 @@ default applies and such sessions exist. Nothing in Claude's settings is changed
 
 Codex copies are rollout files under `sessions/` shaped like what Codex's own importer writes; for a
 Claude session this tool also adds the matching record to Codex's import ledger so Codex does not
-import it again, and a session Codex already imported counts as its copy. Codex's databases are not
-written, so whether Codex lists a copy without a database row is not guaranteed yet.
+import it again, and a session Codex already imported counts as its copy. Codex session writes are off unless
+`NATIVEMEM_CODEX_SESSION_WRITES=on`; with them on, Codex lists threads from
+its state database, so each copy also gets one row in the `threads` table of `state_<n>.sqlite`,
+shaped like the row Codex's importer inserts. The writes run only while the `codex.state_db` and
+`codex.threads_columns` checks of `nativemem doctor` pass; it is inserted or refreshed for copies
+this tool wrote, a copy that lost its row gets it back on the next run, and no row is ever deleted or
+changed for a thread Codex made. Before the first write of a run the database is copied with SQLite's
+online backup to `<state dir>/backups/<stamp>/codex/` (the five newest copies are kept); a database
+that is locked is skipped and the row follows on the next run. That Codex lists and opens a copy is
+`[UNVERIFIED]` until you run `codex resume` in the project folder and see it.
 
 Automated sessions are recognised by structure only: a Claude Code transcript whose first line has
 an `entrypoint` starting with `sdk`; a Codex rollout that is a sub-agent thread (`source` an
@@ -114,7 +122,7 @@ nativemem schedule uninstall
 Global options: `--claude-home`, `--codex-home`, `--opencode-home`, `--pi-home`, `--state-dir`,
 `--session-days`, `--exclude-automated-sessions`, `--no-sessions` (env `NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`, `NATIVEMEM_OPENCODE_HOME`,
 `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`, `NATIVEMEM_SESSION_DAYS`). `NATIVEMEM_CODEX_SESSION_WRITES=on`
-lets sync write session copies into Codex (off by default). Defaults are `~/.claude` (or `CLAUDE_CONFIG_DIR`),
+lets sync write session copies into Codex (off by default; `status` and `doctor` say so). Defaults are `~/.claude` (or `CLAUDE_CONFIG_DIR`),
 `~/.codex` (or `CODEX_HOME`), `~/.config/opencode` (or `OPENCODE_CONFIG_DIR`), `~/.pi/agent`
 (or `PI_CODING_AGENT_DIR`) and `~/.nativemem`. `--json` prints one JSON
 document, including errors as `{"error": ..., "code": ...}`.
@@ -187,7 +195,7 @@ This builds the Swift app and bundles it as `apps/macos/build/nativemem.app`. Se
 
 - Agents other than Claude Code, Codex, OpenCode and Pi.
 - Resource kinds other than memory entries, instruction sections and chat sessions (MCP config, skills).
-- Sessions for OpenCode and Hermes, and writing sessions into Codex.
+- Sessions for OpenCode and Hermes.
 - Memory maintenance: classification, promotion to global scope, summarising, stale cleanup.
 - Global-scope Claude entries and writing back to Codex originals.
 

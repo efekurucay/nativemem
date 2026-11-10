@@ -251,8 +251,7 @@ impl Agents {
         sessions: Option<SessionOptions>,
         blocked: &Blocked,
     ) -> Self {
-        // Codex lists threads from its state database, so session writes stay off until the
-        // thread-row writer exists; tests and early adopters switch them on explicitly.
+        // Codex session writes are opt-in and, once on, still follow the compatibility probes.
         let codex_session_writes =
             std::env::var("NATIVEMEM_CODEX_SESSION_WRITES").is_ok_and(|v| v == "on");
         let state = || roots.state.clone();

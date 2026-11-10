@@ -67,8 +67,8 @@ through behind the first. Probe observed values for failures are therefore built
 
 ## Notices
 
-`AgentReport.notices` carries informational lines that never change the status or the exit code. The
-only notice: while Claude Code's retention is the default 30 days (`cleanupPeriodDays` absent from its
+`AgentReport.notices` carries informational lines that never change the status or the exit code. Two
+notices: while Codex session writes are off (`NATIVEMEM_CODEX_SESSION_WRITES` is not `on`), `codex: session writes are off; set NATIVEMEM_CODEX_SESSION_WRITES=on to let nativemem write sessions into Codex`; and while Claude Code's retention is the default 30 days (`cleanupPeriodDays` absent from its
 settings), `doctor` and `status` say `transcripts older than 30 days are deleted by Claude itself; set
 cleanupPeriodDays in Claude's settings to keep older sessions` when another agent holds a session
 Claude would delete (`add_notices` in `crates/cli/src/doctor.rs`, which scans those agents). It is the
@@ -96,6 +96,14 @@ Tests in `crates/cli/tests/doctor.rs`: `sync_pauses_exactly_the_protected_kinds_
 `paused_claude_sessions_are_not_read_so_they_do_not_replicate_out`,
 `a_paused_kind_leaves_existing_replicas_and_ledger_rows_alone`, `accepting_resumes_sync_without_duplicates`;
 `paused_codex_memory_leaves_existing_replicas_untouched` in `crates/core/tests/paused.rs`.
+
+Codex's checks gate a write path that is itself opt-in (`NATIVEMEM_CODEX_SESSION_WRITES=on`): with the switch on and while `codex.state_db`, `codex.threads_columns` and the other Codex
+session checks pass, session replicas are written into Codex together with their `threads` row; a
+failing one pauses Codex sessions, so no rollout and no row is written
+(`schema_drift_or_a_switch_off_writes_no_row_and_takes_no_backup` in `crates/core/tests/codex_threads.rs`).
+The row writer sets explicit values for every column it writes and relies on none of the table's
+triggers; a Codex release that adds a column to `threads` therefore pauses it until the constants are
+reviewed.
 
 ## `nativemem doctor`
 
@@ -143,6 +151,7 @@ never the real binary.
 - `crates/core/src/probe.rs`
 - `crates/core/src/adapters/claude_probes.rs`
 - `crates/core/src/adapters/codex_probes.rs`
+- `crates/core/src/adapters/codex_threads.rs`
 - `crates/core/src/adapters/pi_probes.rs`
 - `crates/core/src/adapters/opencode_probes.rs`
 - `crates/cli/src/doctor.rs`
@@ -153,7 +162,7 @@ never the real binary.
 
 ## Rules
 
-- MUST: Probes are read-only and fast; the Codex state database is opened with `immutable=1` and never written.
+- MUST: Probes are read-only and fast; they open the Codex state database with `immutable=1` and never write it. The row writer runs only while its checks pass (`wiki/decisions/codex-session-writes-gated.md`).
 - MUST: Observed values are structural descriptors, never content or secrets.
 - MUST: A check names the kinds it protects and the adapter files behind it.
 - MUST: A new agent ships probes (`wiki/guides/add-an-agent.md`).
@@ -176,6 +185,7 @@ never the real binary.
 - `wiki/agents/codex.md`
 - `wiki/agents/pi.md`
 - `wiki/agents/opencode.md`
+- `wiki/decisions/codex-session-writes-gated.md`
 
 ## Last updated
 

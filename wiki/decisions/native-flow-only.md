@@ -33,8 +33,8 @@ configuration files (`config.toml`, `hooks.json`, `opencode.json`, `settings.jso
 
 - Agents without native per-project memory get a routing block in their global instruction file
   (`wiki/decisions/routing-block-for-agents-without-memory.md`).
-- Session writes into Codex stay off until the row Codex lists from can be written safely
-  (`wiki/decisions/codex-session-writes-gated.md`).
+- Session writes into Codex include the `threads` row Codex lists from and run only while the
+  schema probes pass (`wiki/decisions/codex-session-writes-gated.md`).
 - MCP servers and skills would require config edits for some agents and are not implemented; the
   placement research on the agent pages names the config-free options first.
 - The one agent-adjacent JSON file the tool edits is Codex's importer ledger, and only with Codex

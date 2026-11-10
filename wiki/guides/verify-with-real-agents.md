@@ -31,7 +31,8 @@ does not run `nativemem` against a real home (`wiki/CLAUDE.md`). Paths below use
 2. **Last day.** Apply a narrow slice: `nativemem --session-days 1 sync --apply` (sessions limited to
    files modified in the last day; memory and instruction items always take part). A narrower slice
    for a new writer is `--no-sessions`, which isolates memory and instruction changes. Codex session
-   writes stay off unless `NATIVEMEM_CODEX_SESSION_WRITES=on` is exported for that stage on purpose.
+   writes (and the `threads` rows that go with them) stay off unless the stage exports
+   `NATIVEMEM_CODEX_SESSION_WRITES=on` on purpose.
 3. **The user checks the agent's own listing and opens an item.** The checks per agent are below.
    Do not continue until each passes.
 4. **Everything.** `nativemem sync --apply` without `--session-days`. Run `nativemem sync` again: the
@@ -53,10 +54,14 @@ does not run `nativemem` against a real home (`wiki/CLAUDE.md`). Paths below use
 
 - [ ] `AGENTS.md` carries the instruction region and the routing block; text outside is unchanged.
 - [ ] `shasum` of `config.toml` and the hooks files is unchanged.
-- [ ] Session writes are off by default: with the variable unset, no rollout was written. When a
-  stage turns them on, the user checks that Codex's thread list shows the copy and that opening it
-  works, and that Codex does not offer to import the same Claude session again (this is the
-  `[UNVERIFIED]` fact on `wiki/agents/codex.md`; record the result there).
+- [ ] `nativemem doctor --agent codex` passes, then apply a narrow slice (`--session-days 1`) with
+  `NATIVEMEM_CODEX_SESSION_WRITES=on`. Run
+  `codex resume` in the project folder and confirm the session is listed and opens, and that Codex
+  does not offer to import the same Claude session again (the `[UNVERIFIED]` facts on
+  `wiki/agents/codex.md`; record the result there).
+- [ ] `<state dir>/backups/<stamp>/codex/state_<n>.sqlite` exists after the first write; rollback is
+  closing Codex and copying that file back over `state_<n>.sqlite` (remove its `-wal` and `-shm`).
+- [ ] Without `NATIVEMEM_CODEX_SESSION_WRITES=on` no Codex rollout, row or ledger record is written.
 - [ ] Ask Codex in a synced project about a synced memory item and confirm it reads the project index
   named in the routing block.
 

@@ -3,8 +3,8 @@
 //! event and response-item pairs, the `<EXTERNAL SESSION IMPORTED>` marker event once, a
 //! `token_count` and the closing `task_complete`. The marker event is what makes the rollout a
 //! replica; `nativemem_origin` and `nativemem_title` in `session_meta` let a re-read map it back
-//! to its original. Only the rollout file is produced; Codex's `threads` table is not touched, so
-//! a later slice can add the row behind a schema-version check without changing this module.
+//! to its original. Only the rollout file is produced here; `codex_threads.rs` derives the
+//! `threads` row from it.
 
 use serde_json::{json, Value};
 
@@ -13,7 +13,11 @@ use crate::session::{format_iso_ms, marker_text, uuid_v7, Role, Session};
 
 use super::codex_sessions::IMPORT_MARKER;
 
-const CLI_VERSION: &str = "0.167.0-alpha.3.2";
+/// `session_meta` values that Codex's `threads` row repeats.
+pub const CLI_VERSION: &str = "0.167.0-alpha.3.2";
+pub const SOURCE: &str = "vscode";
+pub const MODEL_PROVIDER: &str = "openai";
+pub const HISTORY_MODE: &str = "legacy";
 const BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent.";
 /// `session_meta` keys this tool adds.
 pub const ORIGIN_KEY: &str = "nativemem_origin";
@@ -71,13 +75,13 @@ pub fn render(session: &Session, key: &ItemKey, thread: &str, now_ms: i64) -> St
             "cwd": session.cwd.to_string_lossy(),
             "originator": originator(key.origin.as_str()),
             "cli_version": CLI_VERSION,
-            "source": "vscode",
-            "model_provider": "openai",
+            "source": SOURCE,
+            "model_provider": MODEL_PROVIDER,
             "base_instructions": {
                 "text": BASE_INSTRUCTIONS,
                 "provenance": { "type": "model", "model": "gpt-5" },
             },
-            "history_mode": "legacy",
+            "history_mode": HISTORY_MODE,
             "multi_agent_version": "v1",
             "context_window": { "window_id": uuid_v7(session.created_ms, &format!("window:{}", marker_text(key))) },
             ORIGIN_KEY: marker_text(key),

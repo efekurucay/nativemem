@@ -76,6 +76,10 @@ a run, `refresh` rescans and records what is actually on disk for every touched 
 that do not round-trip byte-identically never look like fresh edits. A failed scan aborts the run
 before planning (test `failed_scan_plans_nothing`).
 
+`Adapter::finish` runs once at the end of `apply`, after the writes and the refresh. Codex uses it to write
+the `threads` rows of its replica rollouts; what an adapter had to leave for the next run comes back as a
+`skipped` note (`finish_all` in `crates/core/src/engine.rs`).
+
 Sessions use a different planner (`plan_session`), described in `wiki/kinds/sessions.md`.
 
 ## Capability negotiation: `supports`
@@ -88,7 +92,7 @@ fallback. Test: `memory_is_planned_only_for_agents_that_support_it`.
 | Agent | Memory (Project) | Instruction (Global) | Session (Project) |
 |---|---|---|---|
 | Claude Code | yes, originals and replicas | yes | yes |
-| Codex | yes; originals are generated and read-only, replicas are written | yes | only when session writes are on (`NATIVEMEM_CODEX_SESSION_WRITES=on`) |
+| Codex | yes; originals are generated and read-only, replicas are written | yes | only with `NATIVEMEM_CODEX_SESSION_WRITES=on` while the Codex schema probes pass; each written replica also gets a `threads` row |
 | OpenCode | replicas only | yes | no |
 | Pi | replicas only | yes | yes |
 
@@ -128,7 +132,7 @@ Commands: `status`, `sync` (dry run unless `--apply`; `--notify` with `--apply`)
 (`NATIVEMEM_SESSION_DAYS`), `--exclude-automated-sessions`, `--no-sessions`. Without a flag, a root
 falls back to `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, then
 `~/.claude`, `~/.codex`, `~/.config/opencode`, `~/.pi/agent`; the state directory defaults to
-`~/.nativemem`. `NATIVEMEM_CODEX_SESSION_WRITES=on` enables Codex session writes. `NATIVEMEM_REPO` names the repo in
+`~/.nativemem`. `NATIVEMEM_CODEX_SESSION_WRITES=on` enables Codex session writes (off by default). `NATIVEMEM_REPO` names the repo in
 `doctor` prompts; `NATIVEMEM_NOTIFY_FILE` redirects notifications to a file. Exit codes: 0
 success, 2 when conflicts or skipped writes remain, 3 when `doctor` finds an agent that needs action,
 1 on error. With `--json`, one JSON document is

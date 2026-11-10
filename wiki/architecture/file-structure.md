@@ -40,6 +40,7 @@ nativemem-sync/
 │   │           ├── claude_sessions.rs  Claude transcript reader and writer
 │   │           ├── codex.rs      Codex: generated-memory originals, replica store, AGENTS.md, rollouts
 │   │           ├── codex_sessions.rs   Codex rollout reader (originals, replica detection, automated markers)
+│   │           ├── codex_threads.rs    `threads` row writer for replica rollouts, database backup and retention
 │   │           ├── codex_rollout.rs    Codex rollout writer shaped like Codex's own importer output
 │   │           ├── codex_imports.rs    Codex importer ledger (`external_agent_session_imports.json`)
 │   │           ├── claude_probes.rs    Claude compatibility probes and their expected constants

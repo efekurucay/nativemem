@@ -3,13 +3,13 @@
 ## Purpose
 
 What `nativemem` needs to know about the Codex CLI and desktop app to read its memory, instruction
-sections and rollouts, and why session writes into Codex are gated.
+sections and rollouts, and how session writes into Codex are guarded.
 
 ## Scope
 
 Facts gathered read-only on a development machine running codex-cli 0.167.0 (rollouts from 0.149.0
 to 0.167.0; 215 live rollouts, 5 archived, 641 rows in the `threads` table, 79 sessions imported from
-Claude Code). SQLite files were inspected as copies. The `codex` binary is never driven by this repo.
+Claude Code). SQLite files were inspected read-only (`immutable=1`, structure and non-content values). The `codex` binary is never driven by this repo.
 
 ## Status in nativemem
 
@@ -17,7 +17,7 @@ Claude Code). SQLite files were inspected as copies. The `codex` binary is never
 |---|---|---|
 | Project memory | Originals read from generated `memories/MEMORY.md` (read-only, never edited or deleted); replicas written to a nativemem-owned store plus a routing block | `crates/core/src/adapters/codex.rs`, `memory_store.rs` |
 | Instruction sections | Read and write in `AGENTS.md` | `codex.rs` through `sections.rs` |
-| Sessions | Originals always read; replica writes only when `NATIVEMEM_CODEX_SESSION_WRITES=on` | `codex_sessions.rs`, `codex_rollout.rs`, `codex_imports.rs` |
+| Sessions | Originals always read; replicas (with their `threads` row) written only when `NATIVEMEM_CODEX_SESSION_WRITES=on` and the schema probes pass | `codex_sessions.rs`, `codex_rollout.rs`, `codex_imports.rs`, `codex_threads.rs` |
 | MCP servers, skills | Not implemented | |
 
 ## Native locations
@@ -62,8 +62,8 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
 - Reads `memories/MEMORY.md` blocks, `AGENTS.md` sections, `memories/extensions/nativemem/resources/`
   replicas and `sessions/` rollouts (directory depth at most 4 below `sessions/`).
 - Writes replica memory items and the routing block, the instruction region at the end of
-  `AGENTS.md`, and, only with `NATIVEMEM_CODEX_SESSION_WRITES=on`, rollout files and the importer-ledger
-  record for Claude-origin sessions. The ledger file is parsed and rewritten whole (every other key
+  `AGENTS.md`, and, only with `NATIVEMEM_CODEX_SESSION_WRITES=on` while the schema probes pass, rollout files, the importer-ledger record for
+  Claude-origin sessions and the `threads` row of every replica rollout (below). The ledger file is parsed and rewritten whole (every other key
   and record kept, key order not), backed up first, created only when the Codex home exists, and left
   alone when it does not parse.
 - A rollout written by this tool is shaped like Codex's own importer output: `session_meta`
@@ -72,8 +72,9 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
   message with event and `response_item` pairs, the `<EXTERNAL SESSION IMPORTED>` marker event once,
   a `token_count` and the closing `task_complete`. `session_meta` also carries `nativemem_origin` and
   `nativemem_title`. The file mtime is the original's.
-- Never touches `state_5.sqlite`, `~/.codex/sqlite/`, `thread_history_1.sqlite`, `session_index.jsonl`,
-  `history.jsonl`, `.codex-global-state.json`, `config.toml` or `hooks.json`.
+- Never touches `~/.codex/sqlite/`, `thread_history_1.sqlite`, `session_index.jsonl`, `history.jsonl`,
+  `.codex-global-state.json`, `config.toml` or `hooks.json`, and in `state_5.sqlite` only the
+  `threads` rows of its own replicas.
 
 ## Sessions: listing and resume
 
@@ -85,9 +86,47 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
 - A session imported by Codex itself has a row inserted by the importer directly (`originator` NULL),
   `cwd` equal to the first cwd in the Claude file, `title` from the Claude title priority, and
   `created_at` / `updated_at` equal to the first and last message times of the source.
-- `nativemem` writes no row. Whether Codex backfills a missing row from rollout files is
-  `[UNVERIFIED]`. This is why session writes into Codex are off by default
-  (`wiki/decisions/codex-session-writes-gated.md`).
+- Codex's `backfill_state` is `complete`, so a rollout without a row is not picked up later
+  (OBSERVED: 6 written rollouts had no row and were not listed).
+
+## Thread row writer
+
+`crates/core/src/adapters/codex_threads.rs`, called (only with the switch on) from `Adapter::finish` at the end of `sync --apply`.
+The row mirrors what Codex's importer inserts for an imported Claude thread (OBSERVED on 73 imported
+rows against 443 native ones) and is derived from the rollout file, so file and row agree:
+
+| Column | Value |
+|---|---|
+| `id` | thread id of `session_meta.id` |
+| `rollout_path` | absolute path of the rollout (importer rows are absolute) |
+| `created_at`, `updated_at` | first `task_started.started_at` and last `task_complete.completed_at`, in seconds |
+| `created_at_ms`, `updated_at_ms`, `recency_at_ms` | seconds times 1000; `recency_at` is `updated_at` |
+| `cwd`, `title`, `name` | the session's cwd and title (importer rows have `name` equal to `title`) |
+| `first_user_message`, `preview` | text of the first user turn (importer rows have them equal, untruncated) |
+| `source`, `model_provider`, `cli_version`, `history_mode` | the values written into `session_meta` (`vscode`, `openai`, `CLI_VERSION`, `legacy`) |
+| `sandbox_policy`, `approval_mode` | `{"type":"read-only"}`, `on-request` (importer values) |
+| `tokens_used`, `has_user_event`, `archived` | 0 |
+| everything else | default or NULL (`originator`, `model`, git columns, `thread_source`, project and section columns, `memory_mode` default `enabled`) |
+
+- The five triggers on `threads` only fill `*_at_ms` and `recency_at*` when they are NULL or 0; every
+  value is set explicitly, so none is relied on. No FTS table, view or other table needs a feed for
+  the picker. `local_thread_catalog` (`sqlite/codex.db`) is filled by the app's own scan (49 of 73
+  imported threads present), `session_index.jsonl` held none of the imported threads, and
+  `thread_history_1.sqlite` holds turn projections for `paginated` threads only (none of the legacy
+  rows), so none of them is written (INFERRED; the previous research said the same).
+- Rows exist only for rollouts with `nativemem_origin`. A forced refresh (the engine rewrote the
+  rollout) replaces the derived columns and keeps `name`, `archived`, `is_pinned`, `tokens_used` and
+  everything else Codex or the user set. A rollout that lost its row is inserted on the next run, and
+  an existing row is advanced only when the rollout's last message is newer than the row's
+  `updated_at`, so a thread resumed in Codex is never reverted. Nothing is deleted.
+- Before the first write of a run the database is copied with SQLite's online backup to
+  `<state dir>/backups/<stamp>/codex/state_<n>.sqlite`; the 5 newest copies are kept. The write is one
+  `BEGIN IMMEDIATE` transaction after `busy_timeout` of 5 s, read back afterwards. A locked database
+  gives a `skipped` note and the same work happens on the next run. A home without a state database
+  gets no rows until Codex creates it.
+- The row says `history_mode` `legacy` like the rollout; Codex's importer writes `paginated` and
+  builds `thread_history_1.sqlite` for it. Whether Codex lists and opens a `legacy` thread written
+  this way is `[UNVERIFIED]`.
 
 ## Quirks
 
@@ -108,8 +147,9 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
   simplest shape.
 - **Sub-agent threads started by Claude Code** carry originator `Claude Code` and a
   `parent_thread_id`; they are automated sessions, not imports.
-- **A live Codex app writes `state_5.sqlite` in WAL mode** and holds lock files. Writing the database
-  while the app runs risks corruption; any future row writer must coordinate with Codex.
+- **A live Codex app writes `state_5.sqlite` in WAL mode** and holds lock files. The row writer uses
+  SQLite's own locking (5 s `busy_timeout`, `BEGIN IMMEDIATE`), never changes the journal mode and skips
+  a locked database.
 - **Context cap**: Codex loads project docs up to `project_doc_max_bytes = 32768` (binary strings,
   OBSERVED), which matters for the routing block size.
 
@@ -150,12 +190,14 @@ layout.
 | Codex's import mapping reproduces user and assistant text one-for-one | VERIFIED (76 of 76 unchanged sources) | read-only converter check |
 | Importer drops thinking, ignores `isMeta`, turns tool calls and results into assistant text | VERIFIED | same check |
 | Listing needs a `threads` row with non-empty `preview` | INFERRED | 311 `session_index` lines vs 641 threads; `codex resume` not run |
-| Rollout alone is listed after a backfill | `[UNVERIFIED]` | `backfill_state` tables exist; behaviour not tested |
+| A rollout without a row is not listed | OBSERVED | 6 written rollouts, no rows, not in the picker |
+| The written row has the importer's shape | VERIFIED against the fixture, OBSERVED against 73 imported rows | `crates/core/tests/codex_threads.rs` |
 | `hooks.state` hashes pin hook commands | OBSERVED | `config.toml` structure and binary strings |
 | The five probes pass on the fixtures; a `threads` column, a `state_6.sqlite`, an extra ledger key, a missing `session_meta` key and a flat rollout path each fail one check, and the database file is never written | VERIFIED | `crates/core/tests/probes.rs` (`codex_*`) |
 | MCP `enabled` key and `type` handling | `[UNVERIFIED]` | not testable read-only |
 | A nativemem-written rollout is read back as a replica | VERIFIED | test `claude_session_becomes_a_codex_rollout_with_an_import_record` |
-| Codex lists a nativemem-written rollout in its resume list | `[UNVERIFIED]` | needs the staged check |
+| Codex lists a nativemem-written rollout plus row in `codex resume` and opens it | `[UNVERIFIED]` | needs the staged check |
+| Codex accepts `history_mode` `legacy` for a row written this way | `[UNVERIFIED]` | needs the staged check |
 
 ## Source anchors
 
@@ -164,17 +206,19 @@ layout.
 - `crates/core/src/adapters/codex_rollout.rs`
 - `crates/core/src/adapters/codex_imports.rs`
 - `crates/core/src/adapters/codex_probes.rs`
+- `crates/core/src/adapters/codex_threads.rs`
 - `crates/core/src/adapters/memory_store.rs`
 - `crates/cli/src/main.rs` (`NATIVEMEM_CODEX_SESSION_WRITES`)
-- `crates/core/src/testkit.rs` (`CodexHome`, `write_state_db`)
+- `crates/core/src/testkit.rs` (`CodexHome`, `write_state_db`) and `testkit_codex_state.sql` (structure of the real `threads` table)
 - `crates/core/tests/probes.rs`
+- `crates/core/tests/codex_threads.rs`, `crates/cli/tests/codex_threads.rs`
 - `docs/design.md` (Codex adapter, Chat sessions)
 
 ## Rules
 
-- MUST: Never write Codex's SQLite files, `config.toml`, `hooks.json` or generated memory files; the probes open the state database read-only with `immutable=1` and nothing else does.
+- MUST: Write Codex's state database only through `codex_threads.rs` (rows of this tool's replicas, never a delete); never write its other SQLite files, `config.toml`, `hooks.json` or generated memory files. The probes open the state database read-only with `immutable=1`.
 - MUST: Treat a rollout containing `<EXTERNAL SESSION IMPORTED>` as a replica, never an original.
-- MUST: Keep session writes gated until the thread-row writer exists and is verified.
+- MUST: Keep session writes behind the `codex.state_db` and `codex.threads_columns` probes.
 - MUST: Back up `external_agent_session_imports.json` before changing it; do not overwrite an
   unparsable one.
 - MUST: Update the probe constants in `codex_probes.rs` and the table above together with the adapter.
@@ -182,8 +226,8 @@ layout.
 
 ## Verification checklist
 
-- [ ] With `NATIVEMEM_CODEX_SESSION_WRITES` unset, `sync` plans no session write for Codex
-- [ ] The staged check (resume list, open a session) is recorded here before the gate is lifted
+- [ ] Without `NATIVEMEM_CODEX_SESSION_WRITES=on`, or with a failing schema probe, `sync` plans no session write for Codex
+- [ ] The staged check (`codex resume` lists and opens a copy) is recorded here
 - [ ] The README support table and this page agree on session writes
 
 ## Related docs

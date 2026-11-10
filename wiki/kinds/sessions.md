@@ -112,15 +112,20 @@ adopts the imported thread as the Codex replica with an empty hash, so it is nev
   importer does not import the session again. Anchors: `crates/core/src/adapters/codex_sessions.rs`,
   `codex_rollout.rs`, `codex_imports.rs`.
 
-## Codex needs a thread row; session writes to Codex are off by default
+## Codex needs a thread row; writes are opt-in and follow the schema probes
 
-Codex lists threads from its state database; a rollout file alone may not appear in its resume list.
-`nativemem` writes only the rollout (and the importer-ledger record) and does not touch Codex's
-databases, because their schema belongs to Codex. Therefore `CodexAdapter` answers
-`supports(Session, Project)` only when session writes are on, and the CLI turns them on only when
-`NATIVEMEM_CODEX_SESSION_WRITES=on`. With writes off, sessions still flow from Codex to Claude Code
-and Pi, and no session is written into or adopted for Codex. Tests turn the variable on explicitly
-(`run` in `crates/cli/tests/cli.rs`). Decision: `wiki/decisions/codex-session-writes-gated.md`.
+Codex lists threads from its state database, so each replica rollout also gets one `threads` row
+(`crates/core/src/adapters/codex_threads.rs`, called from `Adapter::finish` after the run's writes).
+The row is derived from the rollout file: id, absolute rollout path, cwd, title, first user message,
+first and last message time, and the importer's constants for the rest (`wiki/agents/codex.md`).
+Rows are inserted or refreshed only for rollouts carrying `nativemem_origin`, a rollout without a row
+gets it on the next run, and Codex's own rows are never touched or deleted. The writer runs only when
+`codex.state_db` and `codex.threads_columns` pass; a failing check pauses sessions for Codex (neither
+read nor written). Writes into Codex are opt-in (`NATIVEMEM_CODEX_SESSION_WRITES=on`; `status` and `doctor` show a notice while
+they are off, and nothing is planned for Codex then); sessions always flow from Codex to Claude Code
+and Pi. `--no-sessions` writes no row either. A locked database is skipped
+with a `skipped` note and repaired on the next run. Decision:
+`wiki/decisions/codex-session-writes-gated.md`.
 
 ## Scope flags
 
@@ -159,6 +164,7 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 - `crates/core/src/adapters/codex_sessions.rs`
 - `crates/core/src/adapters/codex_rollout.rs`
 - `crates/core/src/adapters/codex_imports.rs`
+- `crates/core/src/adapters/codex_threads.rs`
 - `crates/core/src/adapters/pi.rs`
 - `crates/cli/src/main.rs`
 - `docs/design.md` (Chat sessions)
@@ -169,7 +175,7 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 - MUST: Every written session carries a marker that survives a lost ledger.
 - MUST: Bump the adapter's `SESSION_WRITER_REVISION` when the written format changes.
 - MUST: Render tool activity through `render_tool` so all targets read the same.
-- MUST: Never write into Codex's SQLite databases.
+- MUST: Write Codex's SQLite database only through `codex_threads.rs`, only while the schema probes pass.
 - MUST: Plan nothing for a session the target agent does not accept (`Adapter::accepts`).
 - SHOULD: Set the replica's file mtime to the original's so resume lists keep the relative order.
 

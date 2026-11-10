@@ -755,6 +755,7 @@ mod schedule {
             .env_remove("NATIVEMEM_PI_HOME")
             .env_remove("NATIVEMEM_STATE_DIR")
             .env("HOME", e.state.parent().unwrap())
+            .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
             .args(["schedule", "--no-launchctl", "--launch-agents-dir"])
             .arg(&e.agents)
             .arg("install")

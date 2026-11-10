@@ -117,11 +117,11 @@ fn claude_key(source_path: &str) -> Option<ItemKey> {
 }
 
 /// The UUID at the end of `rollout-<ts>-<uuid>`.
-fn thread_id_of(stem: &str) -> &str {
+pub(super) fn thread_id_of(stem: &str) -> &str {
     stem.get(stem.len().saturating_sub(36)..).unwrap_or(stem)
 }
 
-fn collect_rollouts(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
+pub(super) fn collect_rollouts(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

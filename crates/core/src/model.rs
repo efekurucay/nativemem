@@ -115,6 +115,11 @@ pub trait Adapter {
     fn is_foreign_replica(&self, _replica: &Observed) -> bool {
         false
     }
+    /// Work deferred until the run's writes are done, for example a database row that must follow
+    /// a written file. Returns `(label, reason)` for what had to be left for the next run.
+    fn finish(&self) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
     fn scan(&self) -> Result<Vec<Observed>>;
     /// Create or update the replica of `key` in this agent. Returns its native_id and path.
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)>;

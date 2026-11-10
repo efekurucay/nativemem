@@ -744,6 +744,20 @@ fn run(
 
 /// Records what is actually on disk for every item the run touched, so formats that do not
 /// round-trip byte-identically never look like fresh edits.
+fn finish_all(adapters: &[&dyn Adapter]) -> Result<Vec<Note>> {
+    let mut notes = Vec::new();
+    for a in adapters {
+        for (label, reason) in a.finish()? {
+            notes.push(Note::Skipped {
+                agent: a.id(),
+                label,
+                reason,
+            });
+        }
+    }
+    Ok(notes)
+}
+
 fn refresh(adapters: &[&dyn Adapter], ledger: &Ledger, touched: &Touched) -> Result<()> {
     if touched.keys.is_empty() {
         return Ok(());
@@ -841,8 +855,10 @@ pub fn apply(
     let mut touched = Touched::default();
     let outcome = execute(&actions, adapters, ledger, &mut report, &mut touched);
     let refreshed = refresh(adapters, ledger, &touched);
+    let finished = finish_all(adapters);
     outcome?;
     refreshed?;
+    report.notes.extend(finished?);
     Ok(report)
 }
 
@@ -1890,7 +1906,8 @@ mod session_tests {
             },
             codex: {
                 let a = CodexAdapter::new(root.join("codex"), state.clone(), backups.clone())
-                    .with_claude_home(root.join("claude"));
+                    .with_claude_home(root.join("claude"))
+                    .with_session_writes(true);
                 match options {
                     Some(o) => a.with_sessions(o),
                     None => a,

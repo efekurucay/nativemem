@@ -7,6 +7,7 @@ pub mod codex_imports;
 pub mod codex_probes;
 pub mod codex_rollout;
 pub mod codex_sessions;
+pub mod codex_threads;
 pub mod memory_store;
 pub mod opencode_probes;
 pub mod pi;

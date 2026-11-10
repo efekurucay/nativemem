@@ -142,7 +142,7 @@ pub fn version(home: &Path) -> Option<String> {
 }
 
 /// `state_<n>.sqlite` files of `home` as `(n, path)`, highest first.
-fn state_databases(home: &Path) -> Vec<(u32, PathBuf)> {
+pub(super) fn state_databases(home: &Path) -> Vec<(u32, PathBuf)> {
     let mut found: Vec<(u32, PathBuf)> = std::fs::read_dir(home)
         .into_iter()
         .flatten()

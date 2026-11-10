@@ -21,7 +21,8 @@ formats are in `wiki/agents/`.
 | Failed scan aborts | If any adapter's `scan` fails, the run stops before planning, so a failed read never looks like a mass deletion | `plan` in `crates/core/src/engine.rs`; test `failed_scan_plans_nothing` |
 | Single-writer lock | `sync --apply`, `delete`, `edit` and `doctor --accept` take an exclusive lock on `<state dir>/sync.lock` for the whole run. A second writer fails with code `busy` and writes nothing. `status`, `items` and dry-run `sync` do not lock; a plain `doctor` takes the lock only to write `compat.json` and skips that write when it is busy | `lock_state` in `crates/cli/src/main.rs`; test `concurrent_run_is_refused_while_lock_is_held` |
 | Nothing inside git repositories | Writes go only to agent home directories and the state directory. Project-level instruction files live in repositories and are never read or written; replicas for agents without native memory go to the agent home plus a marked block in the agent's global instruction file | `crates/core/src/adapters/memory_store.rs`; test `memory_writes_stay_inside_the_declared_paths` |
-| Agent-owned state is untouched | No code writes Codex SQLite files, and only the compatibility probe reads one (`state_<n>.sqlite`, opened read-only with `immutable=1`, so no sidecar file is created). No code reads or writes `hooks.json`, `config.toml`, Claude's `~/.claude.json`, credential or auth files, or generated `memories/MEMORY.md` content. Codex generated memory is read-only | grep of `crates/` finds none of these names outside tests; tests `originals_are_read_only`, `instruction_originals_are_editable_but_memory_originals_are_not` |
+| Codex state database | The only write is `codex_threads.rs`: one `threads` row per replica rollout this tool wrote, only while `codex.state_db` and `codex.threads_columns` pass. It opens read-write only when a row is missing or a rollout was rewritten, sets `busy_timeout` to 5 s, takes a consistent copy with SQLite's online backup to `<state dir>/backups/<stamp>/codex/state_<n>.sqlite` (the 5 newest kept, nothing else pruned), writes in one `BEGIN IMMEDIATE` transaction, reads the rows back, and skips a locked database until the next run. It never deletes or changes a row of a thread Codex made, never changes the journal mode and runs no vacuum or checkpoint pragma. The probes read the file with `immutable=1` |
+| Other agent-owned state is untouched | No code reads or writes `hooks.json`, `config.toml`, Claude's `~/.claude.json`, credential or auth files, or generated `memories/MEMORY.md` content. Codex generated memory is read-only | grep of `crates/` finds none of these names outside tests; tests `originals_are_read_only`, `instruction_originals_are_editable_but_memory_originals_are_not` |
 | Secrets are never printed | The ledger stores ids, hashes and paths, not text. `items` prints no session bodies. `status` prints labels and reasons only. Session tool output is cut at 1500 characters and tool input at 600, but a session can still contain secrets the user typed: sessions are copied between the user's own agent homes and never printed or sent anywhere | `crates/core/src/ledger.rs`, `crates/cli/src/main.rs`, `crates/core/src/session.rs` (`TOOL_RESULT_LIMIT`, `TOOL_INPUT_LIMIT`); test `items_leaves_sessions_out_unless_asked_and_never_prints_bodies` |
 | Sessions are not deletable here | `delete` and `edit` refuse session ids with code `unsupported` | `refuse_session` in `crates/cli/src/main.rs`; test `delete_and_edit_refuse_session_ids` |
 | Oversized sources | Session sources larger than 200 MB are skipped and listed by `status` | `MAX_SOURCE_BYTES` in `crates/core/src/session.rs`; test `oversized_sources_are_skipped_and_reported` |
@@ -64,6 +65,7 @@ Rollback from the backup directory is described there too.
 - `crates/cli/tests/cli.rs`
 - `crates/core/src/testkit.rs`
 - `crates/core/src/adapters/codex_probes.rs`
+- `crates/core/src/adapters/codex_threads.rs`
 - `README.md` (Safety section)
 
 ## Rules
@@ -72,6 +74,7 @@ Rollback from the backup directory is described there too.
 - MUST: Write through `fsx::atomic_write`; never truncate in place.
 - MUST: Keep the guard rule in this page equal to `exceeds_mass_delete_limit`.
 - MUST: Never write inside a project working directory.
+- MUST: Write Codex's state database only through `codex_threads.rs`; every other Codex file stays read-only.
 - MUST: Never print secrets or session bodies; never store entry text in the ledger.
 - MUST: Take the lock before any write command.
 - MUST: Run tests and manual experiments against temp roots only.
