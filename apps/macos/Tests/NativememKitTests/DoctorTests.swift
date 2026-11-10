@@ -42,6 +42,15 @@ import Testing
         #expect(quiet.agents[0].prompt == nil)
     }
 
+    @Test func noticesAreInformationalAndOptional() throws {
+        let doctor = try document()
+        #expect(doctor.agents[0].noticeLines.count == 1)
+        #expect(doctor.agents[0].noticeLines[0].hasPrefix("transcripts older than 30 days"))
+        #expect(doctor.agents[0].status == .ok)
+        #expect(!doctor.needingAction.contains { $0.id == "claude" })
+        #expect(doctor.agents[1].noticeLines.isEmpty)
+    }
+
     @Test func updatedLineNamesTheVersionChange() throws {
         let doctor = try document()
         #expect(doctor.updated[0].updatedLine == "Pi updated 1.5.0 → 1.6.0, all checks pass")

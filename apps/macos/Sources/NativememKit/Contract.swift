@@ -236,6 +236,10 @@ public struct DoctorAgent: Codable, Hashable, Sendable, Identifiable {
     public var checks: [DoctorCheck]
     /// Present for agents that need action: a prompt for a coding agent working in the repo.
     public var prompt: String?
+    /// Informational lines; they never change the status.
+    public var notices: [String]?
+
+    public var noticeLines: [String] { notices ?? [] }
 
     public var displayName: String { agentDisplayName(id) }
 

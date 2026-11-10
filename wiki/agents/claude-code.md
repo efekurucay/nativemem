@@ -74,6 +74,17 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
 
 ## Quirks
 
+- **Claude deletes old transcripts.** Transcripts whose file mtime is older than `cleanupPeriodDays`
+  (`<claude home>/settings.json`, default 30) are deleted by Claude. A session replica carries the
+  original's updated time as its mtime, so one older than the retention would be deleted soon after it
+  is written. `ClaudeAdapter::accepts` (`retention` in `crates/core/src/adapters/claude.rs`) refuses a
+  session whose updated time is older than the retention minus one day; the engine then plans nothing
+  for it: no write, no note, no tombstone, and a missing copy of such a session is not read as a user
+  deletion. The value is read at startup; absent or unparsable gives 30; a huge value is respected as
+  given; `0` is read as retention disabled `[UNVERIFIED]`. `doctor` and `status` print an informational
+  notice (never a failing check) while the retention is the default and another agent holds a session
+  Claude would delete. The settings file is never edited.
+
 - **Project directory names are lossy.** Every character outside `[A-Za-z0-9]` becomes `-`
   (VERIFIED on 369 of 376 files). The directory comes from the launch cwd, while lines can later carry
   a different `cwd` (149 of 376 files have more than one value), so `nativemem` reads the real path
@@ -129,6 +140,7 @@ carries an extra key under `metadata`, which is why those keys are not checked.
 | Minimum fields for a resumable file | INFERRED | `claude_sessions.rs` writer; tests `rendered_replica_parses_back_with_marker` |
 | Claude lists a replica in the real resume list | `[UNVERIFIED]` until the staged check in `wiki/guides/verify-with-real-agents.md` is recorded | |
 | The five probes pass on the fixtures and fail on an unknown line type, a missing key, an unknown frontmatter key, a changed index line and a renamed project directory | VERIFIED | `crates/core/tests/probes.rs` (`claude_*`) |
+| Claude deletes transcripts by mtime after `cleanupPeriodDays` (default 30) | OBSERVED (the tombstones the engine recorded for replicas of old sessions); the meaning of `0` is `[UNVERIFIED]` | real-data report; tests `a_configured_retention_is_respected_and_needs_no_notice` |
 | MCP server schema, `~/.claude.json` layout | OBSERVED | read-only file and binary-string inspection |
 | Claude Code hot-reloads edits to `mcpServers` | `[UNVERIFIED]` | assume a restart is needed |
 
@@ -146,6 +158,7 @@ carries an extra key under `metadata`, which is why those keys are not checked.
 
 - MUST: Resolve a project's path from transcript lines, not from the directory name alone.
 - MUST: Keep unknown frontmatter keys when editing a memory original.
+- MUST: Never write a session Claude would delete (`accepts`); never edit `settings.json`.
 - MUST: Never delete a session; never propagate a session delete.
 - MUST: Mark every session line the tool writes with `nativemem_origin`.
 - MUST: Update the probe constants in `claude_probes.rs` and the table above together with the adapter.

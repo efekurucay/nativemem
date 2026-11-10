@@ -101,6 +101,8 @@ pub struct AgentReport {
     pub version_changed_ms: Option<i64>,
     pub checks: Vec<Check>,
     pub status: Status,
+    /// Informational lines; they never change the status.
+    pub notices: Vec<String>,
 }
 
 impl AgentReport {
@@ -113,6 +115,7 @@ impl AgentReport {
             version_changed_ms: None,
             checks: Vec::new(),
             status: Status::NotInstalled,
+            notices: Vec::new(),
         }
     }
 
@@ -322,6 +325,7 @@ pub fn assess(adapter: &dyn Adapter, state: &mut CompatState, now_ms: i64) -> Ag
         version_changed_ms: remembered.changed_ms,
         checks,
         status,
+        notices: Vec::new(),
     }
 }
 

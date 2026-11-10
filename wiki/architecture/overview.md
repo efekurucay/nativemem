@@ -92,7 +92,9 @@ fallback. Test: `memory_is_planned_only_for_agents_that_support_it`.
 | OpenCode | replicas only | yes | no |
 | Pi | replicas only | yes | yes |
 
-Every adapter also has `with_blocked_kinds(...)`: a kind in that list makes `supports` false. The CLI
+`Adapter::accepts(item)` (default true) is a second gate for one item: the engine plans nothing for a
+session a target does not accept, as Claude Code does for sessions older than its retention. Every
+adapter also has `with_blocked_kinds(...)`: a kind in that list makes `supports` false. The CLI
 fills it from failing compatibility checks, so a paused kind is neither read from nor written to the
 agent and what exists for it is left alone (`wiki/architecture/compatibility.md`).
 

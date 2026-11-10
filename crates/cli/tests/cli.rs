@@ -176,8 +176,8 @@ fn status_json_shape() {
             { "id": "codex", "originals": 0, "replicas": 0, "sessions": 0, "automated_sessions": 0, "skipped": [] } ],
           "ledger_items": 0,
           "compat": { "action_required": 0, "updated": 0, "agents": [
-            { "id": "claude", "status": "ok" }, { "id": "codex", "status": "ok" },
-            { "id": "opencode", "status": "not_installed" }, { "id": "pi", "status": "not_installed" } ] } })
+            { "id": "claude", "status": "ok", "notices": [] }, { "id": "codex", "status": "ok", "notices": [] },
+            { "id": "opencode", "status": "not_installed", "notices": [] }, { "id": "pi", "status": "not_installed", "notices": [] } ] } })
     );
     assert!(!f.state.exists());
 }

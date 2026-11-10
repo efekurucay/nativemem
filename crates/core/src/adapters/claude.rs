@@ -32,6 +32,30 @@ pub struct ClaudeAdapter {
     instructions: InstructionFile,
     sessions: Option<ClaudeSessions>,
     blocked: Vec<Kind>,
+    retention: Retention,
+}
+
+/// How long Claude Code keeps a transcript, by file modification time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    /// `cleanupPeriodDays`; 0 is read as retention disabled `[UNVERIFIED]`.
+    pub days: u64,
+    /// The value comes from `settings.json`, not from the default.
+    pub configured: bool,
+}
+
+const DEFAULT_RETENTION_DAYS: u64 = 30;
+const DAY_MS: u64 = 86_400_000;
+
+fn read_retention(claude_home: &Path) -> Retention {
+    let configured = fs::read_to_string(claude_home.join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("cleanupPeriodDays")?.as_u64());
+    Retention {
+        days: configured.unwrap_or(DEFAULT_RETENTION_DAYS),
+        configured: configured.is_some(),
+    }
 }
 
 /// Directory listings allowed per project name before the name is treated as unresolved.
@@ -51,6 +75,7 @@ struct Doc {
 
 impl ClaudeAdapter {
     pub fn new(claude_home: PathBuf, state_dir: PathBuf, backups: BackupSession) -> Self {
+        let claude_home_for_retention = claude_home.clone();
         ClaudeAdapter {
             instructions: InstructionFile::new(
                 AgentId::new("claude"),
@@ -65,7 +90,12 @@ impl ClaudeAdapter {
             fs_root: default_fs_root(),
             sessions: None,
             blocked: Vec::new(),
+            retention: read_retention(&claude_home_for_retention),
         }
+    }
+
+    pub fn retention(&self) -> Retention {
+        self.retention
     }
 
     /// Kinds this adapter neither reads nor writes while its compatibility checks fail.
@@ -363,6 +393,24 @@ impl ClaudeAdapter {
 impl Adapter for ClaudeAdapter {
     fn id(&self) -> AgentId {
         AgentId::new("claude")
+    }
+
+    /// A session older than the retention minus a day would be deleted by Claude soon after it is
+    /// written (it carries its original's modification time).
+    fn accepts(&self, item: &Item) -> bool {
+        if item.kind != Kind::Session || self.retention.days == 0 {
+            return true;
+        }
+        let Some(session) = Session::from_body(&item.body) else {
+            return true;
+        };
+        let keep_ms = (self.retention.days - 1)
+            .saturating_mul(DAY_MS)
+            .min(i64::MAX as u64 / 2) as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        now.saturating_sub(session.updated_ms) <= keep_ms
     }
 
     fn version(&self) -> Option<String> {

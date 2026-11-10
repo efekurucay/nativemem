@@ -43,6 +43,12 @@ struct OverviewView: View {
                                         LabeledContent("Copies") {
                                             Text(agent.replicas, format: .number).monospacedDigit()
                                         }
+                                        ForEach(model.doctor?.agents.first { $0.id == agent.id }?.noticeLines ?? [], id: \.self) { notice in
+                                            Text(notice)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
                                         if !agent.skipped.isEmpty {
                                             DisclosureGroup("Skipped (\(agent.skipped.count))") {
                                                 ForEach(agent.skipped, id: \.self) { entry in

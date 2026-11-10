@@ -9,7 +9,7 @@ use nativemem_core::compat::{
     self, kinds_text, AgentReport, Check, CompatState, Notification, Status,
 };
 use nativemem_core::fsx::BackupSession;
-use nativemem_core::model::Kind;
+use nativemem_core::model::{Adapter, Kind};
 use serde_json::{json, Value};
 
 use crate::{lock_state, print_json, Agents, Blocked, Failure, Outcome, Roots, AGENT_IDS};
@@ -33,6 +33,35 @@ pub fn assess_all(agents: &Agents, state: &mut CompatState) -> Vec<AgentReport> 
             _ => AgentReport::not_installed(id),
         })
         .collect()
+}
+
+/// Adds the informational notices: sessions other agents hold that Claude Code would delete.
+pub fn add_notices(agents: &Agents, reports: &mut [AgentReport]) {
+    let Some(claude) = agents.claude.as_ref() else {
+        return;
+    };
+    let retention = claude.retention();
+    if retention.configured || retention.days == 0 {
+        return;
+    }
+    let held = agents
+        .all()
+        .iter()
+        .filter(|a| a.id().as_str() != "claude")
+        .filter_map(|a| a.scan().ok())
+        .flatten()
+        .any(|o| {
+            o.item.kind == Kind::Session && o.replica_of.is_none() && !claude.accepts(&o.item)
+        });
+    if !held {
+        return;
+    }
+    if let Some(r) = reports.iter_mut().find(|r| r.agent.as_str() == "claude") {
+        r.notices.push(format!(
+            "transcripts older than {} days are deleted by Claude itself; set cleanupPeriodDays in Claude's settings to keep older sessions",
+            retention.days
+        ));
+    }
 }
 
 pub fn blocked_kinds(reports: &[AgentReport]) -> Blocked {
@@ -70,6 +99,14 @@ fn status_text(r: &AgentReport) -> String {
 }
 
 /// One warning per installed agent that is not `Ok`, for `status`.
+/// One informational line per notice, for `status`.
+pub fn notice_lines(reports: &[AgentReport]) -> Vec<String> {
+    reports
+        .iter()
+        .flat_map(|r| r.notices.iter().map(move |n| format!("{}: {n}", r.agent)))
+        .collect()
+}
+
 pub fn warning_lines(reports: &[AgentReport]) -> Vec<String> {
     reports
         .iter()
@@ -92,7 +129,7 @@ pub fn summary_json(reports: &[AgentReport]) -> Value {
         "updated": count(Status::Updated),
         "agents": reports
             .iter()
-            .map(|r| json!({ "id": r.agent.as_str(), "status": r.status.as_str() }))
+            .map(|r| json!({ "id": r.agent.as_str(), "status": r.status.as_str(), "notices": r.notices }))
             .collect::<Vec<_>>(),
     })
 }
@@ -120,6 +157,7 @@ fn report_json(r: &AgentReport) -> Value {
         "status": r.status.as_str(),
         "paused": r.paused_kinds().iter().map(Kind::as_str).collect::<Vec<_>>(),
         "checks": r.checks.iter().map(check_json).collect::<Vec<_>>(),
+        "notices": r.notices,
     });
     if r.status == Status::ActionRequired {
         doc["prompt"] = json!(compat::prompt(r, &compat::repo_location()));
@@ -141,6 +179,9 @@ fn print_report(r: &AgentReport) {
         println!("  FAIL {}  {}", c.id, c.summary);
         println!("    expected: {}", c.expected);
         println!("    observed: {}", c.observed);
+    }
+    for n in &r.notices {
+        println!("  note: {n}");
     }
     if !r.paused_kinds().is_empty() {
         println!(
@@ -216,6 +257,7 @@ pub fn run(
         ctx.reports = assess_all(agents, &mut ctx.state);
     }
     persist(roots, backups, &ctx, args.accept.is_some())?;
+    add_notices(agents, &mut ctx.reports);
 
     let shown: Vec<&AgentReport> = ctx
         .reports

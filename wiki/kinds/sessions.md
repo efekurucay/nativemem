@@ -56,6 +56,7 @@ Implemented in `plan_session` in `crates/core/src/engine.rs`.
 | No replica in a target agent that supports sessions | Write one, once per (original, target agent) | `claude_session_reaches_pi_and_round_trips` |
 | Original grew, replica unmodified (its hash equals the ledger's) | Rewrite the replica, backing up the file | `grown_original_refreshes_an_unmodified_replica_with_backup` |
 | Replica edited or continued in its own agent | Left alone from then on, no conflict note | `modified_replica_is_left_alone_without_a_note` |
+| Target agent does not accept the session (`Adapter::accepts`; Claude Code when the session is older than its retention minus a day) | Nothing: no write, no note, no tombstone, and a missing copy is not a deletion | `a_session_older_than_the_retention_is_planned_for_other_agents_but_not_claude`, `a_replica_pruned_by_the_agent_is_not_reported_as_deleted_but_a_young_one_is` in `crates/cli/tests/doctor.rs` |
 | Replica deleted by the user after it was written | Tombstone: a replica ledger row with an empty hash; never recreated | `deleted_replica_is_tombstoned_and_never_recreated` |
 | Replica file exists but was not scanned (outside the window, too large) | Not treated as deleted | `crates/core/src/engine.rs` (`plan_session`) |
 | Original missing (the agent pruned it) | Replicas stay | `vanished_original_leaves_replicas_alone` |
@@ -93,7 +94,9 @@ adopts the imported thread as the Codex replica with an empty hash, so it is nev
   (created with Claude's naming rule when absent) as `<uuid>.jsonl` with the uuid derived from the
   origin, so a refresh rewrites the same file: a `custom-title` line, one `user` or `assistant` line
   per turn chained by `parentUuid` with the minimal required fields, and a `last-prompt` line. The
-  file's mtime is set to the original's. Anchor: `crates/core/src/adapters/claude_sessions.rs`.
+  file's mtime is set to the original's. Claude deletes transcripts older than `cleanupPeriodDays` by
+  mtime, so a session older than that retention minus a day is not written to Claude
+  (`wiki/agents/claude-code.md`). Anchor: `crates/core/src/adapters/claude_sessions.rs`.
 - **Pi**: `sessions/--<cwd>--/<ISO ts>_<uuid>.jsonl`, header version 3. Reading follows the path from
   the last entry to the root. A replica has the header, the marker entry, a `session_info` entry and
   one linear `message` entry per turn. Assistant messages carry `api: "pi-virtual"` and the replica
@@ -167,6 +170,7 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 - MUST: Bump the adapter's `SESSION_WRITER_REVISION` when the written format changes.
 - MUST: Render tool activity through `render_tool` so all targets read the same.
 - MUST: Never write into Codex's SQLite databases.
+- MUST: Plan nothing for a session the target agent does not accept (`Adapter::accepts`).
 - SHOULD: Set the replica's file mtime to the original's so resume lists keep the relative order.
 
 ## Verification checklist
@@ -186,4 +190,4 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 
 ## Last updated
 
-2026-11-10
+2026-11-11

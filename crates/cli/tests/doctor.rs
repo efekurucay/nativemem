@@ -625,3 +625,118 @@ fn accepting_resumes_sync_without_duplicates() {
     assert_eq!(doc["actions"], serde_json::json!([]), "{doc}");
     assert_eq!(after.len(), files_under(&f.codex).len());
 }
+
+fn age_pi_session(f: &Fx, days: i64) {
+    for (p, _) in files_under(&f.pi.join("sessions")) {
+        nativemem_core::testkit::age_days(&p, days);
+    }
+}
+
+fn claude_replicas(f: &Fx) -> Vec<PathBuf> {
+    files_under(&f.claude.join("projects"))
+        .into_iter()
+        .filter(|(p, b)| {
+            p.extension().is_some_and(|e| e == "jsonl")
+                && String::from_utf8_lossy(b).contains("nativemem_origin")
+        })
+        .map(|(p, _)| p)
+        .collect()
+}
+
+const NOTICE: &str = "transcripts older than 30 days are deleted by Claude itself";
+
+#[test]
+fn a_session_older_than_the_retention_is_planned_for_other_agents_but_not_claude() {
+    let f = Fx::new();
+    age_pi_session(&f, 40);
+    let (_, doc) = f.json(&["sync", "--json"]);
+    let got = targets(&doc);
+    assert!(
+        !got.iter().any(|(a, n)| a == "claude" && n == ID),
+        "{got:?}"
+    );
+    assert!(got.contains(&("codex".into(), ID.into())), "{got:?}");
+    assert_eq!(doc["notes"], serde_json::json!([]));
+    let plan = text(&f.run(&["sync"]));
+    assert!(
+        !plan.lines().any(|l| l.contains("claude") && l.contains(ID)),
+        "{plan}"
+    );
+
+    let (code, doc) = f.json(&["doctor", "--json"]);
+    assert_eq!(code, Some(0));
+    assert!(agent(&doc, "claude")["notices"][0]
+        .as_str()
+        .unwrap()
+        .contains(NOTICE));
+    assert_eq!(agent(&doc, "claude")["status"], "ok");
+    assert!(text(&f.run(&["doctor"])).contains(&format!("note: {NOTICE}")));
+    let out = text(&f.run(&["status"]));
+    assert!(out.contains(&format!("claude: {NOTICE}")), "{out}");
+    assert!(
+        out.contains("set cleanupPeriodDays in Claude's settings"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_configured_retention_is_respected_and_needs_no_notice() {
+    let f = Fx::new();
+    age_pi_session(&f, 40);
+    fs::write(
+        f.claude.join("settings.json"),
+        r#"{"cleanupPeriodDays": 90}"#,
+    )
+    .unwrap();
+    let (_, doc) = f.json(&["sync", "--json"]);
+    assert!(targets(&doc).contains(&("claude".into(), ID.into())));
+    let (_, doc) = f.json(&["doctor", "--json"]);
+    assert_eq!(agent(&doc, "claude")["notices"], serde_json::json!([]));
+
+    fs::write(
+        f.claude.join("settings.json"),
+        r#"{"cleanupPeriodDays": 7}"#,
+    )
+    .unwrap();
+    age_pi_session(&f, 10);
+    let (_, doc) = f.json(&["sync", "--json"]);
+    assert!(!targets(&doc).iter().any(|(a, n)| a == "claude" && n == ID));
+    fs::write(f.claude.join("settings.json"), "not json").unwrap();
+    age_pi_session(&f, 10);
+    let (_, doc) = f.json(&["sync", "--json"]);
+    assert!(
+        targets(&doc).contains(&("claude".into(), ID.into())),
+        "unparsable means the default 30"
+    );
+}
+
+#[test]
+fn a_replica_pruned_by_the_agent_is_not_reported_as_deleted_but_a_young_one_is() {
+    let f = Fx::new();
+    age_pi_session(&f, 40);
+    fs::write(
+        f.claude.join("settings.json"),
+        r#"{"cleanupPeriodDays": 90}"#,
+    )
+    .unwrap();
+    assert_eq!(f.run(&["sync", "--apply"]).status.code(), Some(0));
+    let replicas = claude_replicas(&f);
+    assert_eq!(replicas.len(), 1);
+    fs::remove_file(&replicas[0]).unwrap();
+    fs::remove_file(f.claude.join("settings.json")).unwrap();
+    let out = text(&f.run(&["sync"]));
+    assert!(!out.contains("replica deleted"), "{out}");
+    let applied = text(&f.run(&["sync", "--apply"]));
+    assert!(
+        !applied.contains("replica deleted") && claude_replicas(&f).is_empty(),
+        "{applied}"
+    );
+
+    let young = Fx::new();
+    assert_eq!(young.run(&["sync", "--apply"]).status.code(), Some(0));
+    let replicas = claude_replicas(&young);
+    assert_eq!(replicas.len(), 1);
+    fs::remove_file(&replicas[0]).unwrap();
+    let out = text(&young.run(&["sync"]));
+    assert!(out.contains("replica deleted"), "{out}");
+}

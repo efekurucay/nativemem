@@ -98,6 +98,13 @@ pub trait Adapter {
     fn supports(&self, _kind: Kind, _scope: &Scope) -> bool {
         true
     }
+    /// Whether this agent keeps `item` for as long as it takes to be useful, for example a
+    /// session older than the agent's retention is deleted by the agent soon after it is written.
+    /// The engine plans nothing for an item the agent does not accept: no write, no note, no
+    /// tombstone for a copy that is missing.
+    fn accepts(&self, _item: &Item) -> bool {
+        true
+    }
     /// Version of this adapter's output format for `kind`. A replica written with a lower
     /// revision is rewritten while it is unmodified; bump it when the written format changes.
     fn writer_revision(&self, _kind: Kind) -> u32 {

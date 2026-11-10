@@ -77,6 +77,11 @@ counts automated sessions per agent (`automated_sessions` in `--json`).
 A copy written by an older version of the tool is rewritten once when it is still unmodified.
 Pi copies open with Pi's own default model, without a model-restore warning.
 
+Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30, in its `settings.json`)
+by modification time, and a copy keeps its original's time, so sessions older than that retention
+minus a day are not copied into Claude Code; `doctor` and `status` print a notice about it when the
+default applies and such sessions exist. Nothing in Claude's settings is changed.
+
 Codex copies are rollout files under `sessions/` shaped like what Codex's own importer writes; for a
 Claude session this tool also adds the matching record to Codex's import ledger so Codex does not
 import it again, and a session Codex already imported counts as its copy. Codex's databases are not

@@ -456,6 +456,9 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
         for line in doctor::warning_lines(reports) {
             println!("{line}");
         }
+        for line in doctor::notice_lines(reports) {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -846,9 +849,13 @@ fn run(cli: &Cli) -> Outcome<u8> {
     let agents = Agents::open(&roots, &backups, sessions, &doctor::blocked_kinds(&reports));
     let attention = |needs: bool| if needs { EXIT_ATTENTION } else { 0 };
     match &cli.command {
-        Command::Status { json } => status(&roots, &agents, &reports, *json)
-            .map(|()| 0)
-            .map_err(Failure::from),
+        Command::Status { json } => {
+            let mut reports = reports;
+            doctor::add_notices(&agents, &mut reports);
+            status(&roots, &agents, &reports, *json)
+                .map(|()| 0)
+                .map_err(Failure::from)
+        }
         Command::Sync {
             apply,
             allow_mass_delete,

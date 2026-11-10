@@ -133,6 +133,7 @@ either way)
 { "agents": [
     { "id": "codex", "installed": true, "version": "0.170.0", "previous_version": "0.167.0",
       "version_changed_ms": 1794304800000, "status": "action_required", "paused": ["session"],
+      "notices": [],
       "checks": [
         { "id": "codex.threads_columns", "feature_kinds": ["session"],
           "summary": "threads table column signature (name, type, not null, default)",
@@ -147,7 +148,8 @@ either way)
 One entry per agent in the order claude, codex, opencode, pi (`--agent <id>` keeps one).
 `status` is `ok`, `updated`, `action_required` or `not_installed`; `paused` lists the kinds
 (`memory`, `instruction`, `session`) that failing checks stop. `prompt` is present only for
-`action_required`. `doctor --accept <agent> --json` records the failing checks' observed values
+`action_required`. `notices` are informational lines (the app shows them as secondary text in the
+agent's Overview box); they never change `status`. `doctor --accept <agent> --json` records the failing checks' observed values
 as reviewed, returns the document after that and adds
 `"accepted": [ { "agent": "codex", "check": "codex.threads_columns", "observed": "…" } ]`.
 An agent without a home directory fails with code `not_installed`.

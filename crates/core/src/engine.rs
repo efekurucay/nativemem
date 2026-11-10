@@ -582,7 +582,10 @@ fn plan_session(
     let label = item_label(&orig.item);
     for adapter in adapters {
         let agent = adapter.id();
-        if agent == key.origin || !adapter.supports(Kind::Session, scope) {
+        if agent == key.origin
+            || !adapter.supports(Kind::Session, scope)
+            || !adapter.accepts(&orig.item)
+        {
             continue;
         }
         let obs = replicas.get(&(key.clone(), agent.clone())).copied();

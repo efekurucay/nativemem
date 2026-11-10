@@ -65,6 +65,16 @@ agent. A failing check whose observed value equals its recorded value counts as 
 through behind the first. Probe observed values for failures are therefore built from stable facts
 (unknown names, missing keys, counts of deviations), not from the size of the sample.
 
+## Notices
+
+`AgentReport.notices` carries informational lines that never change the status or the exit code. The
+only notice: while Claude Code's retention is the default 30 days (`cleanupPeriodDays` absent from its
+settings), `doctor` and `status` say `transcripts older than 30 days are deleted by Claude itself; set
+cleanupPeriodDays in Claude's settings to keep older sessions` when another agent holds a session
+Claude would delete (`add_notices` in `crates/cli/src/doctor.rs`, which scans those agents). It is the
+`notices` array of each agent in `doctor --json` and `status --json` and secondary text in the agent's
+Overview box. The settings file is never edited.
+
 ## Gating
 
 The kinds of failing checks are paused for that agent only:

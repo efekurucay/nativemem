@@ -1,6 +1,7 @@
 { "agents": [
     { "id": "claude", "installed": true, "version": "2.1.322", "previous_version": null,
       "version_changed_ms": null, "status": "ok", "paused": [],
+      "notices": ["transcripts older than 30 days are deleted by Claude itself; set cleanupPeriodDays in Claude's settings to keep older sessions"],
       "checks": [ { "id": "claude.line_types", "feature_kinds": ["session"], "summary": "top-level transcript line types",
                     "expected": "only known types", "observed": "unknown types: none", "ok": true, "accepted": false,
                     "sources": ["crates/core/src/adapters/claude_sessions.rs"] } ] },
