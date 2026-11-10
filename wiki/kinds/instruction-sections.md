@@ -71,7 +71,9 @@ originals: a section can originate in any agent.
 - OpenCode reads `~/.claude/CLAUDE.md` only while its own global `AGENTS.md` is absent. Creating that
   file replaces the fallback; the synced region carries the Claude Code sections over. See
   `wiki/agents/opencode.md`.
-- Pi reads its global `AGENTS.md` first. See `wiki/agents/pi.md`.
+- Pi loads the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` in
+  each directory, so an `AGENTS.override.md` in its home shadows the synced `AGENTS.md`. See
+  `wiki/agents/pi.md`.
 - Hermes has no global instruction file equivalent and no adapter. See `wiki/agents/hermes.md`.
 
 ## Source anchors
@@ -104,4 +106,4 @@ originals: a section can originate in any agent.
 
 ## Last updated
 
-2026-11-10
+2026-11-11

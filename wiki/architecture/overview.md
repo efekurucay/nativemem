@@ -17,6 +17,7 @@ write safety in `wiki/architecture/safety.md`.
 | Adapter | One per agent (OpenCode and Pi share a generic one for `AGENTS.md`). Scans the agent's native store and writes, updates and removes entries in the agent's own format | `crates/core/src/model.rs` (`Adapter`), `crates/core/src/adapters/` |
 | Neutral model | `Item { kind, scope, name, description, category, body }` and `Observed` (an item found on disk, with `replica_of` when it carries a marker) | `crates/core/src/model.rs` |
 | Ledger | SQLite file `<state dir>/ledger.db` | `crates/core/src/ledger.rs` |
+| Compatibility watch | Probes per adapter, `compat.json`, status and prompt; pauses the kinds of failing checks | `crates/core/src/compat.rs`, `wiki/architecture/compatibility.md` |
 | Engine | `plan` is pure; `apply` executes and updates the ledger. It knows nothing about formats | `crates/core/src/engine.rs` |
 | CLI | Resolves roots, takes the lock, prints text or one JSON document | `crates/cli/src/main.rs` |
 | Desktop app | A window onto the CLI; holds no sync logic | `docs/desktop.md`, `apps/macos/Sources/NativememKit/NativememCLI.swift` |
@@ -91,6 +92,10 @@ fallback. Test: `memory_is_planned_only_for_agents_that_support_it`.
 | OpenCode | replicas only | yes | no |
 | Pi | replicas only | yes | yes |
 
+Every adapter also has `with_blocked_kinds(...)`: a kind in that list makes `supports` false. The CLI
+fills it from failing compatibility checks, so a paused kind is neither read from nor written to the
+agent and what exists for it is left alone (`wiki/architecture/compatibility.md`).
+
 Anchors: `supports` in `crates/core/src/adapters/claude.rs`, `codex.rs`, `pi.rs`, `agents_file.rs`.
 
 ## Writer revisions
@@ -114,17 +119,19 @@ session format changes. Tests: `unmodified_replica_with_an_older_writer_revision
 
 ## CLI
 
-Commands: `status`, `sync` (dry run unless `--apply`), `items`, `delete`, `edit`, `schedule
-install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
+Commands: `status`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
+`delete`, `edit`, `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
 `--opencode-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
 `NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`), `--session-days`
 (`NATIVEMEM_SESSION_DAYS`), `--exclude-automated-sessions`, `--no-sessions`. Without a flag, a root
 falls back to `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, then
 `~/.claude`, `~/.codex`, `~/.config/opencode`, `~/.pi/agent`; the state directory defaults to
-`~/.nativemem`. `NATIVEMEM_CODEX_SESSION_WRITES=on` enables Codex session writes. Exit codes: 0
-success, 2 when conflicts or skipped writes remain, 1 on error. With `--json`, one JSON document is
+`~/.nativemem`. `NATIVEMEM_CODEX_SESSION_WRITES=on` enables Codex session writes. `NATIVEMEM_REPO` names the repo in
+`doctor` prompts; `NATIVEMEM_NOTIFY_FILE` redirects notifications to a file. Exit codes: 0
+success, 2 when conflicts or skipped writes remain, 3 when `doctor` finds an agent that needs action,
+1 on error. With `--json`, one JSON document is
 printed, and errors are `{"error": ..., "code": ...}` with codes `busy`, `mass_delete`,
-`unsupported`, `invalid`, `not_found`, `unknown_agent`, `io`, `parse`, `ledger`,
+`unsupported`, `invalid`, `not_found`, `unknown_agent`, `not_installed`, `io`, `parse`, `ledger`,
 `unsupported_platform`. The JSON shapes are specified in `docs/desktop.md`. Anchor: `Failure::code`
 in `crates/cli/src/main.rs`.
 
@@ -135,7 +142,8 @@ in `crates/cli/src/main.rs`.
 filtered out of the item views (`all.filter { $0.kind != Item.sessionKind }` in the same file);
 `status` counts them separately. The app finds the binary through app settings, `NATIVEMEM_BIN`, a
 file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebrew/bin`
-(`apps/macos/Sources/NativememKit/NativememCLI.swift`).
+(`apps/macos/Sources/NativememKit/NativememCLI.swift`). It also runs `doctor --json` and shows the
+compatibility notices on the Overview (`wiki/architecture/compatibility.md`).
 
 ## Source anchors
 
@@ -143,6 +151,7 @@ file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebr
 - `crates/core/src/engine.rs`
 - `crates/core/src/ledger.rs`
 - `crates/cli/src/main.rs`
+- `crates/cli/src/doctor.rs`
 - `crates/cli/tests/cli.rs`
 - `docs/design.md`
 - `docs/desktop.md`
@@ -164,6 +173,7 @@ file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebr
 ## Related docs
 
 - `wiki/architecture/safety.md`
+- `wiki/architecture/compatibility.md`
 - `wiki/kinds/memory.md`
 - `wiki/kinds/instruction-sections.md`
 - `wiki/kinds/sessions.md`
@@ -171,4 +181,4 @@ file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebr
 
 ## Last updated
 
-2026-11-10
+2026-11-11

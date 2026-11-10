@@ -84,7 +84,7 @@ The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`
   path (380 of 380 local files had directory name equal to the encoding of the header cwd).
 - **Instruction candidates are ordered.** If `AGENTS.override.md` exists in the Pi home it is loaded
   instead of `AGENTS.md`, so synced sections would not reach the model (OBSERVED in the package
-  source; README says only that Pi reads its global `AGENTS.md` first).
+  source; the README states the same).
 - **No size cap on instruction files**: content is inlined whole, so the routing block costs tokens
   in every session.
 - **No approval layer for file reads.** The `read` tool resolves absolute paths and `~` without
@@ -95,12 +95,27 @@ The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`
   that registers `/mcp` replaces the built-in support and Pi stops reading `mcp.json`.
 - **Reload**: `/reload` after edits made outside the session.
 
-## Version detection
+## Version detection and compatibility probes
 
-`nativemem` does not detect the Pi version. Session replicas are written with header
-`version: 3`. The installed version comes from the agent's own `--version`, run by the engineer, never
-by tests. Pi upgrades a session file's format when it loads it; every header seen locally was
-version 3.
+The version is the `version` of the `package.json` found above the resolved `pi` executable: the
+first `pi` on `PATH` is located and its symlinks are resolved, never run (`version` in
+`crates/core/src/adapters/pi_probes.rs`); without one the version is unknown. A scheduled job has a
+minimal `PATH`, so it often cannot see the version; the remembered one stays. Session replicas are
+written with header `version: 3`.
+
+The probes (`wiki/architecture/compatibility.md`) read the newest session for the header and the
+newest 3 sessions (last 1 MiB each) for entry types.
+
+| Check id | Protects | Expected constant | Fails when |
+|---|---|---|---|
+| `pi.session_header` | session | `HEADER_TYPE` `session`, `HEADER_VERSION` `3`, keys `cwd`, `id`, `timestamp` | the header has another `type` or `version`, or lacks a key |
+| `pi.entry_types` | session | `KNOWN_ENTRY_TYPES`: `message`, `session_info`, `custom`, `custom_message`, `model_change`, `thinking_level_change`, `compaction`, `branch_summary`, `label` | an entry has another `type` |
+| `pi.cwd_encoding` | session | the directory name equals `encode_cwd(header cwd)` | a sampled session (newest 8) sits in another directory |
+
+Evidence (read-only statistics on the development machine, Pi 1.5.0): the headers of the newest 30
+sessions all read `type: session`, `version: 3` with the keys above; those sessions held 6 entry
+types, and the package source (`dist/core/session-manager.js`) defines the other 3; 60 of 60 sampled
+directory names equal the encoding of the header `cwd`.
 
 ## Facts and evidence
 
@@ -112,15 +127,18 @@ version 3.
 | `--continue` sorts by file mtime | OBSERVED | package source |
 | A replica opens without a model warning | INFERRED from Pi's model-restore code | `REPLICA_API` comment in `pi.rs`; the staged check confirms it |
 | Pi lists a nativemem-written session in its picker | `[UNVERIFIED]` until the staged check is recorded | `wiki/guides/verify-with-real-agents.md` |
+| The three probes pass on the fixtures; header version 4, an unknown entry type and a moved session directory each fail one check | VERIFIED | `crates/core/tests/probes.rs` (`pi_*`) |
 | An `AGENTS.override.md` shadows `AGENTS.md` | OBSERVED | package source |
 | Global context candidates and ancestor loading | OBSERVED | package source |
 
 ## Source anchors
 
 - `crates/core/src/adapters/pi.rs`
+- `crates/core/src/adapters/pi_probes.rs`
 - `crates/core/src/adapters/agents_file.rs`
 - `crates/core/src/adapters/memory_store.rs`
 - `crates/core/src/testkit.rs` (`PiHome`)
+- `crates/core/tests/probes.rs`
 - `README.md` (Notes)
 
 ## Rules
@@ -128,6 +146,7 @@ version 3.
 - MUST: Keep `api: "pi-virtual"` on replica assistant messages and no `model_change` entry.
 - MUST: Mark replicas with the `nativemem-origin` custom entry.
 - MUST: Set the replica file mtime to the original's.
+- MUST: Update the probe constants in `pi_probes.rs` and the table above together with the adapter.
 - SHOULD: Check for `AGENTS.override.md` when an instruction section does not reach Pi.
 
 ## Verification checklist
@@ -138,6 +157,8 @@ version 3.
 
 ## Related docs
 
+- `wiki/architecture/compatibility.md`
+- `wiki/runbooks/agent-update-action-required.md`
 - `wiki/kinds/sessions.md`
 - `wiki/kinds/memory.md`
 - `wiki/guides/verify-with-real-agents.md`
@@ -145,4 +166,4 @@ version 3.
 
 ## Last updated
 
-2026-11-10
+2026-11-11

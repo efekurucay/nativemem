@@ -1,0 +1,5 @@
+{ "agents": [
+    { "id": "claude", "installed": true, "version": null, "previous_version": null,
+      "version_changed_ms": null, "status": "ok", "paused": [], "checks": [] },
+    { "id": "pi", "installed": false, "version": null, "previous_version": null,
+      "version_changed_ms": null, "status": "not_installed", "paused": [], "checks": [] } ] }

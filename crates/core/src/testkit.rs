@@ -187,11 +187,53 @@ impl CodexHome {
         path
     }
 
+    /// Writes `state_<number>.sqlite` with the `threads` table the adapter expects, plus the
+    /// `extra` column definitions (`name TYPE`) appended to it.
+    pub fn write_state_db(&self, number: u32, extra: &[&str]) {
+        use crate::adapters::codex_probes::THREADS_COLUMNS;
+        let mut columns: Vec<String> = THREADS_COLUMNS
+            .iter()
+            .map(|c| {
+                let parts: Vec<&str> = c.splitn(4, ':').collect();
+                let mut def = format!("{} {}", parts[0], parts[1]);
+                if parts[2] == "1" {
+                    def.push_str(" NOT NULL");
+                }
+                if !parts[3].is_empty() {
+                    def.push_str(&format!(" DEFAULT {}", parts[3]));
+                }
+                def
+            })
+            .collect();
+        columns.extend(extra.iter().map(|c| c.to_string()));
+        fs::create_dir_all(&self.root).unwrap();
+        let db = self.root.join(format!("state_{number}.sqlite"));
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute(
+            &format!("CREATE TABLE threads ({})", columns.join(", ")),
+            [],
+        )
+        .unwrap();
+    }
+
+    /// Writes `version.json` the way Codex's update check does.
+    pub fn write_version(&self, version: &str) {
+        fs::create_dir_all(&self.root).unwrap();
+        fs::write(
+            self.root.join("version.json"),
+            json!({"latest_version": version}).to_string(),
+        )
+        .unwrap();
+    }
+
     /// Writes Codex's importer ledger listing `thread_ids` as imported.
     pub fn write_import_ledger(&self, thread_ids: &[&str]) {
         let records: Vec<Value> = thread_ids
             .iter()
-            .map(|id| json!({"source_path": "/x/s.jsonl", "imported_thread_id": id, "title": "t"}))
+            .map(|id| {
+                json!({"source_path": "/x/s.jsonl", "content_sha256": "00", "imported_thread_id": id,
+                       "imported_at": 1, "source_modified_at": 2, "connector_names": [], "title": "t"})
+            })
             .collect();
         fs::create_dir_all(&self.root).unwrap();
         fs::write(

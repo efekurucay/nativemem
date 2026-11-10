@@ -1,0 +1,20 @@
+{ "agents": [
+    { "id": "claude", "installed": true, "version": "2.1.322", "previous_version": null,
+      "version_changed_ms": null, "status": "ok", "paused": [],
+      "checks": [ { "id": "claude.line_types", "feature_kinds": ["session"], "summary": "top-level transcript line types",
+                    "expected": "only known types", "observed": "unknown types: none", "ok": true, "accepted": false,
+                    "sources": ["crates/core/src/adapters/claude_sessions.rs"] } ] },
+    { "id": "codex", "installed": true, "version": "0.170.0", "previous_version": "0.167.0",
+      "version_changed_ms": 1794304800000, "status": "action_required", "paused": ["session"],
+      "checks": [
+        { "id": "codex.state_db", "feature_kinds": ["session"], "summary": "highest state_<n>.sqlite number",
+          "expected": "5", "observed": "5", "ok": true, "accepted": false, "sources": [] },
+        { "id": "codex.threads_columns", "feature_kinds": ["session"], "summary": "threads table column signature",
+          "expected": "43 columns, sha256 aaaaaaaaaaaa",
+          "observed": "44 columns, sha256 bbbbbbbbbbbb; added: brand_new; removed or changed: none",
+          "ok": false, "accepted": false, "sources": ["crates/core/src/adapters/codex_probes.rs"] } ],
+      "prompt": "You are working in the nativemem repository at /Users/x/nativemem." },
+    { "id": "opencode", "installed": false, "version": null, "previous_version": null,
+      "version_changed_ms": null, "status": "not_installed", "paused": [], "checks": [] },
+    { "id": "pi", "installed": true, "version": "1.6.0", "previous_version": "1.5.0",
+      "version_changed_ms": 1794304800000, "status": "updated", "paused": [], "checks": [] } ] }

@@ -19,9 +19,9 @@ formats are in `wiki/agents/`.
 | Atomic writes | Write a temp file named `.<file>.nativemem-tmp-<pid>` in the same directory, `fsync` it, rename it over the target. A failed write removes the temp file | `atomic_write` in `crates/core/src/fsx.rs`; test `atomic_write_creates_parents_and_replaces` |
 | Mass-delete guard | `sync --apply` refuses with error code `mass_delete` when the plan removes more than 10 entries, or more than 3 entries and more than 20% of the ledger's items. Implemented as `removes > 10 \|\| (removes > 3 && removes * 5 > total)`. `total` counts ledger items that are not sessions. `--allow-mass-delete` lifts it. The check runs before anything is written | `exceeds_mass_delete_limit` and `apply` in `crates/core/src/engine.rs`; tests `mass_delete_limit_rule`, `mass_delete_guard_triggers_and_can_be_lifted`, `mass_delete_reports_error_code` |
 | Failed scan aborts | If any adapter's `scan` fails, the run stops before planning, so a failed read never looks like a mass deletion | `plan` in `crates/core/src/engine.rs`; test `failed_scan_plans_nothing` |
-| Single-writer lock | `sync --apply`, `delete` and `edit` take an exclusive lock on `<state dir>/sync.lock` for the whole run. A second writer fails with code `busy` and writes nothing. `status`, `items` and dry-run `sync` do not lock | `lock_state` in `crates/cli/src/main.rs`; test `concurrent_run_is_refused_while_lock_is_held` |
+| Single-writer lock | `sync --apply`, `delete`, `edit` and `doctor --accept` take an exclusive lock on `<state dir>/sync.lock` for the whole run. A second writer fails with code `busy` and writes nothing. `status`, `items` and dry-run `sync` do not lock; a plain `doctor` takes the lock only to write `compat.json` and skips that write when it is busy | `lock_state` in `crates/cli/src/main.rs`; test `concurrent_run_is_refused_while_lock_is_held` |
 | Nothing inside git repositories | Writes go only to agent home directories and the state directory. Project-level instruction files live in repositories and are never read or written; replicas for agents without native memory go to the agent home plus a marked block in the agent's global instruction file | `crates/core/src/adapters/memory_store.rs`; test `memory_writes_stay_inside_the_declared_paths` |
-| Agent-owned state is untouched | No code reads or writes Codex SQLite files, `hooks.json`, `config.toml`, Claude's `~/.claude.json`, credential or auth files, or generated `memories/MEMORY.md` content. Codex generated memory is read-only | grep of `crates/` finds none of these names outside tests; tests `originals_are_read_only`, `instruction_originals_are_editable_but_memory_originals_are_not` |
+| Agent-owned state is untouched | No code writes Codex SQLite files, and only the compatibility probe reads one (`state_<n>.sqlite`, opened read-only with `immutable=1`, so no sidecar file is created). No code reads or writes `hooks.json`, `config.toml`, Claude's `~/.claude.json`, credential or auth files, or generated `memories/MEMORY.md` content. Codex generated memory is read-only | grep of `crates/` finds none of these names outside tests; tests `originals_are_read_only`, `instruction_originals_are_editable_but_memory_originals_are_not` |
 | Secrets are never printed | The ledger stores ids, hashes and paths, not text. `items` prints no session bodies. `status` prints labels and reasons only. Session tool output is cut at 1500 characters and tool input at 600, but a session can still contain secrets the user typed: sessions are copied between the user's own agent homes and never printed or sent anywhere | `crates/core/src/ledger.rs`, `crates/cli/src/main.rs`, `crates/core/src/session.rs` (`TOOL_RESULT_LIMIT`, `TOOL_INPUT_LIMIT`); test `items_leaves_sessions_out_unless_asked_and_never_prints_bodies` |
 | Sessions are not deletable here | `delete` and `edit` refuse session ids with code `unsupported` | `refuse_session` in `crates/cli/src/main.rs`; test `delete_and_edit_refuse_session_ids` |
 | Oversized sources | Session sources larger than 200 MB are skipped and listed by `status` | `MAX_SOURCE_BYTES` in `crates/core/src/session.rs`; test `oversized_sources_are_skipped_and_reported` |
@@ -63,6 +63,7 @@ Rollback from the backup directory is described there too.
 - `crates/cli/src/main.rs`
 - `crates/cli/tests/cli.rs`
 - `crates/core/src/testkit.rs`
+- `crates/core/src/adapters/codex_probes.rs`
 - `README.md` (Safety section)
 
 ## Rules
@@ -88,7 +89,8 @@ Rollback from the backup directory is described there too.
 - `wiki/architecture/overview.md`
 - `wiki/guides/verify-with-real-agents.md`
 - `wiki/decisions/native-flow-only.md`
+- `wiki/architecture/compatibility.md`
 
 ## Last updated
 
-2026-11-10
+2026-11-11

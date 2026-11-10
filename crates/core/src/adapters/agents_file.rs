@@ -4,11 +4,13 @@
 
 use std::path::PathBuf;
 
+use crate::compat::Check;
 use crate::error::{Error, Result};
 use crate::fsx::BackupSession;
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 
 use super::memory_store::MemoryStore;
+use super::opencode_probes;
 use super::sections::InstructionFile;
 
 const INSTRUCTION_FILE: &str = "AGENTS.md";
@@ -16,6 +18,9 @@ const MEMORY_DIR: &str = "nativemem/memory";
 
 pub struct AgentsFileAdapter {
     agent: AgentId,
+    home: PathBuf,
+    search_path: Option<std::ffi::OsString>,
+    blocked: Vec<Kind>,
     instructions: InstructionFile,
     memory: MemoryStore,
 }
@@ -25,6 +30,9 @@ impl AgentsFileAdapter {
     pub fn new(id: &str, dir: PathBuf, state_dir: PathBuf, backups: BackupSession) -> Self {
         let agent = AgentId::new(id);
         AgentsFileAdapter {
+            home: dir.clone(),
+            search_path: crate::probe::process_path(),
+            blocked: Vec::new(),
             memory: MemoryStore::new(
                 agent.clone(),
                 dir.clone(),
@@ -45,6 +53,18 @@ impl AgentsFileAdapter {
         }
     }
 
+    /// Kinds this adapter neither reads nor writes while its compatibility checks fail.
+    pub fn with_blocked_kinds(mut self, kinds: &[Kind]) -> Self {
+        self.blocked = kinds.to_vec();
+        self
+    }
+
+    /// Where the version probe looks for the agent's executable [default: `PATH`].
+    pub fn with_search_path(mut self, path: std::ffi::OsString) -> Self {
+        self.search_path = Some(path);
+        self
+    }
+
     fn unsupported(&self, operation: &str) -> Error {
         Error::unsupported(self.agent.as_str(), operation)
     }
@@ -55,16 +75,36 @@ impl Adapter for AgentsFileAdapter {
         self.agent.clone()
     }
 
+    fn version(&self) -> Option<String> {
+        match self.agent.as_str() {
+            "opencode" => opencode_probes::version(self.search_path.as_deref()),
+            _ => None,
+        }
+    }
+
+    fn probes(&self) -> Vec<Check> {
+        match self.agent.as_str() {
+            "opencode" => opencode_probes::probes(&self.home),
+            _ => Vec::new(),
+        }
+    }
+
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
-        matches!(
-            (kind, scope),
-            (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
-        )
+        !self.blocked.contains(&kind)
+            && matches!(
+                (kind, scope),
+                (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
+            )
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
-        let mut out = self.instructions.scan()?;
-        out.extend(self.memory.scan()?);
+        let mut out = Vec::new();
+        if !self.blocked.contains(&Kind::Instruction) {
+            out.extend(self.instructions.scan()?);
+        }
+        if !self.blocked.contains(&Kind::Memory) {
+            out.extend(self.memory.scan()?);
+        }
         Ok(out)
     }
 

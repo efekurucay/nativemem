@@ -113,13 +113,33 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
 - **Context cap**: Codex loads project docs up to `project_doc_max_bytes = 32768` (binary strings,
   OBSERVED), which matters for the routing block size.
 
-## Version detection
+## Version detection and compatibility probes
 
-`nativemem` does not detect the Codex version. The rollout writer pins `CLI_VERSION`
+The version is `latest_version` of `<codex home>/version.json` (the version Codex's update check
+last saw), else `payload.cli_version` of the newest rollout (`version` in
+`crates/core/src/adapters/codex_probes.rs`). The rollout writer pins `CLI_VERSION`
 (`0.167.0-alpha.3.2`) and a short base-instructions text in
-`crates/core/src/adapters/codex_rollout.rs`. A rollout records the writing version in
-`session_meta.cli_version`; `~/.codex/version.json` holds `latest_version`; the installed version
-comes from the agent's own `--version`, run by the engineer, never by tests.
+`crates/core/src/adapters/codex_rollout.rs`; a rollout records the writing version in
+`session_meta.cli_version`.
+
+The probes (`wiki/architecture/compatibility.md`) open `state_<n>.sqlite` read-only with
+`immutable=1`, so no `-wal`, `-shm` or journal file is created and nothing is written. They read the
+newest 50 rollouts by date path. A home without a state database, rollout or import ledger passes
+these checks.
+
+| Check id | Protects | Expected constant | Fails when |
+|---|---|---|---|
+| `codex.state_db` | session | `SUPPORTED_STATE_DB`: the highest `state_<n>.sqlite` is `5` | another number is the highest |
+| `codex.threads_columns` | session | `THREADS_COLUMNS`: the `threads` table has these 43 columns, compared as a sorted `name:type:notnull:default` list and shown as a count plus the first 12 hex digits of its SHA-256 | a column is added, removed or changed (the observed value names them), or the table is unreadable |
+| `codex.session_meta_keys` | session | `REQUIRED_META_KEYS`: the newest rollout's first line is `session_meta` with `cwd`, `id`, `source`, `timestamp` | the first line is another type or a key is missing |
+| `codex.import_ledger_keys` | session | `LEDGER_RECORD_KEYS`: every `records[]` entry has exactly `connector_names`, `content_sha256`, `imported_at`, `imported_thread_id`, `source_modified_at`, `source_path`, `title` | a key is added or missing, or `records` is not an array |
+| `codex.rollout_layout` | session | `ROLLOUT_LAYOUT`: `sessions/YYYY/MM/DD/rollout-YYYY-MM-DDTHH-MM-SS-<36 character id>.jsonl` | a sampled rollout path differs |
+
+Evidence (read-only statistics on the development machine, Codex 0.167.0): `state_5.sqlite` holds
+the 43-column `threads` table; every one of the newest 40 rollouts starts with `session_meta` and the
+four required keys (optional keys such as `git`, `thread_source` and `multi_agent_version` vary, so
+they are not required); all 84 ledger records carry the 7 keys; all 212 rollout paths match the
+layout.
 
 ## Facts and evidence
 
@@ -132,6 +152,7 @@ comes from the agent's own `--version`, run by the engineer, never by tests.
 | Listing needs a `threads` row with non-empty `preview` | INFERRED | 311 `session_index` lines vs 641 threads; `codex resume` not run |
 | Rollout alone is listed after a backfill | `[UNVERIFIED]` | `backfill_state` tables exist; behaviour not tested |
 | `hooks.state` hashes pin hook commands | OBSERVED | `config.toml` structure and binary strings |
+| The five probes pass on the fixtures; a `threads` column, a `state_6.sqlite`, an extra ledger key, a missing `session_meta` key and a flat rollout path each fail one check, and the database file is never written | VERIFIED | `crates/core/tests/probes.rs` (`codex_*`) |
 | MCP `enabled` key and `type` handling | `[UNVERIFIED]` | not testable read-only |
 | A nativemem-written rollout is read back as a replica | VERIFIED | test `claude_session_becomes_a_codex_rollout_with_an_import_record` |
 | Codex lists a nativemem-written rollout in its resume list | `[UNVERIFIED]` | needs the staged check |
@@ -142,18 +163,21 @@ comes from the agent's own `--version`, run by the engineer, never by tests.
 - `crates/core/src/adapters/codex_sessions.rs`
 - `crates/core/src/adapters/codex_rollout.rs`
 - `crates/core/src/adapters/codex_imports.rs`
+- `crates/core/src/adapters/codex_probes.rs`
 - `crates/core/src/adapters/memory_store.rs`
 - `crates/cli/src/main.rs` (`NATIVEMEM_CODEX_SESSION_WRITES`)
-- `crates/core/src/testkit.rs` (`CodexHome`)
+- `crates/core/src/testkit.rs` (`CodexHome`, `write_state_db`)
+- `crates/core/tests/probes.rs`
 - `docs/design.md` (Codex adapter, Chat sessions)
 
 ## Rules
 
-- MUST: Never write Codex's SQLite files, `config.toml`, `hooks.json` or generated memory files.
+- MUST: Never write Codex's SQLite files, `config.toml`, `hooks.json` or generated memory files; the probes open the state database read-only with `immutable=1` and nothing else does.
 - MUST: Treat a rollout containing `<EXTERNAL SESSION IMPORTED>` as a replica, never an original.
 - MUST: Keep session writes gated until the thread-row writer exists and is verified.
 - MUST: Back up `external_agent_session_imports.json` before changing it; do not overwrite an
   unparsable one.
+- MUST: Update the probe constants in `codex_probes.rs` and the table above together with the adapter.
 - SHOULD: Re-read the header shape on a Codex upgrade before bumping `CLI_VERSION`.
 
 ## Verification checklist
@@ -164,6 +188,8 @@ comes from the agent's own `--version`, run by the engineer, never by tests.
 
 ## Related docs
 
+- `wiki/architecture/compatibility.md`
+- `wiki/runbooks/agent-update-action-required.md`
 - `wiki/kinds/sessions.md`
 - `wiki/decisions/codex-session-writes-gated.md`
 - `wiki/guides/verify-with-real-agents.md`
@@ -171,4 +197,4 @@ comes from the agent's own `--version`, run by the engineer, never by tests.
 
 ## Last updated
 
-2026-11-10
+2026-11-11

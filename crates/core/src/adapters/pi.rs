@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::compat::Check;
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
@@ -17,6 +18,7 @@ use crate::session::{
 };
 
 use super::agents_file::AgentsFileAdapter;
+use super::pi_probes;
 
 const AGENT: &str = "pi";
 /// `customType` of the entry that marks a session as a replica. Pi keeps custom entries out of
@@ -36,6 +38,8 @@ pub struct PiAdapter {
     backups: BackupSession,
     instructions: AgentsFileAdapter,
     options: Option<SessionOptions>,
+    search_path: Option<std::ffi::OsString>,
+    blocked: Vec<Kind>,
 }
 
 /// What one session file holds.
@@ -318,7 +322,21 @@ impl PiAdapter {
             state_dir,
             backups,
             options: None,
+            search_path: crate::probe::process_path(),
+            blocked: Vec::new(),
         }
+    }
+
+    /// Kinds this adapter neither reads nor writes while its compatibility checks fail.
+    pub fn with_blocked_kinds(mut self, kinds: &[Kind]) -> Self {
+        self.blocked = kinds.to_vec();
+        self
+    }
+
+    /// Where the version probe looks for the `pi` executable [default: `PATH`].
+    pub fn with_search_path(mut self, path: std::ffi::OsString) -> Self {
+        self.search_path = Some(path);
+        self
     }
 
     /// Takes part in session sync; without this call sessions stay out. Pi's session files carry
@@ -334,6 +352,9 @@ impl PiAdapter {
 
     fn scan_sessions(&self) -> Result<SessionScan> {
         let mut out = SessionScan::default();
+        if self.blocked.contains(&Kind::Session) {
+            return Ok(out);
+        }
         let Some(window) = self.options.map(|o| o.window()) else {
             return Ok(out);
         };
@@ -424,9 +445,18 @@ impl Adapter for PiAdapter {
         AgentId::new(AGENT)
     }
 
+    fn version(&self) -> Option<String> {
+        pi_probes::version(self.search_path.as_deref())
+    }
+
+    fn probes(&self) -> Vec<Check> {
+        pi_probes::probes(&self.home)
+    }
+
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
-        (kind == Kind::Session && matches!(scope, Scope::Project(_)))
-            || self.instructions.supports(kind, scope)
+        !self.blocked.contains(&kind)
+            && ((kind == Kind::Session && matches!(scope, Scope::Project(_)))
+                || self.instructions.supports(kind, scope))
     }
 
     fn writer_revision(&self, kind: Kind) -> u32 {
@@ -439,6 +469,7 @@ impl Adapter for PiAdapter {
 
     fn scan(&self) -> Result<Vec<Observed>> {
         let mut out = self.instructions.scan()?;
+        out.retain(|o| !self.blocked.contains(&o.item.kind));
         out.extend(self.scan_sessions()?.observed);
         Ok(out)
     }

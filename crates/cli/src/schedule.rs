@@ -167,6 +167,7 @@ fn install(
     }
     program.push("sync".into());
     program.push("--apply".into());
+    program.push("--notify".into());
 
     if !args.no_launchctl && is_loaded(args)? {
         launchctl(&["bootout", &format!("gui/{}/{LABEL}", user_id()?)])?;

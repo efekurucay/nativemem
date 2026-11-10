@@ -38,7 +38,8 @@ apps/macos/scripts/bundle.sh                            # builds apps/macos/buil
 ```
 
 Binary usage (on temp roots only): `nativemem status`, `items [--kind ...]`, `sync [--apply]`,
-`delete`, `edit`, `schedule install|status|uninstall`. See `README.md`.
+`doctor`, `delete`, `edit`, `schedule install|status|uninstall`. See `README.md`. When `doctor` reports
+an agent that needs action, follow `wiki/runbooks/agent-update-action-required.md`.
 
 ## Related
 

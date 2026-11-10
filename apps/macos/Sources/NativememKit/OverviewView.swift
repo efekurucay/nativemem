@@ -17,6 +17,16 @@ struct OverviewView: View {
             } else if let status = model.status {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
+                        if let doctor = model.doctor, doctor.hasNotices {
+                            ForEach(doctor.needingAction) { agent in
+                                CompatibilityCard(agent: agent) { await model.markReviewed(agent.id) }
+                            }
+                            ForEach(doctor.updated) { agent in
+                                Text(agent.updatedLine)
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                         HStack(alignment: .top, spacing: 20) {
                             Figure(value: status.logicalItems, caption: "items")
                             Figure(value: model.index.projects.count, caption: "projects")
@@ -72,6 +82,69 @@ struct OverviewView: View {
         panel.message = "Choose the nativemem command"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task { await model.chooseBinary(url) }
+    }
+}
+
+/// An agent updated and nativemem paused part of its sync until the adapter is brought up to date.
+private struct CompatibilityCard: View {
+    let agent: DoctorAgent
+    let markReviewed: () async -> Void
+    @State private var confirming = false
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("\(agent.displayName) needs attention", systemImage: "exclamationmark.triangle")
+                    .font(.headline)
+                if let version = agent.version {
+                    Text("Updated to \(version)")
+                }
+                if !agent.paused.isEmpty {
+                    Text("Paused: \(agent.pausedText)")
+                        .foregroundStyle(.secondary)
+                }
+                DisclosureGroup("Failing checks (\(agent.failingChecks.count))") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(agent.failingChecks) { check in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(check.summary)
+                                Text("Expected: \(check.expected)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("Observed: \(check.observed)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+                HStack {
+                    Button("Copy prompt") { copyPrompt() }
+                        .disabled(agent.prompt == nil)
+                    Button("Mark as reviewed") { confirming = true }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .confirmationDialog(
+            "Mark \(agent.displayName) as reviewed?",
+            isPresented: $confirming,
+            titleVisibility: .visible
+        ) {
+            Button("Mark as reviewed") { Task { await markReviewed() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("nativemem will keep syncing \(agent.pausedText) with what \(agent.displayName) writes now. Do this only when you have checked that the files still look right.")
+        }
+    }
+
+    private func copyPrompt() {
+        guard let prompt = agent.prompt else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(prompt, forType: .string)
     }
 }
 

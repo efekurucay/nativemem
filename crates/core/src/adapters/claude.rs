@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+use crate::compat::Check;
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
@@ -11,6 +12,7 @@ use crate::session::{
 };
 use crate::slug::slugify;
 
+use super::claude_probes;
 use super::claude_sessions::{self, ClaudeSessions, MARKER_KEY};
 use super::sections::InstructionFile;
 
@@ -29,6 +31,7 @@ pub struct ClaudeAdapter {
     fs_root: Option<PathBuf>,
     instructions: InstructionFile,
     sessions: Option<ClaudeSessions>,
+    blocked: Vec<Kind>,
 }
 
 /// Directory listings allowed per project name before the name is treated as unresolved.
@@ -61,7 +64,14 @@ impl ClaudeAdapter {
             backups,
             fs_root: default_fs_root(),
             sessions: None,
+            blocked: Vec::new(),
         }
+    }
+
+    /// Kinds this adapter neither reads nor writes while its compatibility checks fail.
+    pub fn with_blocked_kinds(mut self, kinds: &[Kind]) -> Self {
+        self.blocked = kinds.to_vec();
+        self
     }
 
     /// Takes part in session sync; without this call sessions stay out.
@@ -71,6 +81,9 @@ impl ClaudeAdapter {
     }
 
     fn scan_sessions(&self) -> Result<SessionScan> {
+        if self.blocked.contains(&Kind::Session) {
+            return Ok(SessionScan::default());
+        }
         match &self.sessions {
             Some(s) => s.scan(&self.id()),
             None => Ok(SessionScan::default()),
@@ -133,7 +146,12 @@ impl ClaudeAdapter {
             skipped_projects: Vec::new(),
             skipped_files: Vec::new(),
         };
-        for (dir, cwd) in self.project_cwds()? {
+        let projects = if self.blocked.contains(&Kind::Memory) {
+            Vec::new()
+        } else {
+            self.project_cwds()?
+        };
+        for (dir, cwd) in projects {
             let mem = self.projects_dir().join(&dir).join("memory");
             let files = memory_files(&mem)?;
             let cwd = match cwd {
@@ -189,7 +207,9 @@ impl ClaudeAdapter {
                 });
             }
         }
-        scan.items.extend(self.instructions.scan()?);
+        if !self.blocked.contains(&Kind::Instruction) {
+            scan.items.extend(self.instructions.scan()?);
+        }
         Ok(scan)
     }
 
@@ -345,11 +365,21 @@ impl Adapter for ClaudeAdapter {
         AgentId::new("claude")
     }
 
+    fn version(&self) -> Option<String> {
+        claude_probes::version(&self.claude_home)
+    }
+
+    fn probes(&self) -> Vec<Check> {
+        claude_probes::probes(&self.claude_home)
+    }
+
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
-        matches!(
-            (kind, scope),
-            (Kind::Memory | Kind::Session, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
-        )
+        !self.blocked.contains(&kind)
+            && matches!(
+                (kind, scope),
+                (Kind::Memory | Kind::Session, Scope::Project(_))
+                    | (Kind::Instruction, Scope::Global)
+            )
     }
 
     fn writer_revision(&self, kind: Kind) -> u32 {
@@ -481,7 +511,7 @@ fn default_fs_root() -> Option<PathBuf> {
 }
 
 /// Claude's project dir naming: every non-ASCII-alphanumeric character becomes `-`.
-fn encode_name(s: &str) -> String {
+pub(super) fn encode_name(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()

@@ -174,7 +174,10 @@ fn status_json_shape() {
         json!({ "agents": [
             { "id": "claude", "originals": 1, "replicas": 0, "sessions": 0, "automated_sessions": 0, "skipped": [] },
             { "id": "codex", "originals": 0, "replicas": 0, "sessions": 0, "automated_sessions": 0, "skipped": [] } ],
-          "ledger_items": 0 })
+          "ledger_items": 0,
+          "compat": { "action_required": 0, "updated": 0, "agents": [
+            { "id": "claude", "status": "ok" }, { "id": "codex", "status": "ok" },
+            { "id": "opencode", "status": "not_installed" }, { "id": "pi", "status": "not_installed" } ] } })
     );
     assert!(!f.state.exists());
 }
@@ -687,7 +690,9 @@ mod schedule {
             plist.contains("state &amp; &lt;co&gt;/bin/nativemem"),
             "{plist}"
         );
-        assert!(plist.contains("<string>sync</string>\n        <string>--apply</string>"));
+        assert!(plist.contains(
+            "<string>sync</string>\n        <string>--apply</string>\n        <string>--notify</string>"
+        ));
         assert!(plist.contains("state &amp; &lt;co&gt;/sync.log"), "{plist}");
         assert!(bin.is_file());
         use std::os::unix::fs::PermissionsExt;

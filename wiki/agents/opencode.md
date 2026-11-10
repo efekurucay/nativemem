@@ -96,11 +96,24 @@ else `~/.config/opencode`.
 - **Schema moves fast**: many database migrations in six months; a session writer must be version
   pinned and re-verified on every upgrade.
 
-## Version detection
+## Version detection and compatibility probes
 
-`nativemem` does not detect the OpenCode version. Session rows record the creating version in the
-`version` column. The installed version comes from the agent's own `--version`, run by the engineer,
-never by tests.
+The version is the `<version>` component of a `Cellar/opencode/<version>` path: the first `opencode`
+on `PATH` is located and its symlinks are resolved, never run (`version` in
+`crates/core/src/adapters/opencode_probes.rs`); another install layout leaves the version unknown.
+Session rows record the creating version in the `version` column.
+
+The probes (`wiki/architecture/compatibility.md`) cover the global config directory and `AGENTS.md`
+only; there is no database access. They are created by `AgentsFileAdapter` for the agent id
+`opencode`; Pi's instance of the same adapter has none.
+
+| Check id | Protects | Expected constant | Fails when |
+|---|---|---|---|
+| `opencode.config_dir` | instruction, memory | the OpenCode home is a directory | it is not |
+| `opencode.agents_md` | instruction, memory | `AGENTS.md` in the home is absent or a UTF-8 text file | it is a directory, another non-file, or not UTF-8 |
+
+Evidence: the two checks restate what `crates/core/src/adapters/sections.rs` and `memory_store.rs`
+need to read and write `AGENTS.md` (test `opencode_probes_cover_the_config_dir_and_agents_file`).
 
 ## Facts and evidence
 
@@ -112,12 +125,15 @@ never by tests.
 | Project id derivation | VERIFIED against local repositories (SHA-1 of the normalised remote; root commit; `directory:` hash) | read-only recomputation |
 | Without a global `AGENTS.md` OpenCode falls back to `~/.claude/CLAUDE.md` | OBSERVED | `README.md` Notes, binary strings |
 | `session export` / `import` as the safest writer path | `[UNVERIFIED]` | help text only |
+| The two probes pass on the fixtures and fail on an `AGENTS.md` directory | VERIFIED | `crates/core/tests/probes.rs` |
 | Excess keys in `mcp` entries are ignored | `[UNVERIFIED]` | not testable read-only |
 
 ## Source anchors
 
 - `crates/core/src/adapters/agents_file.rs`
+- `crates/core/src/adapters/opencode_probes.rs`
 - `crates/core/src/adapters/memory_store.rs`
+- `crates/core/tests/probes.rs`
 - `crates/cli/src/main.rs` (`opencode` root and adapter)
 - `README.md` (Notes)
 
@@ -127,6 +143,7 @@ never by tests.
 - MUST: Use absolute paths in routing lines.
 - MUST: Treat a session adapter as a new agent capability: research read-only first, then the staged
   rollout (`wiki/guides/add-an-agent.md`).
+- MUST: Add probes for the session store before a session adapter is written.
 - SHOULD: Prefer OpenCode's own `session import` over direct database writes when a session adapter
   is built.
 
@@ -138,6 +155,8 @@ never by tests.
 
 ## Related docs
 
+- `wiki/architecture/compatibility.md`
+- `wiki/runbooks/agent-update-action-required.md`
 - `wiki/kinds/instruction-sections.md`
 - `wiki/kinds/memory.md`
 - `wiki/guides/add-an-agent.md`
@@ -145,4 +164,4 @@ never by tests.
 
 ## Last updated
 
-2026-11-10
+2026-11-11

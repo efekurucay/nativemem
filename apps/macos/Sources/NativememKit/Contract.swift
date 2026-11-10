@@ -206,3 +206,70 @@ extension JSONDecoder {
 public func decodeContract<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
     try JSONDecoder.contract.decode(type, from: data)
 }
+
+public enum CompatStatus: String, Codable, Sendable {
+    case ok
+    case updated
+    case actionRequired = "action_required"
+    case notInstalled = "not_installed"
+}
+
+public struct DoctorCheck: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var featureKinds: [String]
+    public var summary: String
+    public var expected: String
+    public var observed: String
+    public var ok: Bool
+    public var accepted: Bool
+    public var sources: [String]
+}
+
+public struct DoctorAgent: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var installed: Bool
+    public var version: String?
+    public var previousVersion: String?
+    public var status: CompatStatus
+    /// Kinds of entries (`memory`, `instruction`, `session`) that are left alone for this agent.
+    public var paused: [String]
+    public var checks: [DoctorCheck]
+    /// Present for agents that need action: a prompt for a coding agent working in the repo.
+    public var prompt: String?
+
+    public var displayName: String { agentDisplayName(id) }
+
+    public var failingChecks: [DoctorCheck] { checks.filter { !$0.ok } }
+
+    /// "memory, chat sessions" for the kinds that are paused.
+    public var pausedText: String {
+        paused.map { kind in
+            switch kind {
+            case Item.memoryKind: "memory"
+            case Item.instructionKind: "instructions"
+            case Item.sessionKind: "chat sessions"
+            default: kind
+            }
+        }.joined(separator: ", ")
+    }
+
+    /// "Codex updated 0.167.0 → 0.170.0, all checks pass"
+    public var updatedLine: String {
+        switch (previousVersion, version) {
+        case let (old?, new?) where old != new:
+            "\(displayName) updated \(old) → \(new), all checks pass"
+        default:
+            "\(displayName) updated, all checks pass"
+        }
+    }
+}
+
+public struct DoctorDocument: Codable, Sendable {
+    public var agents: [DoctorAgent]
+
+    public var needingAction: [DoctorAgent] { agents.filter { $0.status == .actionRequired } }
+
+    public var updated: [DoctorAgent] { agents.filter { $0.status == .updated } }
+
+    public var hasNotices: Bool { !needingAction.isEmpty || !updated.isEmpty }
+}

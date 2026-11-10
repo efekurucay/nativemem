@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::compat::Check;
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
@@ -10,6 +11,7 @@ use crate::session::{
 use crate::slug::slugify;
 
 use super::codex_imports;
+use super::codex_probes;
 use super::codex_rollout;
 use super::codex_sessions::CodexSessions;
 #[cfg(test)]
@@ -54,6 +56,7 @@ pub struct CodexAdapter {
     sessions: Option<CodexSessions>,
     claude_home: Option<PathBuf>,
     session_writes: bool,
+    blocked: Vec<Kind>,
 }
 
 /// Bump when the written rollout format changes; unmodified replicas are then rewritten.
@@ -139,7 +142,14 @@ impl CodexAdapter {
             sessions: None,
             claude_home: None,
             session_writes: true,
+            blocked: Vec::new(),
         }
+    }
+
+    /// Kinds this adapter neither reads nor writes while its compatibility checks fail.
+    pub fn with_blocked_kinds(mut self, kinds: &[Kind]) -> Self {
+        self.blocked = kinds.to_vec();
+        self
     }
 
     /// Codex lists a thread only when its state database has a row for it, so session replicas
@@ -209,14 +219,17 @@ impl CodexAdapter {
         Ok((native_id, path))
     }
 
-    /// Reads rollouts as session originals; without this call sessions stay out. Codex never
-    /// receives sessions from this tool.
+    /// Reads rollouts as session originals; without this call sessions stay out. Replicas are
+    /// written only while session writes are enabled (`with_session_writes`).
     pub fn with_sessions(mut self, options: SessionOptions) -> Self {
         self.sessions = Some(CodexSessions::new(self.home.clone(), options));
         self
     }
 
     fn scan_sessions(&self) -> Result<SessionScan> {
+        if self.blocked.contains(&Kind::Session) {
+            return Ok(SessionScan::default());
+        }
         match &self.sessions {
             Some(s) => s.scan(&Self::agent()),
             None => Ok(SessionScan::default()),
@@ -248,7 +261,18 @@ impl Adapter for CodexAdapter {
         Self::agent()
     }
 
+    fn version(&self) -> Option<String> {
+        codex_probes::version(&self.home)
+    }
+
+    fn probes(&self) -> Vec<Check> {
+        codex_probes::probes(&self.home)
+    }
+
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
+        if self.blocked.contains(&kind) {
+            return false;
+        }
         match (kind, scope) {
             (Kind::Session, Scope::Project(_)) => self.session_writes,
             (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global) => true,
@@ -275,8 +299,17 @@ impl Adapter for CodexAdapter {
 
     fn scan(&self) -> Result<Vec<Observed>> {
         let mut out = Vec::new();
-        out.extend(self.memory.scan()?);
-        let originals = self.originals()?;
+        if !self.blocked.contains(&Kind::Memory) {
+            out.extend(self.memory.scan()?);
+        }
+        let originals = if self.blocked.contains(&Kind::Memory) {
+            Originals {
+                blocks: Vec::new(),
+                skipped: Vec::new(),
+            }
+        } else {
+            self.originals()?
+        };
         let path = layout::originals(&self.home);
         let mut seen: Vec<String> = Vec::new();
         for b in originals.blocks {
@@ -304,7 +337,9 @@ impl Adapter for CodexAdapter {
                 replica_of: None,
             });
         }
-        out.extend(self.instructions.scan()?);
+        if !self.blocked.contains(&Kind::Instruction) {
+            out.extend(self.instructions.scan()?);
+        }
         out.extend(self.scan_sessions()?.observed);
         Ok(out)
     }

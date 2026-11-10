@@ -15,6 +15,7 @@ All work in this repo: Rust core and CLI, the macOS app, tests, docs and this wi
 3. `wiki/architecture/safety.md`
 4. The page of the kind (`wiki/kinds/`) or agent (`wiki/agents/`) the task touches
 5. `wiki/guides/` when adding an agent or a kind, or when verifying against real agents
+6. `wiki/runbooks/agent-update-action-required.md` when `nativemem doctor` reports ActionRequired
 
 ## Invariants
 
@@ -29,6 +30,8 @@ All work in this repo: Rust core and CLI, the macOS app, tests, docs and this wi
   `crates/core/src/adapters/`. Anchor: outside its tests, `crates/core/src/engine.rs` imports nothing from `adapters`.
 - **Capabilities are declared, not guessed.** `Adapter::supports(kind, scope)` decides what an agent
   stores; the engine never plans an item for an agent that cannot hold it.
+- **Every adapter ships read-only probes** (`Adapter::probes`) for the formats it depends on. A failing
+  probe pauses the kinds it protects for that agent. Anchor: `wiki/architecture/compatibility.md`.
 - **Memory and instruction items replicate faithfully in both directions, deletes included, with
   backups.** Sessions are snapshots: deletes and edits never propagate.
   See `wiki/decisions/session-snapshot-policy.md`.
@@ -94,4 +97,4 @@ Commits carry no AI attribution trailers.
 
 ## Last updated
 
-2026-11-10
+2026-11-11

@@ -30,6 +30,7 @@ agent can act on this repo without re-deriving facts.
 | `wiki/architecture/context-quality.md` | The quality bar every page must meet, evidence levels |
 | `wiki/architecture/file-structure.md` | The real tree and what each crate, module and folder owns |
 | `wiki/architecture/overview.md` | Adapters, neutral model, ledger, three-way decision table, `supports`, writer revisions, policy per kind |
+| `wiki/architecture/compatibility.md` | Compatibility watch: probes, status, `compat.json`, gating, `doctor`, prompt, notifications |
 | `wiki/architecture/safety.md` | Backups, atomic writes, mass-delete guard, lock, no writes in git repos, secrets, test isolation, staged rollout |
 | `wiki/kinds/memory.md` | Project memory entries: model, stores, markers, write-back |
 | `wiki/kinds/instruction-sections.md` | Global instruction files as one item per `## ` section |
@@ -39,6 +40,7 @@ agent can act on this repo without re-deriving facts.
 | `wiki/agents/pi.md` | Pi locations, formats, model restore, quirks |
 | `wiki/agents/opencode.md` | OpenCode locations, formats, fallback to the Claude file, quirks |
 | `wiki/agents/hermes.md` | Hermes verified facts and recommended native placement; no adapter exists |
+| `wiki/runbooks/agent-update-action-required.md` | What to do when an agent shows ActionRequired: prompt flow, `--accept`, rollback |
 | `wiki/guides/add-an-agent.md` | End-to-end checklist for a new agent |
 | `wiki/guides/add-a-resource-kind.md` | End-to-end checklist for a new resource kind |
 | `wiki/guides/verify-with-real-agents.md` | Staged rollout recipe and rollback from `~/.nativemem/backups` |
@@ -78,4 +80,4 @@ agent can act on this repo without re-deriving facts.
 
 ## Last updated
 
-2026-11-10
+2026-11-11

@@ -80,6 +80,15 @@ hand-drawn borders, dividers or backgrounds.
 - "Skipped" disclosure list: label + reason, as given by the CLI.
 - If the CLI binary cannot be found: a clear message and a "Choose…" button to pick it.
 
+**Compatibility** (Overview, above the figures; only when an agent is not `ok`)
+- `action_required`: a native box (`GroupBox`, system colours) per agent with its name, "Updated
+  to X", the paused kinds, a "Failing checks" disclosure (summary, expected, observed per check)
+  and two buttons. "Copy prompt" puts the `prompt` of `doctor --json` on the pasteboard.
+  "Mark as reviewed" asks for confirmation, runs `doctor --accept <agent>` and reloads.
+- `updated`: one secondary-text line, "Codex updated 0.167.0 → 0.170.0, all checks pass".
+- The Overview row of the sidebar carries a badge with the number of agents that need action.
+- `doctor --json` runs on load and on Reload; when it fails, the notices are left out.
+
 **Toolbar**
 - Every toolbar button has a tooltip. "Sync" shows its title next to its icon; "Reload" is
   icon-only with the tooltip "Reload".
@@ -102,16 +111,46 @@ variable, a `nativemem` file next to the app executable, `~/.cargo/bin/nativemem
 
 All commands print one JSON document on stdout when `--json` is given. On failure: non-zero
 exit and `{"error": "<message>", "code": "<snake_case code>"}` on stdout. Exit codes: 0 ok,
-2 ok with conflicts or skipped writes remaining, 1 error.
+2 ok with conflicts or skipped writes remaining, 3 `doctor` found an agent that needs action,
+1 error.
 
 `nativemem status --json`
 ```json
 { "agents": [
-    { "id": "claude", "originals": 399, "replicas": 0,
+    { "id": "claude", "originals": 399, "replicas": 0, "sessions": 0, "automated_sessions": 0,
       "skipped": [ { "label": "-Users-x-old", "reason": "no cwd in jsonl ..." } ] },
-    { "id": "codex", "originals": 0, "replicas": 399, "skipped": [] } ],
+    { "id": "codex", "originals": 0, "replicas": 399, "sessions": 0, "automated_sessions": 0,
+      "skipped": [] } ],
   "ledger_items": 399 }
 ```
+
+`status --json` also carries `"compat": { "action_required": 0, "updated": 0, "agents": [ { "id":
+"claude", "status": "ok" } ] }`; the app ignores it.
+
+`nativemem doctor --json` (exit 0, or 3 while an agent needs action; the document is complete
+either way)
+```json
+{ "agents": [
+    { "id": "codex", "installed": true, "version": "0.170.0", "previous_version": "0.167.0",
+      "version_changed_ms": 1794304800000, "status": "action_required", "paused": ["session"],
+      "checks": [
+        { "id": "codex.threads_columns", "feature_kinds": ["session"],
+          "summary": "threads table column signature (name, type, not null, default)",
+          "expected": "43 columns, sha256 aaaaaaaaaaaa",
+          "observed": "44 columns, sha256 bbbbbbbbbbbb; added: brand_new; removed or changed: none",
+          "ok": false, "accepted": false,
+          "sources": ["crates/core/src/adapters/codex_probes.rs"] } ],
+      "prompt": "You are working in the nativemem repository at …" },
+    { "id": "pi", "installed": false, "version": null, "previous_version": null,
+      "version_changed_ms": null, "status": "not_installed", "paused": [], "checks": [] } ] }
+```
+One entry per agent in the order claude, codex, opencode, pi (`--agent <id>` keeps one).
+`status` is `ok`, `updated`, `action_required` or `not_installed`; `paused` lists the kinds
+(`memory`, `instruction`, `session`) that failing checks stop. `prompt` is present only for
+`action_required`. `doctor --accept <agent> --json` records the failing checks' observed values
+as reviewed, returns the document after that and adds
+`"accepted": [ { "agent": "codex", "check": "codex.threads_columns", "observed": "…" } ]`.
+An agent without a home directory fails with code `not_installed`.
 
 `nativemem items --json`
 ```json
@@ -145,7 +184,7 @@ instruction file (`CLAUDE.md`, `AGENTS.md`): `native_id` is `<file>#<slug>`, `sc
   "notes": [ { "kind": "conflict", "message": "…" } ],
   "summary": { "add": 1, "update": 0, "remove": 0, "conflicts": 0, "skipped": 0 } }
 ```
-`op` is one of `add`, `update`, `remove`. `kind` is one of `conflict`, `skipped`, `orphan`.
+`op` is one of `add`, `update`, `remove`. `kind` is one of `conflict`, `skipped`.
 With `--apply`, `applied` is true and `summary` counts what was done. Error code for the
 mass-delete guard: `mass_delete`.
 
@@ -180,6 +219,7 @@ Swift package at `apps/macos` (SwiftUI app, macOS 14+, Swift 6, no third-party d
   `Codable` types that mirror the contract above. All calls are `async` and off the main actor.
 - `AppModel` (`@Observable`): loaded items, status, selection, loading and error state.
   Groups items by project, folds copies into originals.
+- `DoctorDocument` (decoded from `doctor --json`) feeds the Overview notices and the sidebar badge.
 - Views: `SidebarView`, `ItemListView`, `ItemDetailView`, `OverviewView`, `SyncSheet`.
 - `scripts/bundle.sh`: builds release and assembles `build/nativemem.app` (Info.plist, the
   executable, and the `nativemem` CLI binary copied next to it when

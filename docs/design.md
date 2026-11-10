@@ -132,7 +132,8 @@ Root: `claude_home` (default `~/.claude`).
   field of the first line that has one in any `projects/<dir>/*.jsonl`, ignoring lines that carry
   the session-replica marker `nativemem_origin` (a replica this tool wrote is not evidence that the
   folder exists). No jsonl, or no `cwd`:
-  skip the directory and report it.
+  decode the directory name against real directories and accept exactly one match; otherwise skip
+  the directory and report it.
 - Frontmatter, two variants, both must parse:
   - nested: `name`, `description`, `metadata: { type, node_type, originSessionId, modified }`
   - flat: `name`, `description`, `type`, `originSessionId`
@@ -183,11 +184,17 @@ Root: `codex_home` (default `~/.codex`, honour `CODEX_HOME`).
 ### CLI (`crates/cli`, `clap`)
 
 - `nativemem status` — per agent: items found, replicas, skipped (with reasons).
+- `nativemem items [--kind ...]` — every entry in the native stores.
 - `nativemem sync` — dry run: prints the plan. `nativemem sync --apply` executes it.
   `--allow-mass-delete` lifts the guard.
+- `nativemem delete --agent <id> --id <native id>` and `nativemem edit --agent <id> --id <native id>`
+  (JSON on stdin) — change one entry in an agent's own store; neither syncs.
+- `nativemem schedule install|uninstall|status` — scheduled `sync --apply` through launchd (macOS).
 - Global flags / env for roots: `--claude-home`, `--codex-home`, `--opencode-home`, `--pi-home`,
   `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`, `NATIVEMEM_OPENCODE_HOME`,
   `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`) and `--session-days` (`NATIVEMEM_SESSION_DAYS`), `--exclude-automated-sessions` and `--no-sessions`.
+- `nativemem doctor [--json] [--agent <id>] [--accept <agent>] [--prompt <agent>]` — compatibility
+  watch, see "Compatibility watch" below. Exit code 3 when an agent needs action.
 - Exit code 0 on success, 2 when conflicts or skipped writes remain, 1 on error.
 
 ## Testing rules (hard requirement)
@@ -350,7 +357,7 @@ sessions.
   assistant messages carry `api: "pi-virtual"`, which Pi skips when it looks for the recorded model,
   so the replica opens with Pi's own default model and no warning.
 - Writer revision: each adapter has a revision per kind (`Adapter::writer_revision`, 0 unless the
-  adapter says otherwise; Pi sessions are 1). The ledger records the revision a replica was written
+  adapter says otherwise; Pi sessions are 2). The ledger records the revision a replica was written
   with in the `replicas.revision` column, added to older ledgers on open, where existing rows read as
   0. A session replica written with a lower revision is rewritten (old file backed up) while it is
   unmodified; a modified one is left alone. Adopted replicas are recorded at the current revision.
@@ -363,3 +370,26 @@ sessions.
 - `items` leaves sessions out unless `--kind session` is passed and never prints their bodies;
   `delete` and `edit` answer code `unsupported` for session ids; `status` counts sessions per agent
   apart from memory and instruction entries (`sessions` in `--json`).
+
+## Compatibility watch
+
+The agents update themselves; the adapters depend on their on-disk formats.
+
+- `Adapter::version()` and `Adapter::probes()` (read-only, fast) report the installed version and a
+  list of `Check { id, feature_kinds, summary, expected, observed, ok, sources }`. A probe compares a
+  structural descriptor of what is on disk (key sets, column signatures, type sets, small
+  integers; never message text, titles or secrets) with constants that live next to the adapter
+  code. Probes run only for agents whose home exists.
+- `compat::assess` combines probes with `<state dir>/compat.json` (last seen and previous
+  version, when it changed, reviewed overrides per check id, last notified status). A failing check
+  whose observed value equals its reviewed override counts as passing. Status: any failing check
+  gives `ActionRequired`, else a version change within 3 days gives `Updated`, else `Ok`.
+- Before every `sync` the CLI evaluates the probes and builds each adapter with
+  `.with_blocked_kinds(...)` for the kinds of failing checks, so `supports` returns false for them.
+  The engine writes nothing to such an agent and leaves items that originate there alone;
+  other agents and kinds keep syncing.
+- `compat::prompt` renders a prompt for a coding agent working in this repository: failing
+  checks with expected and observed descriptors, the adapter files to read, the wiki pages, the
+  hard rules and the commands to run.
+- `sync --apply --notify` shows one macOS notification per status change; `schedule install` adds
+  `--notify` to the job.

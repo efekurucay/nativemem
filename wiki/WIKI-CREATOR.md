@@ -23,9 +23,10 @@ Every page under `wiki/`. The wiki records the current state; history lives in g
 
 | What changed | Where |
 |---|---|
-| New agent | `wiki/agents/<agent>.md` from `wiki/_templates/AGENT.md`; index row in `wiki/README.md`; support table in `README.md`; `wiki/architecture/file-structure.md` (new adapter file); `wiki/architecture/overview.md` capability table; `wiki/guides/verify-with-real-agents.md` checks for the agent |
+| New agent | `wiki/agents/<agent>.md` from `wiki/_templates/AGENT.md` (with its probe table); `wiki/architecture/compatibility.md` check list; index row in `wiki/README.md`; support table in `README.md`; `wiki/architecture/file-structure.md` (new adapter file); `wiki/architecture/overview.md` capability table; `wiki/guides/verify-with-real-agents.md` checks for the agent |
 | New resource kind | `wiki/kinds/<kind>.md`; `wiki/architecture/overview.md` (policy per kind, `supports` table); `wiki/guides/add-a-resource-kind.md` if the steps changed; `wiki/decisions/` for the policy choice; the kind row in every `wiki/agents/*.md` status section |
-| Changed agent format (path, schema, marker, encoding) | The agent's page (Native locations, Formats, Facts table with evidence level) and the kind page that describes the marker; `Last updated` on both |
+| Changed agent format (path, schema, marker, encoding) | The agent's page (Native locations, Formats, Facts table with evidence level, the probe table with its expected constants) and the kind page that describes the marker; `Last updated` on both |
+| New or changed compatibility probe, status rule, state file, prompt or notification | `wiki/architecture/compatibility.md`; the agent's probe table in `wiki/agents/<agent>.md`; `wiki/runbooks/agent-update-action-required.md` if the steps changed; `docs/desktop.md` for the `doctor --json` contract (report drift, do not edit it unasked) |
 | Changed CLI flag, environment variable, exit code or JSON contract | `README.md` usage; `wiki/architecture/overview.md` (CLI section); `docs/desktop.md` contract is a spec outside the wiki: report drift, do not edit it unasked; `wiki/guides/add-an-agent.md` if the root flags changed |
 | Desktop app change | `wiki/architecture/file-structure.md` (app files); `wiki/architecture/overview.md` (app section); `wiki/architecture/safety.md` if the app gains a write path |
 | Safety rule change | `wiki/architecture/safety.md` first, then `wiki/CLAUDE.md` invariants and the root `CLAUDE.md` hard rules |
@@ -82,4 +83,4 @@ Content sections (tables, formats, decision text) sit between Scope and Source a
 
 ## Last updated
 
-2026-11-10
+2026-11-11

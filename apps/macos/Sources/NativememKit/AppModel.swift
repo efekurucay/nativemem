@@ -38,6 +38,7 @@ public struct EditDraft: Equatable, Sendable {
 public final class AppModel {
     public private(set) var index = MemoryIndex.empty
     public private(set) var status: StatusDocument?
+    public private(set) var doctor: DoctorDocument?
     public private(set) var isLoading = false
     public private(set) var cli: NativememCLI?
     public var errorMessage: String?
@@ -87,6 +88,9 @@ public final class AppModel {
         selectedItemID.flatMap { index.item(id: $0) }
     }
 
+    /// Shown as the badge of the Overview row.
+    public var agentsNeedingAction: Int { doctor?.needingAction.count ?? 0 }
+
     public var isEditing: Bool { editDraft != nil }
 
     public var editDirty: Bool {
@@ -117,9 +121,11 @@ public final class AppModel {
         do {
             async let loadedItems = cli.items()
             async let loadedStatus = cli.status()
+            async let loadedDoctor: DoctorDocument? = try? await cli.doctor()
             let (entries, statusDocument) = try await (loadedItems, loadedStatus)
             index = MemoryIndex(entries: entries)
             status = statusDocument
+            doctor = await loadedDoctor
             if selectedItem == nil { selectedItemID = nil }
         } catch {
             errorMessage = error.localizedDescription
@@ -133,6 +139,16 @@ public final class AppModel {
             selectedItemID = nil
             editDraft = nil
             editError = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        await reload()
+    }
+
+    public func markReviewed(_ agent: String) async {
+        guard let cli else { return }
+        do {
+            _ = try await cli.accept(agent: agent)
         } catch {
             errorMessage = error.localizedDescription
         }

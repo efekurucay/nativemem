@@ -71,6 +71,16 @@ public struct NativememCLI: Sendable {
         try await run(["items", "--json"], as: ItemsDocument.self).items
     }
 
+    /// Exits with 3 while an agent needs action; the document is complete either way.
+    public func doctor() async throws -> DoctorDocument {
+        try await run(["doctor", "--json"])
+    }
+
+    /// Records the agent's current observed values as reviewed and returns the document after that.
+    public func accept(agent: String) async throws -> DoctorDocument {
+        try await run(["doctor", "--accept", agent, "--json"])
+    }
+
     public func syncPreview() async throws -> SyncPlan {
         try await run(["sync", "--json"])
     }
@@ -101,7 +111,7 @@ public struct NativememCLI: Sendable {
     ) async throws -> T {
         let (data, exitCode) = try await execute(arguments, stdin: stdin)
         switch exitCode {
-        case 0, 2:
+        case 0, 2, 3:
             return try decodeContract(T.self, from: data)
         default:
             if let failure = try? decodeContract(ErrorDocument.self, from: data) {

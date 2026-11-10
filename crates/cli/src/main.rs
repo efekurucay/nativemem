@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,7 @@ use nativemem_core::adapters::agents_file::AgentsFileAdapter;
 use nativemem_core::adapters::claude::ClaudeAdapter;
 use nativemem_core::adapters::codex::CodexAdapter;
 use nativemem_core::adapters::pi::PiAdapter;
+use nativemem_core::compat::{self, AgentReport, CompatState};
 use nativemem_core::engine::{self, Action, ApplyOptions, Note};
 use nativemem_core::error::{Error, Result};
 use nativemem_core::fsx::BackupSession;
@@ -16,6 +18,7 @@ use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Kind, Observed
 use nativemem_core::session::{is_session_id, SessionOptions};
 use serde_json::{json, Value};
 
+mod doctor;
 #[cfg(target_os = "macos")]
 mod schedule;
 
@@ -69,6 +72,24 @@ enum Command {
         /// Lift the mass-delete guard
         #[arg(long)]
         allow_mass_delete: bool,
+        /// Show a macOS notification when an agent's compatibility status changes
+        #[arg(long, requires = "apply")]
+        notify: bool,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check that the agents' on-disk formats still match what the adapters were written for
+    Doctor {
+        /// Only this agent: claude, codex, opencode or pi
+        #[arg(long)]
+        agent: Option<String>,
+        /// Mark the current observed values of this agent's failing checks as reviewed
+        #[arg(long)]
+        accept: Option<String>,
+        /// Print the prompt that lets a coding agent fix this agent's adapter
+        #[arg(long)]
+        prompt: Option<String>,
         /// Print one JSON document
         #[arg(long)]
         json: bool,
@@ -202,6 +223,11 @@ fn key_json(key: &ItemKey) -> Value {
     json!({ "origin": key.origin.as_str(), "native_id": key.native_id })
 }
 
+const AGENT_IDS: [&str; 4] = ["claude", "codex", "opencode", "pi"];
+
+/// The kinds each agent leaves alone because a compatibility check fails.
+type Blocked = BTreeMap<String, Vec<Kind>>;
+
 struct Roots {
     claude: PathBuf,
     codex: PathBuf,
@@ -219,16 +245,23 @@ struct Agents {
 }
 
 impl Agents {
-    fn open(roots: &Roots, backups: &BackupSession, sessions: Option<SessionOptions>) -> Self {
+    fn open(
+        roots: &Roots,
+        backups: &BackupSession,
+        sessions: Option<SessionOptions>,
+        blocked: &Blocked,
+    ) -> Self {
         // Codex lists threads from its state database, so session writes stay off until the
         // thread-row writer exists; tests and early adopters switch them on explicitly.
         let codex_session_writes =
             std::env::var("NATIVEMEM_CODEX_SESSION_WRITES").is_ok_and(|v| v == "on");
         let state = || roots.state.clone();
         let present = |dir: &Path| dir.is_dir();
+        let paused = |id: &str| blocked.get(id).cloned().unwrap_or_default();
         Agents {
             claude: present(&roots.claude).then(|| {
-                let a = ClaudeAdapter::new(roots.claude.clone(), state(), backups.clone());
+                let a = ClaudeAdapter::new(roots.claude.clone(), state(), backups.clone())
+                    .with_blocked_kinds(&paused("claude"));
                 match sessions {
                     Some(o) => a.with_sessions(o),
                     None => a,
@@ -237,7 +270,8 @@ impl Agents {
             codex: present(&roots.codex).then(|| {
                 let a = CodexAdapter::new(roots.codex.clone(), state(), backups.clone())
                     .with_claude_home(roots.claude.clone())
-                    .with_session_writes(codex_session_writes);
+                    .with_session_writes(codex_session_writes)
+                    .with_blocked_kinds(&paused("codex"));
                 match sessions {
                     Some(o) => a.with_sessions(o),
                     None => a,
@@ -245,9 +279,11 @@ impl Agents {
             }),
             opencode: present(&roots.opencode).then(|| {
                 AgentsFileAdapter::new("opencode", roots.opencode.clone(), state(), backups.clone())
+                    .with_blocked_kinds(&paused("opencode"))
             }),
             pi: present(&roots.pi).then(|| {
-                let a = PiAdapter::new(roots.pi.clone(), state(), backups.clone());
+                let a = PiAdapter::new(roots.pi.clone(), state(), backups.clone())
+                    .with_blocked_kinds(&paused("pi"));
                 match sessions {
                     Some(o) => a.with_sessions(o),
                     None => a,
@@ -328,7 +364,7 @@ fn lock_state(state: &Path) -> Outcome<File> {
     }
 }
 
-fn status(roots: &Roots, present: &Agents, json: bool) -> Result<()> {
+fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) -> Result<()> {
     let mut agents = Vec::new();
     for a in present.all() {
         let observed = a.scan()?;
@@ -410,9 +446,16 @@ fn status(roots: &Roots, present: &Agents, json: bool) -> Result<()> {
         0
     };
     if json {
-        print_json(&json!({ "agents": agents, "ledger_items": items }));
+        print_json(&json!({
+            "agents": agents,
+            "ledger_items": items,
+            "compat": doctor::summary_json(reports),
+        }));
     } else {
         println!("ledger: {items} items");
+        for line in doctor::warning_lines(reports) {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -697,11 +740,17 @@ fn sync_json(applied: bool, actions: &[Action], notes: &[Note]) -> Value {
 fn sync(
     roots: &Roots,
     agents: &Agents,
+    reports: &[AgentReport],
     apply: bool,
     allow_mass_delete: bool,
     json: bool,
 ) -> Result<bool> {
     let adapters = agents.all();
+    if !json {
+        for line in doctor::paused_lines(reports) {
+            println!("{line}");
+        }
+    }
     if apply {
         let ledger = Ledger::open(&roots.state)?;
         let plan = engine::plan(&adapters, &ledger)?;
@@ -763,41 +812,96 @@ fn run_schedule(_: &Cli, _: &ScheduleArgs, _: &Roots) -> Outcome<()> {
     })
 }
 
-fn run(cli: &Cli) -> Outcome<bool> {
+/// Exit code of runs that finished but need the user's attention.
+const EXIT_ATTENTION: u8 = 2;
+
+fn run(cli: &Cli) -> Outcome<u8> {
     let roots = resolve(cli)?;
     let backups = BackupSession::new();
     let sessions = (!cli.no_sessions).then_some(SessionOptions {
         days: cli.session_days,
         exclude_automated: cli.exclude_automated_sessions,
     });
-    let agents = Agents::open(&roots, &backups, sessions);
     let _lock = match &cli.command {
-        Command::Sync { apply: true, .. } | Command::Delete { .. } | Command::Edit { .. } => {
-            Some(lock_state(&roots.state)?)
-        }
+        Command::Sync { apply: true, .. }
+        | Command::Delete { .. }
+        | Command::Edit { .. }
+        | Command::Doctor {
+            accept: Some(_), ..
+        } => Some(lock_state(&roots.state)?),
         _ => None,
     };
+    let watches_compat = matches!(
+        cli.command,
+        Command::Status { .. } | Command::Sync { .. } | Command::Doctor { .. }
+    );
+    let loaded = CompatState::load(&roots.state);
+    let mut state = loaded.clone();
+    let reports = if watches_compat {
+        let probing = Agents::open(&roots, &backups, sessions, &Blocked::new());
+        doctor::assess_all(&probing, &mut state)
+    } else {
+        Vec::new()
+    };
+    let agents = Agents::open(&roots, &backups, sessions, &doctor::blocked_kinds(&reports));
+    let attention = |needs: bool| if needs { EXIT_ATTENTION } else { 0 };
     match &cli.command {
-        Command::Status { json } => status(&roots, &agents, *json)
-            .map(|()| false)
+        Command::Status { json } => status(&roots, &agents, &reports, *json)
+            .map(|()| 0)
             .map_err(Failure::from),
         Command::Sync {
             apply,
             allow_mass_delete,
+            notify,
             json,
-        } => sync(&roots, &agents, *apply, *allow_mass_delete, *json).map_err(Failure::from),
+        } => {
+            let needs = sync(&roots, &agents, &reports, *apply, *allow_mass_delete, *json)?;
+            if *apply {
+                let notes = if *notify {
+                    compat::pending_notifications(&reports, &mut state)
+                } else {
+                    Vec::new()
+                };
+                if state != loaded {
+                    state.save(&roots.state, &backups)?;
+                }
+                doctor::deliver(&notes);
+            }
+            Ok(attention(needs))
+        }
+        Command::Doctor {
+            agent,
+            accept,
+            prompt,
+            json,
+        } => doctor::run(
+            &roots,
+            &backups,
+            &agents,
+            doctor::Context {
+                loaded,
+                state,
+                reports,
+            },
+            &doctor::Args {
+                agent: agent.as_deref(),
+                accept: accept.as_deref(),
+                prompt: prompt.as_deref(),
+                json: *json,
+            },
+        ),
         Command::Items { kind, json } => {
             items(&agents, kind.as_deref().and_then(Kind::parse), *json)
-                .map(|()| false)
+                .map(|()| 0)
                 .map_err(Failure::from)
         }
         Command::Delete { agent, id, json } => {
-            delete(&roots, &backups, &agents, agent, id, *json).map(|()| false)
+            delete(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
         Command::Edit { agent, id, json } => {
-            edit(&roots, &backups, &agents, agent, id, *json).map(|()| false)
+            edit(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
-        Command::Schedule(args) => run_schedule(cli, args, &roots).map(|()| false),
+        Command::Schedule(args) => run_schedule(cli, args, &roots).map(|()| 0),
     }
 }
 
@@ -805,6 +909,7 @@ fn wants_json(command: &Command) -> bool {
     match command {
         Command::Status { json }
         | Command::Sync { json, .. }
+        | Command::Doctor { json, .. }
         | Command::Items { json, .. }
         | Command::Delete { json, .. }
         | Command::Edit { json, .. }
@@ -819,8 +924,7 @@ fn wants_json(command: &Command) -> bool {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
-        Ok(false) => ExitCode::SUCCESS,
-        Ok(true) => ExitCode::from(2),
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
             if wants_json(&cli.command) {
                 print_json(&json!({ "error": e.message(), "code": e.code() }));

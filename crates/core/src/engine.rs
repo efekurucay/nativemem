@@ -388,6 +388,21 @@ fn plan_key(
     if kind == Kind::Session {
         return plan_session(adapters, originals, replicas, ledger, key, &scope, plan);
     }
+    // An origin that cannot store this item (its kind is paused) is left alone: nothing is
+    // written back to it or removed from it.
+    if adapters
+        .iter()
+        .any(|a| a.id() == key.origin && !a.supports(kind, &scope))
+    {
+        return Ok(());
+    }
+    // A paused agent that already holds a replica freezes the item for every agent: its copy
+    // cannot be read, so nothing may be updated, removed or forgotten until it resumes.
+    for a in adapters.iter().filter(|a| !a.supports(kind, &scope)) {
+        if a.id() != key.origin && ledger.get_replica(key, &a.id())?.is_some() {
+            return Ok(());
+        }
+    }
     // Agents that cannot store this item are not part of it at all.
     let ids: Vec<AgentId> = adapters
         .iter()

@@ -91,12 +91,31 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
   session's project directory.
 - **Thinking blocks carry opaque signatures** and are dropped on conversion.
 
-## Version detection
+## Version detection and compatibility probes
 
-`nativemem` does not detect the Claude Code version. The session writer pins the transcript
-`version` field to the constant `CLAUDE_VERSION` in `crates/core/src/adapters/claude_sessions.rs`
-(`2.1.322`). Every transcript line carries the writing version in `version`. The installed version
-comes from the agent's own `--version` output, run by the engineer, never by tests.
+The version is the newest `version` value on the most recent lines of the newest transcripts
+(`version` in `crates/core/src/adapters/claude_probes.rs`); lines this tool wrote are skipped. The
+session writer pins the transcript `version` field to the constant `CLAUDE_VERSION` in
+`crates/core/src/adapters/claude_sessions.rs` (`2.1.322`).
+
+The probes (`wiki/architecture/compatibility.md`) read the newest 3 transcripts (last 1 MiB each),
+the newest 30 memory files and the newest 8 project directories. Observed values are key sets and
+counts only.
+
+| Check id | Protects | Expected constant | Fails when |
+|---|---|---|---|
+| `claude.line_types` | session | `KNOWN_LINE_TYPES`: 22 top-level `type`s (`user`, `assistant`, `attachment`, `system`, `custom-title`, `ai-title`, `last-prompt`, `mode`, `permission-mode`, and 13 metadata types) | a line has another `type` |
+| `claude.message_keys` | session | `REQUIRED_MESSAGE_KEYS`: `cwd`, `message`, `message.content`, `sessionId`, `timestamp`, `type`, `uuid` on every `user` and `assistant` line | a key is missing on one of them |
+| `claude.memory_frontmatter` | memory | `KNOWN_TOP_KEYS`: `name`, `description`, `metadata`, `type`, `originSessionId` at the top level; `name` and `description` on every file; `type` under `metadata` or at the top level; other `metadata` keys are free-form | an unknown top-level key, a file without `name` or `description`, or no file with a `type` |
+| `claude.memory_index` | memory | link lines of `MEMORY.md` are `- [name](file.md) — description` (`INDEX_LINE_SHAPE`) | a link line has another shape |
+| `claude.project_dir_encoding` | memory, session | directory name equals `encode_name(cwd)`, or starts with it plus `-` when the session moved into a subdirectory | a sampled directory (name under 200 characters) matches none of its `cwd` values |
+
+Evidence (read-only statistics on the development machine, Claude Code 2.1.322, 809 transcripts in
+154 project directories): the newest 60 transcripts held 22 line types and every one of 5058 `user`
+and 11118 `assistant` lines carried the required keys; 420 memory files all had frontmatter whose
+top-level keys lie within the five above, and 418 of 418 link lines had the index shape; 133 of 136 directories equal
+`encode_name(cwd)` and 3 are prefixes (the session moved into a subdirectory). One memory file
+carries an extra key under `metadata`, which is why those keys are not checked.
 
 ## Facts and evidence
 
@@ -109,6 +128,7 @@ comes from the agent's own `--version` output, run by the engineer, never by tes
 | The resume list scans the project directory and sorts by mtime | INFERRED | no index file exists; `claude --resume` not run |
 | Minimum fields for a resumable file | INFERRED | `claude_sessions.rs` writer; tests `rendered_replica_parses_back_with_marker` |
 | Claude lists a replica in the real resume list | `[UNVERIFIED]` until the staged check in `wiki/guides/verify-with-real-agents.md` is recorded | |
+| The five probes pass on the fixtures and fail on an unknown line type, a missing key, an unknown frontmatter key, a changed index line and a renamed project directory | VERIFIED | `crates/core/tests/probes.rs` (`claude_*`) |
 | MCP server schema, `~/.claude.json` layout | OBSERVED | read-only file and binary-string inspection |
 | Claude Code hot-reloads edits to `mcpServers` | `[UNVERIFIED]` | assume a restart is needed |
 
@@ -116,7 +136,9 @@ comes from the agent's own `--version` output, run by the engineer, never by tes
 
 - `crates/core/src/adapters/claude.rs`
 - `crates/core/src/adapters/claude_sessions.rs`
+- `crates/core/src/adapters/claude_probes.rs`
 - `crates/core/src/testkit.rs` (`ClaudeHome`)
+- `crates/core/tests/probes.rs`
 - `README.md` (support table)
 - `docs/design.md` (Claude Code adapter)
 
@@ -126,6 +148,7 @@ comes from the agent's own `--version` output, run by the engineer, never by tes
 - MUST: Keep unknown frontmatter keys when editing a memory original.
 - MUST: Never delete a session; never propagate a session delete.
 - MUST: Mark every session line the tool writes with `nativemem_origin`.
+- MUST: Update the probe constants in `claude_probes.rs` and the table above together with the adapter.
 - SHOULD: Pin any new Claude-facing version constant in one place and name it on this page.
 
 ## Verification checklist
@@ -136,6 +159,8 @@ comes from the agent's own `--version` output, run by the engineer, never by tes
 
 ## Related docs
 
+- `wiki/architecture/compatibility.md`
+- `wiki/runbooks/agent-update-action-required.md`
 - `wiki/kinds/memory.md`
 - `wiki/kinds/sessions.md`
 - `wiki/guides/verify-with-real-agents.md`
@@ -143,4 +168,4 @@ comes from the agent's own `--version` output, run by the engineer, never by tes
 
 ## Last updated
 
-2026-11-10
+2026-11-11

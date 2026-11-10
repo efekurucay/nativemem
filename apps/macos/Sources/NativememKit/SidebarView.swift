@@ -6,6 +6,7 @@ struct SidebarView: View {
     var body: some View {
         List(selection: selectionBinding) {
             Label("Overview", systemImage: "square.grid.2x2")
+                .badge(model.agentsNeedingAction)
                 .tag(SidebarSelection.overview)
             if model.hasGlobalItems {
                 Label("Global", systemImage: "globe")

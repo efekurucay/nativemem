@@ -51,7 +51,8 @@ Notes:
 
 - OpenCode reads `~/.claude/CLAUDE.md` only when its own global `AGENTS.md` is absent. Creating
   that file replaces the fallback; the synced region carries the Claude Code sections over.
-- Pi reads its global `AGENTS.md` first.
+- Pi loads the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` in
+  each directory, so an `AGENTS.override.md` in its home shadows the synced `AGENTS.md`.
 
 ## Chat sessions
 
@@ -99,6 +100,7 @@ nativemem sync                        # dry run: print the plan, change nothing
 nativemem sync --apply                # execute the plan
 nativemem delete --agent claude|codex|opencode|pi --id <native id>
 nativemem edit --agent claude --id <native id> < entry.json
+nativemem doctor [--json] [--agent <id>] [--accept <agent>] [--prompt <agent>]
 nativemem schedule install [--every <minutes>]
 nativemem schedule status [--json]
 nativemem schedule uninstall
@@ -106,7 +108,8 @@ nativemem schedule uninstall
 
 Global options: `--claude-home`, `--codex-home`, `--opencode-home`, `--pi-home`, `--state-dir`,
 `--session-days`, `--exclude-automated-sessions`, `--no-sessions` (env `NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`, `NATIVEMEM_OPENCODE_HOME`,
-`NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`, `NATIVEMEM_SESSION_DAYS`). Defaults are `~/.claude` (or `CLAUDE_CONFIG_DIR`),
+`NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`, `NATIVEMEM_SESSION_DAYS`). `NATIVEMEM_CODEX_SESSION_WRITES=on`
+lets sync write session copies into Codex (off by default). Defaults are `~/.claude` (or `CLAUDE_CONFIG_DIR`),
 `~/.codex` (or `CODEX_HOME`), `~/.config/opencode` (or `OPENCODE_CONFIG_DIR`), `~/.pi/agent`
 (or `PI_CODING_AGENT_DIR`) and `~/.nativemem`. `--json` prints one JSON
 document, including errors as `{"error": ..., "code": ...}`.
@@ -116,13 +119,37 @@ entry only; copies are edited through their original. `delete` and `edit` do not
 session ids with code `unsupported`. `status` shows sessions per agent apart from the other
 entries (`sessions` in `--json`).
 
-Exit codes: 0 success, 2 when conflicts or skipped writes remain, 1 on error.
+Exit codes: 0 success, 2 when conflicts or skipped writes remain, 1 on error. `doctor` exits 3
+when an agent needs action.
+
+### Compatibility watch (`doctor`)
+
+The agents update themselves and `nativemem` depends on their on-disk formats. Every adapter
+compares what it finds on disk with the formats it was written against (key sets, column
+signatures, type sets, small integers; never message text) and reports a status per agent:
+`ok`, `updated` (the version changed within the last 3 days and every check passes),
+`action_required` (a check fails) or `not_installed`.
+
+- Before every `sync`, the kinds protected by a failing check are paused for that agent
+  (`codex: sessions paused, run nativemem doctor`); other agents and other kinds keep syncing.
+- `doctor` prints version, status, failing checks with expected and observed descriptors and the
+  paused kinds. `--prompt <agent>` prints a prompt for a coding agent working in this repository
+  (repository: `NATIVEMEM_REPO`, else the directory the binary was built from). `--accept <agent>`
+  records the current observed values of that agent's failing checks as reviewed, so syncing
+  resumes; a later, different observation needs a new review.
+- `status` prints one `warning:` line per agent that is not `ok`; `status --json` adds
+  `compat`.
+- State lives in `<state dir>/compat.json` (versions, reviewed values, last notified status),
+  written only by `doctor` and `sync --apply`.
+- `sync --apply --notify` shows a macOS notification once per status change (agent and status
+  only); `schedule install` adds `--notify` to the job. `NATIVEMEM_NOTIFY_FILE` appends the text
+  to a file instead of notifying.
 
 ### Scheduled sync (macOS)
 
 `schedule install` copies the running executable to `<state dir>/bin/nativemem`, writes
 `~/Library/LaunchAgents/dev.nativemem.sync.plist` and loads it with `launchctl`. The job runs
-`sync --apply` every 60 minutes by default (`--every`, minimum 5) at low priority and logs to
+`sync --apply --notify` every 60 minutes by default (`--every`, minimum 5) at low priority and logs to
 `<state dir>/sync.log`. Roots given by flag or environment variable are passed to the job.
 Re-running `install` updates the job; `uninstall` removes it and leaves the state directory.
 `--launch-agents-dir` (env `NATIVEMEM_LAUNCH_AGENTS_DIR`) changes the plist location. On other
@@ -160,3 +187,5 @@ This builds the Swift app and bundles it as `apps/macos/build/nativemem.app`. Se
 - Global-scope Claude entries and writing back to Codex originals.
 
 See `docs/design.md` for the full design.
+
+Documentation: [wiki/README.md](wiki/README.md)

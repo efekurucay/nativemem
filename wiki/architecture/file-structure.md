@@ -29,6 +29,8 @@ nativemem-sync/
 │   │       ├── ledger.rs         SQLite ledger: items and replicas tables, writer revision column
 │   │       ├── fsx.rs            atomic_write, BackupSession, backup layout
 │   │       ├── session.rs        neutral session model, tool rendering, titles, window, markers, derived ids
+│   │       ├── compat.rs         Check, AgentReport, Status, compat.json state, assess, prompt, notifications
+│   │       ├── probe.rs          read-only helpers for probes: tails, newest files, executable lookup
 │   │       ├── slug.rs           slugify
 │   │       ├── error.rs          Error enum (Io, Parse, Ledger, Unsupported, MassDelete)
 │   │       ├── testkit.rs        fixture builders: ClaudeHome, CodexHome, PiHome (temp dirs only)
@@ -40,15 +42,21 @@ nativemem-sync/
 │   │           ├── codex_sessions.rs   Codex rollout reader (originals, replica detection, automated markers)
 │   │           ├── codex_rollout.rs    Codex rollout writer shaped like Codex's own importer output
 │   │           ├── codex_imports.rs    Codex importer ledger (`external_agent_session_imports.json`)
+│   │           ├── claude_probes.rs    Claude compatibility probes and their expected constants
+│   │           ├── codex_probes.rs     Codex probes: state database, rollouts, import ledger
+│   │           ├── pi_probes.rs        Pi probes: session header, entry types, directory encoding
+│   │           ├── opencode_probes.rs  OpenCode probes: config directory and AGENTS.md
 │   │           ├── pi.rs         Pi: AGENTS.md through agents_file, session reader and writer
 │   │           ├── agents_file.rs      generic adapter for agents that only read a global AGENTS.md (OpenCode, Pi)
 │   │           ├── memory_store.rs     replica store plus routing block, shared by Codex, OpenCode, Pi
 │   │           └── sections.rs   instruction-section parser, managed regions, byte-preserving edits, markers
+│   │   └── tests/probes.rs       probes against testkit fixtures, drift cases, blocked kinds
 │   └── cli/                      binary `nativemem`
 │       ├── src/
 │       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/edit, JSON output
+│       │   ├── doctor.rs         `doctor`, compatibility reports, warnings, notification delivery
 │       │   └── schedule.rs       launchd scheduling (macOS only)
-│       └── tests/cli.rs          end-to-end CLI tests over temp homes
+│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications)
 ├── apps/macos/                   Swift package, macOS 14+, no third-party dependencies
 │   ├── Package.swift
 │   ├── Sources/Nativemem/        app entry point (`NativememApp.swift`)
@@ -61,15 +69,16 @@ nativemem-sync/
 │   │   ├── SyncSession.swift     preview then apply flow
 │   │   ├── BodyText.swift, MarkdownBlocks.swift  body rendering
 │   │   └── SidebarView, ItemListView, ItemDetailView, OverviewView, SyncSheet, ContentView
-│   ├── Tests/NativememKitTests/  contract, index, tree, sectioning, body parser, sync headline tests
+│   ├── Tests/NativememKitTests/  contract, doctor, index, tree, sectioning, body parser, sync headline tests
 │   │   └── Fixtures/             one JSON file per CLI document shape
 │   ├── Resources/AppIcon.png
 │   └── scripts/bundle.sh         builds the release app bundle into `apps/macos/build/`
 └── wiki/                         this knowledge base
     ├── README.md · CLAUDE.md · WIKI-CREATOR.md
-    ├── architecture/             context-quality, file-structure, overview, safety
+    ├── architecture/             compatibility, context-quality, file-structure, overview, safety
     ├── kinds/                    memory, instruction-sections, sessions
     ├── agents/                   claude-code, codex, pi, opencode, hermes
+    ├── runbooks/                 agent-update-action-required
     ├── guides/                   add-an-agent, add-a-resource-kind, verify-with-real-agents
     ├── decisions/                one short decision record per file
     └── _templates/               PAGE.md, AGENT.md
@@ -85,6 +94,7 @@ nativemem-sync/
 | Atomic writes and backups | `crates/core/src/fsx.rs` |
 | Anything that knows an agent's file format | `crates/core/src/adapters/` |
 | Reading roots, flags, environment, the lock, exit codes, JSON output | `crates/cli/src/main.rs` |
+| Compatibility probes, status, state file, prompt | `crates/core/src/compat.rs`, `crates/core/src/adapters/*_probes.rs`, `crates/cli/src/doctor.rs` |
 | Fixture homes for tests | `crates/core/src/testkit.rs` |
 | Display names of agents in the app | `apps/macos/Sources/NativememKit/MemoryIndex.swift` (`agentDisplayName`) |
 
@@ -93,6 +103,7 @@ nativemem-sync/
 - `Cargo.toml`
 - `crates/core/src/lib.rs`
 - `crates/core/src/adapters/mod.rs`
+- `crates/cli/src/doctor.rs`
 - `apps/macos/Package.swift`
 - `.gitignore`
 
@@ -117,4 +128,4 @@ nativemem-sync/
 
 ## Last updated
 
-2026-11-10
+2026-11-11

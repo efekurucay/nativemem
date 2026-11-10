@@ -84,6 +84,15 @@ pub struct Observed {
 
 pub trait Adapter {
     fn id(&self) -> AgentId;
+    /// The installed version of the agent, when it can be found without running it.
+    fn version(&self) -> Option<String> {
+        None
+    }
+    /// Read-only, fast comparisons of the agent's on-disk formats with the ones this adapter was
+    /// written against; see `compat`.
+    fn probes(&self) -> Vec<crate::compat::Check> {
+        Vec::new()
+    }
     /// Whether this agent can store an item of `kind` in `scope`. The engine never plans
     /// writes, write-backs or removals for an agent that cannot.
     fn supports(&self, _kind: Kind, _scope: &Scope) -> bool {
