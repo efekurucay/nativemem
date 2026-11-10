@@ -1,1 +1,13 @@
+# Rust
 target/
+
+# Swift / macOS app build artifacts
+.build/
+apps/macos/.build/
+apps/macos/build/
+
+# macOS
+.DS_Store
+
+# Local review scratch
+gitdex/

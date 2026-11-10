@@ -1,14 +1,16 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use nativemem_core::adapters::claude::ClaudeAdapter;
 use nativemem_core::adapters::codex::CodexAdapter;
-use nativemem_core::engine::{self, ApplyOptions};
+use nativemem_core::engine::{self, Action, ApplyOptions, Note};
 use nativemem_core::error::{Error, Result};
 use nativemem_core::fsx::BackupSession;
 use nativemem_core::ledger::Ledger;
-use nativemem_core::model::Adapter;
+use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Observed, Scope};
+use serde_json::{json, Value};
 
 #[derive(Parser)]
 #[command(
@@ -33,7 +35,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Show what each agent holds and what cannot be synced
-    Status,
+    Status {
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the sync plan; with --apply, execute it
     Sync {
         #[arg(long)]
@@ -41,7 +47,96 @@ enum Command {
         /// Lift the mass-delete guard
         #[arg(long)]
         allow_mass_delete: bool,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
     },
+    /// List every entry found in the agents' native stores
+    Items {
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one entry from an agent's native store (with backup); does not sync
+    Delete {
+        /// claude or codex
+        #[arg(long)]
+        agent: String,
+        /// The entry's native id, as listed by `items`
+        #[arg(long, allow_hyphen_values = true)]
+        id: String,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rewrite one original entry from a JSON document on stdin; does not sync
+    Edit {
+        /// claude or codex
+        #[arg(long)]
+        agent: String,
+        /// The entry's native id, as listed by `items`
+        #[arg(long, allow_hyphen_values = true)]
+        id: String,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+enum Failure {
+    Core(Error),
+    UnknownAgent(String),
+    NotFound { agent: String, id: String },
+    Replica,
+}
+
+impl From<Error> for Failure {
+    fn from(e: Error) -> Self {
+        Failure::Core(e)
+    }
+}
+
+impl Failure {
+    fn code(&self) -> &'static str {
+        match self {
+            Failure::UnknownAgent(_) => "unknown_agent",
+            Failure::NotFound { .. } => "not_found",
+            Failure::Replica => "unsupported",
+            Failure::Core(Error::MassDelete { .. }) => "mass_delete",
+            Failure::Core(Error::Unsupported { .. }) => "unsupported",
+            Failure::Core(Error::Io { .. }) => "io",
+            Failure::Core(Error::Parse(_)) => "parse",
+            Failure::Core(Error::Ledger(_)) => "ledger",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Failure::UnknownAgent(a) => format!("unknown agent {a:?} (expected claude or codex)"),
+            Failure::NotFound { agent, id } => format!("no {agent} entry with id {id:?}"),
+            Failure::Replica => {
+                "copies are edited through their original, not directly".to_string()
+            }
+            Failure::Core(e) => e.to_string(),
+        }
+    }
+}
+
+type Outcome<T> = std::result::Result<T, Failure>;
+
+fn print_json(doc: &Value) {
+    println!("{doc}");
+}
+
+fn scope_json(scope: &Scope) -> Value {
+    match scope {
+        Scope::Global => json!({ "type": "global" }),
+        Scope::Project(p) => json!({ "type": "project", "path": p.display().to_string() }),
+    }
+}
+
+fn key_json(key: &ItemKey) -> Value {
+    json!({ "origin": key.origin.as_str(), "native_id": key.native_id })
 }
 
 struct Roots {
@@ -77,27 +172,45 @@ fn resolve(cli: &Cli) -> Result<Roots> {
     })
 }
 
-fn status(roots: &Roots, claude: &ClaudeAdapter, codex: &CodexAdapter) -> Result<()> {
+fn status(roots: &Roots, claude: &ClaudeAdapter, codex: &CodexAdapter, json: bool) -> Result<()> {
     let adapters: [&dyn Adapter; 2] = [claude, codex];
+    let mut agents = Vec::new();
     for a in adapters {
         let observed = a.scan()?;
         let replicas = observed.iter().filter(|o| o.replica_of.is_some()).count();
-        println!(
-            "{}: {} originals, {} replicas",
-            a.id(),
-            observed.len() - replicas,
-            replicas
-        );
+        let originals = observed.len() - replicas;
+        // The prefix is only used by the human output.
+        let mut skipped: Vec<(&str, String, String)> = Vec::new();
         if a.id().as_str() == "claude" {
-            for (dir, reason) in claude.skipped_projects()? {
-                println!("  skipped project {dir}: {reason}");
-            }
-            for (id, reason) in claude.skipped_files()? {
-                println!("  skipped file {id}: {reason}");
-            }
+            skipped.extend(
+                claude
+                    .skipped_projects()?
+                    .into_iter()
+                    .map(|(l, r)| ("project ", l, r)),
+            );
+            skipped.extend(
+                claude
+                    .skipped_files()?
+                    .into_iter()
+                    .map(|(l, r)| ("file ", l, r)),
+            );
         } else {
-            for (label, reason) in codex.skipped()? {
-                println!("  skipped {label}: {reason}");
+            skipped.extend(codex.skipped()?.into_iter().map(|(l, r)| ("", l, r)));
+        }
+        if json {
+            agents.push(json!({
+                "id": a.id().as_str(),
+                "originals": originals,
+                "replicas": replicas,
+                "skipped": skipped
+                    .iter()
+                    .map(|(_, label, reason)| json!({ "label": label, "reason": reason }))
+                    .collect::<Vec<_>>(),
+            }));
+        } else {
+            println!("{}: {originals} originals, {replicas} replicas", a.id());
+            for (kind, label, reason) in &skipped {
+                println!("  skipped {kind}{label}: {reason}");
             }
         }
     }
@@ -106,8 +219,254 @@ fn status(roots: &Roots, claude: &ClaudeAdapter, codex: &CodexAdapter) -> Result
     } else {
         0
     };
-    println!("ledger: {items} items");
+    if json {
+        print_json(&json!({ "agents": agents, "ledger_items": items }));
+    } else {
+        println!("ledger: {items} items");
+    }
     Ok(())
+}
+
+fn items(claude: &ClaudeAdapter, codex: &CodexAdapter, json: bool) -> Result<()> {
+    let adapters: [&dyn Adapter; 2] = [claude, codex];
+    let mut observed: Vec<Observed> = Vec::new();
+    for a in adapters {
+        observed.extend(a.scan()?);
+    }
+    if json {
+        let list: Vec<Value> = observed
+            .iter()
+            .map(|o| {
+                json!({
+                    "agent": o.agent.as_str(),
+                    "native_id": o.native_id,
+                    "path": o.path.display().to_string(),
+                    "scope": scope_json(&o.item.scope),
+                    "name": o.item.name,
+                    "description": o.item.description,
+                    "category": o.item.category,
+                    "body": o.item.body,
+                    "replica_of": o.replica_of.as_ref().map(key_json),
+                    "hash": content_hash(&o.item),
+                })
+            })
+            .collect();
+        print_json(&json!({ "items": list }));
+    } else {
+        for o in &observed {
+            let scope = match &o.item.scope {
+                Scope::Global => "global".to_string(),
+                Scope::Project(p) => p.display().to_string(),
+            };
+            println!("{}  {}  {}", o.agent, scope, o.item.name);
+        }
+    }
+    Ok(())
+}
+
+fn delete(
+    roots: &Roots,
+    backups: &BackupSession,
+    claude: &ClaudeAdapter,
+    codex: &CodexAdapter,
+    agent: &str,
+    id: &str,
+    json: bool,
+) -> Outcome<()> {
+    let adapter: &dyn Adapter = match agent {
+        "claude" => claude,
+        "codex" => codex,
+        other => return Err(Failure::UnknownAgent(other.to_string())),
+    };
+    adapter.remove(id)?;
+    let backup_dir = roots.state.join("backups").join(backups.stamp());
+    if json {
+        print_json(&json!({
+            "deleted": { "agent": agent, "native_id": id },
+            "backup_dir": backup_dir.display().to_string(),
+        }));
+    } else {
+        println!("deleted {agent}  {id}");
+        println!("backup: {}", backup_dir.display());
+    }
+    Ok(())
+}
+
+fn parse_edit(input: &str) -> Result<(String, String, Option<String>, String)> {
+    let doc: Value = serde_json::from_str(input).map_err(|e| Error::Parse(e.to_string()))?;
+    let text = |key: &str| -> Result<String> {
+        doc.get(key)
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| Error::Parse(format!("missing string field {key:?}")))
+    };
+    let category = match doc.get("category") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(c)) => Some(c.clone()),
+        Some(_) => return Err(Error::Parse("category must be a string or null".into())),
+    };
+    Ok((text("name")?, text("description")?, category, text("body")?))
+}
+
+fn find_entry(adapter: &dyn Adapter, id: &str) -> Result<Option<Observed>> {
+    Ok(adapter.scan()?.into_iter().find(|o| o.native_id == id))
+}
+
+fn edit(
+    roots: &Roots,
+    backups: &BackupSession,
+    claude: &ClaudeAdapter,
+    codex: &CodexAdapter,
+    agent: &str,
+    id: &str,
+    json: bool,
+) -> Outcome<()> {
+    let adapter: &dyn Adapter = match agent {
+        "claude" => claude,
+        "codex" => codex,
+        other => return Err(Failure::UnknownAgent(other.to_string())),
+    };
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(Error::from)?;
+    let (name, description, category, body) = parse_edit(&input)?;
+    let current = find_entry(adapter, id)?.ok_or_else(|| Failure::NotFound {
+        agent: agent.to_string(),
+        id: id.to_string(),
+    })?;
+    if current.replica_of.is_some() {
+        return Err(Failure::Replica);
+    }
+    let item = Item {
+        kind: current.item.kind,
+        scope: current.item.scope,
+        name,
+        description,
+        category,
+        body,
+    };
+    adapter.write_original(id, &item)?;
+    let written = find_entry(adapter, id)?.ok_or_else(|| Failure::NotFound {
+        agent: agent.to_string(),
+        id: id.to_string(),
+    })?;
+    let hash = content_hash(&written.item);
+    let backup_dir = roots.state.join("backups").join(backups.stamp());
+    if json {
+        print_json(&json!({
+            "edited": { "agent": agent, "native_id": id },
+            "hash": hash,
+            "backup_dir": backup_dir.display().to_string(),
+        }));
+    } else {
+        println!("edited {agent}  {id}  backup: {}", backup_dir.display());
+    }
+    Ok(())
+}
+
+struct Counts {
+    add: usize,
+    update: usize,
+    remove: usize,
+    conflicts: usize,
+    skipped: usize,
+}
+
+/// Actions that only touch the ledger have no entry-level effect and are not listed.
+fn action_json(action: &Action) -> Option<(&'static str, Value)> {
+    let (op, agent, name, scope, key) = match action {
+        Action::Write {
+            key,
+            target,
+            item,
+            update,
+        } => (
+            if *update { "update" } else { "add" },
+            target.as_str(),
+            &item.name,
+            &item.scope,
+            key,
+        ),
+        Action::WriteBack { key, item, .. } => {
+            ("update", key.origin.as_str(), &item.name, &item.scope, key)
+        }
+        Action::Remove {
+            key,
+            agent,
+            name,
+            scope,
+            ..
+        } => ("remove", agent.as_str(), name, scope, key),
+        Action::Adopt { .. } | Action::Forget { .. } => return None,
+    };
+    Some((
+        op,
+        json!({
+            "op": op,
+            "agent": agent,
+            "name": name,
+            "scope": scope_json(scope),
+            "origin": key_json(key),
+        }),
+    ))
+}
+
+fn note_json(note: &Note) -> (&'static str, Value) {
+    let (kind, message) = match note {
+        Note::Conflict { key, reason } => (
+            "conflict",
+            format!("{}  {}: {reason}", key.origin, key.native_id),
+        ),
+        Note::Skipped {
+            agent,
+            label,
+            reason,
+        } => ("skipped", format!("{agent}  {label}: {reason}")),
+    };
+    (kind, json!({ "kind": kind, "message": message }))
+}
+
+fn sync_json(applied: bool, actions: &[Action], notes: &[Note]) -> Value {
+    let mut c = Counts {
+        add: 0,
+        update: 0,
+        remove: 0,
+        conflicts: 0,
+        skipped: 0,
+    };
+    let mut listed = Vec::new();
+    for a in actions {
+        if let Some((op, doc)) = action_json(a) {
+            match op {
+                "add" => c.add += 1,
+                "update" => c.update += 1,
+                _ => c.remove += 1,
+            }
+            listed.push(doc);
+        }
+    }
+    let mut notes_out = Vec::new();
+    for n in notes {
+        let (kind, doc) = note_json(n);
+        match kind {
+            "conflict" => c.conflicts += 1,
+            _ => c.skipped += 1,
+        }
+        notes_out.push(doc);
+    }
+    json!({
+        "applied": applied,
+        "actions": listed,
+        "notes": notes_out,
+        "summary": {
+            "add": c.add,
+            "update": c.update,
+            "remove": c.remove,
+            "conflicts": c.conflicts,
+            "skipped": c.skipped,
+        },
+    })
 }
 
 fn sync(
@@ -116,6 +475,7 @@ fn sync(
     codex: &CodexAdapter,
     apply: bool,
     allow_mass_delete: bool,
+    json: bool,
 ) -> Result<bool> {
     let adapters: [&dyn Adapter; 2] = [claude, codex];
     if apply {
@@ -127,8 +487,12 @@ fn sync(
             &ledger,
             &ApplyOptions { allow_mass_delete },
         )?;
-        print!("{report}");
-        println!("{}", report.summary());
+        if json {
+            print_json(&sync_json(true, &report.done, &report.notes));
+        } else {
+            print!("{report}");
+            println!("{}", report.summary());
+        }
         return Ok(report.needs_attention());
     }
     let ledger = if roots.state.join("ledger.db").is_file() {
@@ -137,22 +501,50 @@ fn sync(
         Ledger::in_memory()?
     };
     let plan = engine::plan(&adapters, &ledger)?;
-    print!("{plan}");
-    println!("{}", plan.summary());
+    if json {
+        print_json(&sync_json(false, &plan.actions, &plan.notes));
+    } else {
+        print!("{plan}");
+        println!("{}", plan.summary());
+    }
     Ok(plan.needs_attention())
 }
 
-fn run(cli: &Cli) -> Result<bool> {
+fn run(cli: &Cli) -> Outcome<bool> {
     let roots = resolve(cli)?;
     let backups = BackupSession::new();
     let claude = ClaudeAdapter::new(roots.claude.clone(), roots.state.clone(), backups.clone());
-    let codex = CodexAdapter::new(roots.codex.clone(), roots.state.clone(), backups);
+    let codex = CodexAdapter::new(roots.codex.clone(), roots.state.clone(), backups.clone());
     match &cli.command {
-        Command::Status => status(&roots, &claude, &codex).map(|()| false),
+        Command::Status { json } => status(&roots, &claude, &codex, *json)
+            .map(|()| false)
+            .map_err(Failure::from),
         Command::Sync {
             apply,
             allow_mass_delete,
-        } => sync(&roots, &claude, &codex, *apply, *allow_mass_delete),
+            json,
+        } => {
+            sync(&roots, &claude, &codex, *apply, *allow_mass_delete, *json).map_err(Failure::from)
+        }
+        Command::Items { json } => items(&claude, &codex, *json)
+            .map(|()| false)
+            .map_err(Failure::from),
+        Command::Delete { agent, id, json } => {
+            delete(&roots, &backups, &claude, &codex, agent, id, *json).map(|()| false)
+        }
+        Command::Edit { agent, id, json } => {
+            edit(&roots, &backups, &claude, &codex, agent, id, *json).map(|()| false)
+        }
+    }
+}
+
+fn wants_json(command: &Command) -> bool {
+    match command {
+        Command::Status { json }
+        | Command::Sync { json, .. }
+        | Command::Items { json }
+        | Command::Delete { json, .. }
+        | Command::Edit { json, .. } => *json,
     }
 }
 
@@ -162,7 +554,11 @@ fn main() -> ExitCode {
         Ok(false) => ExitCode::SUCCESS,
         Ok(true) => ExitCode::from(2),
         Err(e) => {
-            eprintln!("error: {e}");
+            if wants_json(&cli.command) {
+                print_json(&json!({ "error": e.message(), "code": e.code() }));
+            } else {
+                eprintln!("error: {}", e.message());
+            }
             ExitCode::from(1)
         }
     }

@@ -217,12 +217,11 @@ impl ClaudeAdapter {
     fn update_index(&self, mem: &Path, file: &str, name: &str, description: &str) -> Result<()> {
         let path = mem.join(INDEX_FILE);
         let old = read_optional(&path)?.unwrap_or_else(|| NEW_INDEX.to_string());
-        let marker = format!("]({file})");
         let line = format!("- [{name}]({file}) — {description}");
         let mut out = String::new();
         let mut placed = false;
         for l in old.split_inclusive('\n') {
-            if is_index_line(l, &marker) {
+            if is_index_line(l, file) {
                 if !placed {
                     let eol = &l[l.trim_end_matches(['\n', '\r']).len()..];
                     out.push_str(&line);
@@ -251,10 +250,9 @@ impl ClaudeAdapter {
         let Some(old) = read_optional(&path)? else {
             return Ok(());
         };
-        let marker = format!("]({file})");
         let out: String = old
             .split_inclusive('\n')
-            .filter(|l| !is_index_line(l, &marker))
+            .filter(|l| !is_index_line(l, file))
             .collect();
         if out == old {
             return Ok(());
@@ -351,8 +349,9 @@ impl Adapter for ClaudeAdapter {
             .ok_or_else(|| Error::Parse(format!("no frontmatter in {}", path.display())))?;
         set_top(&mut doc.fm, "name", &item.name);
         set_top(&mut doc.fm, "description", &item.description);
-        if let Some(c) = &item.category {
-            set_category(&mut doc.fm, c);
+        match &item.category {
+            Some(c) => set_category(&mut doc.fm, c),
+            None => clear_category(&mut doc.fm),
         }
         self.overwrite(&path, &render(&doc.fm.concat(), &item.body))?;
         self.update_index(&mem, file, &item.name, &item.description)
@@ -523,8 +522,19 @@ fn render(fm: &str, body: &str) -> String {
     out
 }
 
-fn is_index_line(line: &str, marker: &str) -> bool {
-    line.starts_with("- [") && line.contains(marker)
+fn is_index_line(line: &str, file: &str) -> bool {
+    // Match only the first link target on the line so a description that happens
+    // to reference another memory file cannot collide with that file's row.
+    let Some(rest) = line.strip_prefix("- [") else {
+        return false;
+    };
+    let Some((_label, after)) = rest.split_once("](") else {
+        return false;
+    };
+    let Some((target, _)) = after.split_once(')') else {
+        return false;
+    };
+    target == file
 }
 
 fn kv(line: &str, key: &str) -> Option<String> {
@@ -578,16 +588,8 @@ fn set_top(fm: &mut Vec<String>, key: &str, value: &str) {
     }
 }
 
-/// Updates `metadata.type` or top-level `type` in place; adds `metadata.type` when neither exists.
-fn set_category(fm: &mut Vec<String>, value: &str) {
-    if field(fm, "type", true)
-        .or_else(|| field(fm, "type", false))
-        .as_deref()
-        == Some(value)
-    {
-        return;
-    }
-    let eol_of = |l: &str| if l.ends_with("\r\n") { "\r\n" } else { "\n" };
+/// Line indexes of `metadata.type`, top-level `type` and the `metadata:` line.
+fn type_lines(fm: &[String]) -> (Option<usize>, Option<usize>, Option<usize>) {
     let mut in_meta = false;
     let mut nested_at = None;
     let mut top_at = None;
@@ -611,6 +613,28 @@ fn set_category(fm: &mut Vec<String>, value: &str) {
             }
         }
     }
+    (nested_at, top_at, meta_at)
+}
+
+/// Removes the line `field(.., "type")` would read; other lines stay untouched.
+fn clear_category(fm: &mut Vec<String>) {
+    let (nested_at, top_at, _) = type_lines(fm);
+    if let Some(i) = nested_at.or(top_at) {
+        fm.remove(i);
+    }
+}
+
+/// Updates `metadata.type` or top-level `type` in place; adds `metadata.type` when neither exists.
+fn set_category(fm: &mut Vec<String>, value: &str) {
+    if field(fm, "type", true)
+        .or_else(|| field(fm, "type", false))
+        .as_deref()
+        == Some(value)
+    {
+        return;
+    }
+    let eol_of = |l: &str| if l.ends_with("\r\n") { "\r\n" } else { "\n" };
+    let (nested_at, top_at, meta_at) = type_lines(fm);
     if let Some(i) = nested_at {
         let indent: String = fm[i]
             .chars()
@@ -1017,6 +1041,39 @@ mod tests {
     }
 
     #[test]
+    fn index_description_link_does_not_collide_with_other_file_row() {
+        let f = fx();
+        let dir = f.home.add_project(Path::new("/w"));
+        let idx = mem(&f, &dir).join("MEMORY.md");
+        // Alpha's description references b.md; it must not be treated as b.md's row.
+        fs::write(
+            &idx,
+            "# Memory Index\n\n- [Alpha](a.md) — see also [Beta](b.md)\n",
+        )
+        .unwrap();
+        let (b_id, b_path) = f
+            .adapter
+            .write_replica(&key("codex", "b"), &item("/w", "B", "bd", None, "bb"))
+            .unwrap();
+        assert!(b_path.ends_with("b.md"));
+        let text = fs::read_to_string(&idx).unwrap();
+        assert!(
+            text.contains("- [Alpha](a.md) — see also [Beta](b.md)"),
+            "Alpha row clobbered: {text}"
+        );
+        assert!(
+            text.contains("- [B](b.md) — bd"),
+            "Beta row missing: {text}"
+        );
+
+        // Removing b.md drops only the b.md row, never Alpha's.
+        f.adapter.remove(&b_id).unwrap();
+        let text = fs::read_to_string(&idx).unwrap();
+        assert!(text.contains("- [Alpha](a.md) — see also [Beta](b.md)"));
+        assert!(!text.contains("- [B](b.md)"));
+    }
+
+    #[test]
     fn write_original_preserves_unknown_keys() {
         let f = fx();
         let dir = f.home.add_project(Path::new("/w"));
@@ -1144,5 +1201,46 @@ mod tests {
             fs::read_to_string(&bare).unwrap(),
             "---\nname: b\ndescription: d\nmetadata:\n  type: feedback\n---\n\nb\n"
         );
+    }
+
+    #[test]
+    fn write_original_without_category_removes_type_line() {
+        let f = fx();
+        let dir = f.home.add_project(Path::new("/w"));
+        let nested = f.home.add_memory(
+            &dir,
+            "n.md",
+            FrontmatterVariant::Nested,
+            "n",
+            "d",
+            "user",
+            "b",
+        );
+        let flat = f.home.add_memory(
+            &dir,
+            "f.md",
+            FrontmatterVariant::Flat,
+            "f",
+            "d",
+            "user",
+            "b",
+        );
+        let before_nested = fs::read_to_string(&nested).unwrap();
+        let before_flat = fs::read_to_string(&flat).unwrap();
+        for (file, name) in [("n.md", "n"), ("f.md", "f")] {
+            f.adapter
+                .write_original(&format!("{dir}/{file}"), &item("/w", name, "d", None, "b"))
+                .unwrap();
+        }
+        assert_eq!(
+            fs::read_to_string(&nested).unwrap(),
+            before_nested.replace("  type: user\n", "")
+        );
+        assert_eq!(
+            fs::read_to_string(&flat).unwrap(),
+            before_flat.replace("type: user\n", "")
+        );
+        let scanned = f.adapter.scan().unwrap();
+        assert!(scanned.iter().all(|o| o.item.category.is_none()));
     }
 }

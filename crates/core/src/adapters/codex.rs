@@ -117,13 +117,21 @@ fn take_line(text: &str) -> Option<(&str, &str)> {
     })
 }
 
+/// `name` and `description` each occupy a single line in the replica format; collapse any
+/// embedded newlines so a multi-line value can never shift the parse anchors.
+fn oneline(s: &str) -> String {
+    s.chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect()
+}
+
 fn render(key: &ItemKey, item: &Item) -> String {
+    let name = oneline(&item.name);
+    let description = oneline(&item.description);
     let mut s = format!(
-        "<!-- nativemem origin={} id={} -->\n# {}\n\n{}\n\n",
+        "<!-- nativemem origin={} id={} -->\n# {name}\n\n{description}\n\n",
         encode(key.origin.as_str()),
         encode(&key.native_id),
-        item.name,
-        item.description
     );
     match &item.category {
         Some(c) => s.push_str(&format!("Category: {c}\n\n")),
@@ -635,6 +643,30 @@ mod tests {
                 assert_eq!(found.item.scope, it.scope);
             }
         }
+    }
+
+    #[test]
+    fn multiline_name_and_description_round_trip() {
+        let f = fx();
+        // Newlines in name/description would shift the parse anchors; render collapses
+        // them to spaces so the replica still scans back.
+        let it = Item {
+            kind: Kind::Memory,
+            scope: Scope::Project(PathBuf::from("/w/app")),
+            name: "with\nnewline".into(),
+            description: "first line\nsecond line".into(),
+            category: None,
+            body: "body".into(),
+        };
+        f.a.write_replica(&key("k"), &it).unwrap();
+        let got =
+            f.a.scan()
+                .unwrap()
+                .into_iter()
+                .find(|o| o.replica_of == Some(key("k")))
+                .unwrap();
+        assert_eq!(got.item.name, "with newline");
+        assert_eq!(got.item.description, "first line second line");
     }
 
     #[test]

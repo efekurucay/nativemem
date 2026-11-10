@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 nativemem-core = { path = "../core" }
 clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1.0.154"
 
 [dev-dependencies]
 tempfile = "3"

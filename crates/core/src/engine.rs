@@ -435,11 +435,15 @@ fn plan_key(
         return Ok(());
     }
     if let Some(c) = changed.first() {
-        let targets = present
+        // The editing side is also a target: re-running its `write_replica` is
+        // idempotent for the file content (write_if_changed skips) but regenerates
+        // that agent's index so a renamed replica does not leave a stale entry.
+        let mut targets: Vec<AgentId> = present
             .iter()
             .map(|s| s.agent.clone())
             .chain(absent.iter().map(|a| (*a).clone()))
             .collect();
+        targets.push(c.agent.clone());
         plan.actions.push(Action::WriteBack {
             key: key.clone(),
             from: c.agent.clone(),
@@ -840,6 +844,32 @@ mod tests {
         let text = fs::read_to_string(orig).unwrap();
         assert!(text.contains("edited in codex"));
         assert!(text.contains("type: feedback"));
+    }
+
+    #[test]
+    fn replica_name_edit_regenerates_replica_side_index() {
+        let f = fx();
+        f.add("a.md", "alpha", "user", "alpha body");
+        f.sync();
+        let replica = f.codex_replica("alpha").unwrap();
+        let index_path = replica.parent().unwrap().join("MEMORY.md");
+        assert!(fs::read_to_string(&index_path)
+            .unwrap()
+            .contains("- [alpha]"));
+
+        // Rename the replica's heading on the Codex side, then sync.
+        replace_in(&replica, "# alpha", "# beta");
+        f.sync();
+
+        let index = fs::read_to_string(&index_path).unwrap();
+        assert!(
+            index.contains("- [beta]"),
+            "codex index not updated: {index}"
+        );
+        assert!(!index.contains("- [alpha]"), "codex index stale: {index}");
+        // The original on Claude is updated too.
+        let claude_index = fs::read_to_string(f.claude_mem().join("MEMORY.md")).unwrap();
+        assert!(claude_index.contains("- [beta]"));
     }
 
     #[test]

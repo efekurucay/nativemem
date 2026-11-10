@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use nativemem_core::testkit::{ClaudeHome, CodexHome, FrontmatterVariant};
 
@@ -93,4 +94,366 @@ fn status_sync_apply_then_nothing_to_do() {
     let out = text(&run(&claude, &codex, &state, &["status"]));
     assert!(out.contains("claude: 1 originals, 1 replicas"), "{out}");
     assert!(out.contains("ledger: 2 items"), "{out}");
+}
+
+use serde_json::{json, Value};
+
+struct Fx {
+    _t: tempfile::TempDir,
+    claude: std::path::PathBuf,
+    codex: std::path::PathBuf,
+    state: std::path::PathBuf,
+    claude_file: std::path::PathBuf,
+}
+
+impl Fx {
+    fn new() -> Fx {
+        let t = tempfile::tempdir().unwrap();
+        let (claude, codex, state) = (
+            t.path().join("claude"),
+            t.path().join("codex"),
+            t.path().join("state"),
+        );
+        fs::create_dir_all(&codex).unwrap();
+        let ch = ClaudeHome::new(&claude);
+        let dir = ch.add_project(Path::new("/w/app"));
+        let claude_file = ch.add_memory(
+            &dir,
+            "a.md",
+            FrontmatterVariant::Nested,
+            "alpha",
+            "about alpha",
+            "user",
+            "alpha body",
+        );
+        Fx {
+            _t: t,
+            claude,
+            codex,
+            state,
+            claude_file,
+        }
+    }
+
+    fn json(&self, args: &[&str]) -> (Option<i32>, Value) {
+        let o = run(&self.claude, &self.codex, &self.state, args);
+        let doc = serde_json::from_slice(&o.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&o)));
+        (o.status.code(), doc)
+    }
+}
+
+fn find<'a>(items: &'a Value, agent: &str) -> &'a Value {
+    items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["agent"] == agent)
+        .unwrap_or_else(|| panic!("no {agent} item in {items}"))
+}
+
+#[test]
+fn status_json_shape() {
+    let f = Fx::new();
+    let (code, doc) = f.json(&["status", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        doc,
+        json!({ "agents": [
+            { "id": "claude", "originals": 1, "replicas": 0, "skipped": [] },
+            { "id": "codex", "originals": 0, "replicas": 0, "skipped": [] } ],
+          "ledger_items": 0 })
+    );
+    assert!(!f.state.exists());
+}
+
+#[test]
+fn items_json_before_and_after_apply() {
+    let f = Fx::new();
+    let (code, doc) = f.json(&["items", "--json"]);
+    assert_eq!(code, Some(0));
+    assert!(!f.state.exists());
+    assert_eq!(doc["items"].as_array().unwrap().len(), 1);
+    let orig = find(&doc, "claude");
+    assert_eq!(orig["native_id"], "-w-app/a.md");
+    assert_eq!(
+        orig["scope"],
+        json!({ "type": "project", "path": "/w/app" })
+    );
+    assert_eq!(orig["name"], "alpha");
+    assert_eq!(orig["description"], "about alpha");
+    assert_eq!(orig["category"], "user");
+    assert!(orig["body"].as_str().unwrap().contains("alpha body"));
+    assert!(orig["replica_of"].is_null());
+    assert_eq!(orig["hash"].as_str().unwrap().len(), 64);
+    assert_eq!(orig["path"], f.claude_file.to_str().unwrap());
+
+    let (code, _) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0));
+    let (_, doc) = f.json(&["items", "--json"]);
+    assert_eq!(doc["items"].as_array().unwrap().len(), 2);
+    let replica = find(&doc, "codex");
+    assert_eq!(
+        replica["replica_of"],
+        json!({ "origin": "claude", "native_id": "-w-app/a.md" })
+    );
+    assert_eq!(replica["hash"], find(&doc, "claude")["hash"]);
+
+    let o = run(&f.claude, &f.codex, &f.state, &["items"]);
+    let out = text(&o);
+    assert!(out.contains("claude  /w/app  alpha"), "{out}");
+    assert!(out.contains("codex  /w/app  alpha"), "{out}");
+}
+
+#[test]
+fn sync_json_preview_then_apply() {
+    let f = Fx::new();
+    let (code, doc) = f.json(&["sync", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        doc,
+        json!({
+            "applied": false,
+            "actions": [ { "op": "add", "agent": "codex", "name": "alpha",
+                "scope": { "type": "project", "path": "/w/app" },
+                "origin": { "origin": "claude", "native_id": "-w-app/a.md" } } ],
+            "notes": [],
+            "summary": { "add": 1, "update": 0, "remove": 0, "conflicts": 0, "skipped": 0 }
+        })
+    );
+    assert!(!f.state.exists());
+
+    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(doc["applied"], true);
+    assert_eq!(doc["actions"][0]["op"], "add");
+    assert_eq!(doc["summary"]["add"], 1);
+
+    let (code, doc) = f.json(&["sync", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(doc["actions"], json!([]));
+}
+
+#[test]
+fn delete_json_then_sync_removes_copy() {
+    let f = Fx::new();
+    f.json(&["sync", "--apply", "--json"]);
+    let (_, items) = f.json(&["items", "--json"]);
+    let replica_id = find(&items, "codex")["native_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (code, doc) = f.json(&[
+        "delete",
+        "--agent",
+        "claude",
+        "--id",
+        "-w-app/a.md",
+        "--json",
+    ]);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        doc["deleted"],
+        json!({ "agent": "claude", "native_id": "-w-app/a.md" })
+    );
+    let backup = Path::new(doc["backup_dir"].as_str().unwrap());
+    assert!(backup.starts_with(f.state.join("backups")));
+    assert!(backup.join("claude").exists());
+    assert!(!f.claude_file.exists());
+
+    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(doc["actions"][0]["op"], "remove");
+    assert_eq!(doc["actions"][0]["agent"], "codex");
+    assert_eq!(doc["summary"]["remove"], 1);
+    let (_, items) = f.json(&["items", "--json"]);
+    assert_eq!(items["items"], json!([]), "{replica_id}");
+}
+
+#[test]
+fn delete_unsupported_original_reports_error_document() {
+    let f = Fx::new();
+    CodexHome::new(&f.codex)
+        .write_memory_md("# Task Group: Fix Login\napplies_to: cwd=/w/app; reuse_rule=x\nnotes\n");
+    let (_, items) = f.json(&["items", "--json"]);
+    let id = find(&items, "codex")["native_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (code, doc) = f.json(&["delete", "--agent", "codex", "--id", &id, "--json"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(doc["code"], "unsupported");
+    assert!(doc["error"].is_string());
+}
+
+#[test]
+fn unknown_agent_reports_error_document() {
+    let f = Fx::new();
+    let (code, doc) = f.json(&["delete", "--agent", "gemini", "--id", "x", "--json"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(doc["code"], "unknown_agent");
+    assert!(doc["error"].as_str().unwrap().contains("gemini"));
+}
+
+#[test]
+fn mass_delete_reports_error_code() {
+    let f = Fx::new();
+    let ch = ClaudeHome::new(&f.claude);
+    let dir = ch.add_project(Path::new("/w/app"));
+    let mut files = Vec::new();
+    for i in 0..5 {
+        files.push(ch.add_memory(
+            &dir,
+            &format!("m{i}.md"),
+            FrontmatterVariant::Nested,
+            &format!("m{i}"),
+            "d",
+            "user",
+            "b",
+        ));
+    }
+    f.json(&["sync", "--apply", "--json"]);
+    for p in &files {
+        fs::remove_file(p).unwrap();
+    }
+    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(doc["code"], "mass_delete");
+    let (code, doc) = f.json(&["sync", "--apply", "--allow-mass-delete", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(doc["summary"]["remove"], 5);
+}
+
+fn edit(f: &Fx, agent: &str, id: &str, stdin: &str) -> (Option<i32>, Value) {
+    run_stdin(f, stdin, &["edit", "--agent", agent, "--id", id, "--json"])
+}
+
+fn run_stdin(f: &Fx, stdin: &str, args: &[&str]) -> (Option<i32>, Value) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nativemem"))
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .arg("--claude-home")
+        .arg(&f.claude)
+        .arg("--codex-home")
+        .arg(&f.codex)
+        .arg("--state-dir")
+        .arg(&f.state)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    let doc = serde_json::from_slice(&o.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&o)));
+    (o.status.code(), doc)
+}
+
+#[test]
+fn edit_original_then_sync_updates_copy() {
+    let f = Fx::new();
+    f.json(&["sync", "--apply", "--json"]);
+    let (code, doc) = edit(
+        &f,
+        "claude",
+        "-w-app/a.md",
+        r#"{"name":"alpha","description":"new desc","category":"feedback","body":"new body"}"#,
+    );
+    assert_eq!(code, Some(0), "{doc}");
+    assert_eq!(
+        doc["edited"],
+        json!({ "agent": "claude", "native_id": "-w-app/a.md" })
+    );
+    let backup = Path::new(doc["backup_dir"].as_str().unwrap());
+    assert!(backup.starts_with(f.state.join("backups")));
+    assert!(backup.join("claude").exists());
+
+    let on_disk = fs::read_to_string(&f.claude_file).unwrap();
+    assert!(on_disk.contains("description: new desc"), "{on_disk}");
+    assert!(on_disk.contains("type: feedback"), "{on_disk}");
+    assert!(on_disk.contains("new body"), "{on_disk}");
+    assert!(!on_disk.contains("alpha body"), "{on_disk}");
+    assert!(on_disk.contains("originSessionId: s-1"), "{on_disk}");
+    assert!(on_disk.contains("modified: 2026-01-01"), "{on_disk}");
+
+    let (_, items) = f.json(&["items", "--json"]);
+    assert_eq!(doc["hash"], find(&items, "claude")["hash"]);
+
+    let (code, sync) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(sync["summary"]["update"], 1, "{sync}");
+    assert_eq!(sync["actions"][0]["op"], "update");
+    assert_eq!(sync["actions"][0]["agent"], "codex");
+    let (_, items) = f.json(&["items", "--json"]);
+    let copy = find(&items, "codex");
+    assert_eq!(copy["body"].as_str().unwrap().trim_end(), "new body");
+    assert_eq!(copy["description"], "new desc");
+}
+
+#[test]
+fn edit_with_null_or_absent_category_clears_it() {
+    for input in [
+        r#"{"name":"alpha","description":"d","category":null,"body":"b"}"#,
+        r#"{"name":"alpha","description":"d","body":"b"}"#,
+    ] {
+        let f = Fx::new();
+        let (code, doc) = edit(&f, "claude", "-w-app/a.md", input);
+        assert_eq!(code, Some(0), "{doc}");
+        let on_disk = fs::read_to_string(&f.claude_file).unwrap();
+        assert!(!on_disk.contains("\n  type:"), "{on_disk}");
+        assert!(on_disk.contains("node_type: memory"), "{on_disk}");
+        let (_, items) = f.json(&["items", "--json"]);
+        assert_eq!(find(&items, "claude")["category"], Value::Null);
+        assert_eq!(doc["hash"], find(&items, "claude")["hash"]);
+    }
+}
+
+#[test]
+fn edit_replica_is_unsupported() {
+    let f = Fx::new();
+    f.json(&["sync", "--apply", "--json"]);
+    let (_, items) = f.json(&["items", "--json"]);
+    let id = find(&items, "codex")["native_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (code, doc) = edit(
+        &f,
+        "codex",
+        &id,
+        r#"{"name":"alpha","description":"d","category":null,"body":"b"}"#,
+    );
+    assert_eq!(code, Some(1));
+    assert_eq!(doc["code"], "unsupported");
+    assert!(doc["error"].as_str().unwrap().contains("original"));
+}
+
+#[test]
+fn edit_unknown_id_is_not_found() {
+    let f = Fx::new();
+    let (code, doc) = edit(
+        &f,
+        "claude",
+        "-w-app/missing.md",
+        r#"{"name":"n","description":"d","category":null,"body":"b"}"#,
+    );
+    assert_eq!(code, Some(1));
+    assert_eq!(doc["code"], "not_found");
+}
+
+#[test]
+fn edit_bad_stdin_is_parse_error() {
+    let f = Fx::new();
+    let before = fs::read_to_string(&f.claude_file).unwrap();
+    for input in ["", "not json", r#"{"name":"n"}"#] {
+        let (code, doc) = edit(&f, "claude", "-w-app/a.md", input);
+        assert_eq!(code, Some(1), "{input}");
+        assert_eq!(doc["code"], "parse", "{input}");
+    }
+    assert_eq!(fs::read_to_string(&f.claude_file).unwrap(), before);
 }
