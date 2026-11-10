@@ -268,7 +268,10 @@ async fn the_hub_reports_needs_login_and_its_tools_answer_with_the_sign_in_messa
     // Signed in: the upstream tool works.
     let tools = client.peer().list_all_tools().await.unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-    assert_eq!(names, ["nativemem_status", "fake__whoami"]);
+    assert_eq!(
+        names,
+        ["nativemem_status", "subagents_list", "fake__whoami"]
+    );
 
     // The sign-in stops working during the session.
     fake.revoke_access();
@@ -312,7 +315,14 @@ async fn a_server_that_starts_signed_out_exposes_the_sign_in_tool() {
 
     let tools = client.peer().list_all_tools().await.unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
-    assert_eq!(names, ["nativemem_status", "fake__sign_in_required"]);
+    assert_eq!(
+        names,
+        [
+            "nativemem_status",
+            "subagents_list",
+            "fake__sign_in_required"
+        ]
+    );
     let status = client
         .peer()
         .call_tool(CallToolRequestParams::new("nativemem_status".to_string()))

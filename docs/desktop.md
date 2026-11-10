@@ -474,6 +474,52 @@ for a conflict. The agents' MCP files are only read. With `--apply`, `applied` i
 entries are written to `hub.toml` and their env and header values are stored as the listed secrets.
 Exit code 2 when a conflict remains.
 
+### Subagents
+
+`nativemem subagent ...` manages the subagent definitions in `<state dir>/subagents.toml` and runs one
+(`wiki/architecture/hub.md`, "Subagents"). A subagent runs a coding agent headless with a chosen
+harness (`claude`, `codex`, `opencode` or `pi`) and model; the hub offers each definition to every
+agent as the tool `subagent_<name>`. Besides the error codes above, `exists` is returned when a name is
+taken, `invalid` covers a bad name, harness, model, timeout or unknown field, `not_found` an unknown
+name, and `not_installed` a harness whose executable is not found (`add` and `edit` check; nothing is
+written). A name is 1-48 characters of `a-z 0-9 -`.
+
+`nativemem subagent list --json`
+```json
+{ "subagents": [
+    { "name": "code-review", "harness": "claude", "model": "sonnet",
+      "description": "Reviews a diff for bugs", "instructions": "Be terse.",
+      "timeout_secs": 900, "args": ["--allowed-tools", "Read"] },
+    { "name": "scout", "harness": "pi", "model": "anthropic/claude-haiku-4-5",
+      "description": "Finds code", "timeout_secs": 900, "args": [] } ] }
+```
+`instructions` is present only when set. `model` is in the harness's own syntax.
+
+`nativemem subagent add --json`, with one subagent as a JSON document on stdin:
+```json
+{ "name": "code-review", "harness": "claude", "model": "sonnet",
+  "description": "Reviews a diff for bugs", "instructions": "Be terse.",
+  "timeout_secs": 900, "args": ["--allowed-tools", "Read"] }
+```
+`name`, `harness`, `model` and `description` are required; `instructions` is optional text put in front of
+every prompt; `timeout_secs` defaults to 900 (at least 1); `args` are extra harness flags placed before the
+prompt. Output `{ "added": "code-review" }`. A duplicate name fails with code `exists`.
+
+`nativemem subagent edit <name> --json` replaces the definition with the document on stdin (the same
+fields; `name`, when present, must equal `<name>`). Output `{ "edited": "code-review" }`.
+`nativemem subagent remove <name> --json` prints `{ "removed": "code-review" }`.
+
+`nativemem subagent run <name> --prompt-file <path|-> [--cwd <absolute path>] --json` runs the subagent
+once (`-` reads the prompt from stdin; `--cwd` defaults to the current directory):
+```json
+{ "ok": true, "text": "The diff has two problems ...", "exit_code": 0, "duration_ms": 8421, "error": null }
+```
+On failure `ok` is false, `text` is empty and `error` says why: the harness's exit code and the last 2 KB
+of its stderr, a timeout, a missing executable, or the nesting limit. `exit_code` is the harness's exit
+code, null when it was killed. The exit code of the command is 2 when `ok` is false. `text` is cut at 50 KB
+with a note. A run started from inside a subagent (`NATIVEMEM_SUBAGENT_DEPTH` is 1 or more) is refused.
+`add`, `edit` and `remove` take the state lock; `list` and `run` do not.
+
 ## App structure
 
 Swift package at `apps/macos` (SwiftUI app, macOS 14+, Swift 6, no third-party dependencies).

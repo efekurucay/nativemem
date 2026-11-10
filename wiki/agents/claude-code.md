@@ -66,6 +66,10 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
   `cwd` when no directory exists for a project (`wiki/kinds/memory.md`).
 - Reads and writes whole skill directories below `skills/` (`wiki/kinds/skills.md`).
 - Never touches credentials or plugin directories, and writes `~/.claude.json` only for the `nativemem` MCP entry.
+- Subagents run Claude headless: `claude -p --output-format json --model <model> [args...]` with the prompt
+  on stdin; the answer is the `result` field of the JSON document, and `is_error: true` makes the run a
+  failure (`build` and `parse_answer` in `crates/hub/src/harness.rs`; `wiki/architecture/hub.md`,
+  "Subagents"). The binary is looked up in `PATH`, `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`.
 
 ## Sessions: listing and resume
 
@@ -156,6 +160,8 @@ carries an extra key under `metadata`, which is why those keys are not checked.
 | Claude Code hot-reloads edits to `mcpServers` | `[UNVERIFIED]` | assume a restart is needed |
 | The `nativemem` entry is written next to the other servers with their bytes kept | VERIFIED | `crates/hub/tests/register.rs` (`claude_gets_the_entry_and_everything_else_stays_byte_for_byte`) |
 | Claude starts the registered hub from that entry | `[UNVERIFIED]` | needs a staged check with `claude mcp list` |
+| `claude --help` lists `-p/--print`, `--output-format` (`text`, `json` as "single result", `stream-json`) and `--model` | OBSERVED | `claude --help` only; no run |
+| The `json` output is one object with the answer in `result` and `is_error` | `[UNVERIFIED]` | the parser is tested on fixtures in `crates/hub/src/harness.rs`; no real run |
 
 ## Source anchors
 

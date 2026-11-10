@@ -18,10 +18,21 @@ use crate::config::HubConfig;
 use crate::connect::{connect, Client, ConnectError, Connected};
 use crate::error::{HubError, Result};
 use crate::oauth;
+use crate::runner::Runner;
 use crate::secrets::SecretStore;
+use crate::subagents::{SubagentConfig, SubagentSpec};
 
 /// The tool that reports the state of every configured server.
 pub const STATUS_TOOL: &str = "nativemem_status";
+
+/// The tool that lists the subagent definitions.
+pub const SUBAGENTS_LIST_TOOL: &str = "subagents_list";
+
+/// `subagent_<name>`. A subagent name holds no underscore and an upstream tool name always holds
+/// `__`, so the two can never collide.
+pub fn subagent_tool_name(name: &str) -> String {
+    format!("subagent_{name}")
+}
 
 /// The tool name a server that is not signed in exposes.
 const SIGN_IN_TOOL: &str = "sign_in_required";
@@ -239,6 +250,39 @@ fn status_tool() -> Tool {
     )
 }
 
+fn subagents_list_tool() -> Tool {
+    let schema = json!({ "type": "object", "properties": {} });
+    Tool::new(
+        SUBAGENTS_LIST_TOOL,
+        "The subagents defined in nativemem: name, tool, harness, model and when to use each",
+        schema.as_object().cloned().unwrap_or_default(),
+    )
+}
+
+fn subagent_tool(name: &str, spec: &SubagentSpec) -> Tool {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "prompt": { "type": "string", "description": "The task for the subagent" },
+            "cwd": {
+                "type": "string",
+                "description": "Absolute working directory of the run; the hub's own directory when omitted"
+            }
+        },
+        "required": ["prompt"]
+    });
+    Tool::new(
+        subagent_tool_name(name),
+        format!(
+            "{} (harness {}, model {})",
+            spec.description,
+            spec.harness.as_str(),
+            spec.model
+        ),
+        schema.as_object().cloned().unwrap_or_default(),
+    )
+}
+
 /// The MCP server the agents talk to. It connects to the upstreams on the first request that
 /// needs them, which is `initialize`.
 pub struct HubServer {
@@ -246,6 +290,8 @@ pub struct HubServer {
     store: Arc<dyn SecretStore>,
     state: PathBuf,
     live: OnceCell<Live>,
+    subagents: SubagentConfig,
+    runner: Runner,
 }
 
 impl HubServer {
@@ -256,7 +302,71 @@ impl HubServer {
             store,
             state,
             live: OnceCell::new(),
+            subagents: SubagentConfig::default(),
+            runner: Runner::from_env(),
         }
+    }
+
+    /// Expose these subagent definitions as tools, run by `runner`.
+    pub fn with_subagents(mut self, subagents: SubagentConfig, runner: Runner) -> Self {
+        self.subagents = subagents;
+        self.runner = runner;
+        self
+    }
+
+    fn subagents_list(&self) -> serde_json::Value {
+        let agents: Vec<_> = self
+            .subagents
+            .agents
+            .iter()
+            .map(|(name, spec)| {
+                json!({
+                    "name": name,
+                    "tool": subagent_tool_name(name),
+                    "harness": spec.harness.as_str(),
+                    "model": spec.model,
+                    "description": spec.description,
+                })
+            })
+            .collect();
+        json!({ "subagents": agents })
+    }
+
+    async fn call_subagent(
+        &self,
+        name: &str,
+        spec: &SubagentSpec,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> std::result::Result<CallToolResponse, McpError> {
+        let arguments = arguments.unwrap_or_default();
+        let prompt = match arguments.get("prompt").and_then(|p| p.as_str()) {
+            Some(p) if !p.trim().is_empty() => p,
+            _ => {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "{} needs a non-empty string \"prompt\"",
+                        subagent_tool_name(name)
+                    ),
+                    None,
+                ))
+            }
+        };
+        let cwd = match arguments.get("cwd") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(cwd)) => Some(PathBuf::from(cwd)),
+            Some(_) => {
+                return Err(McpError::invalid_params(
+                    "cwd must be a string".to_string(),
+                    None,
+                ))
+            }
+        };
+        let report = self.runner.run(spec, prompt, cwd.as_deref()).await;
+        Ok(if report.ok {
+            text_result(report.text, false)
+        } else {
+            text_result(report.error.unwrap_or_default(), true)
+        })
     }
 
     async fn live(&self) -> &Live {
@@ -300,7 +410,13 @@ impl ServerHandler for HubServer {
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, McpError> {
         let live = self.live().await;
-        let mut tools = vec![status_tool()];
+        let mut tools = vec![status_tool(), subagents_list_tool()];
+        tools.extend(
+            self.subagents
+                .agents
+                .iter()
+                .map(|(name, spec)| subagent_tool(name, spec)),
+        );
         tools.extend(live.tools.iter().cloned());
         Ok(ListToolsResult::with_all_items(tools))
     }
@@ -310,6 +426,16 @@ impl ServerHandler for HubServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<CallToolResponse, McpError> {
+        if request.name == SUBAGENTS_LIST_TOOL {
+            return Ok(text_result(self.subagents_list().to_string(), false));
+        }
+        let subagent = request
+            .name
+            .strip_prefix("subagent_")
+            .and_then(|name| self.subagents.agents.get_key_value(name));
+        if let Some((name, spec)) = subagent {
+            return self.call_subagent(name, spec, request.arguments).await;
+        }
         let live = self.live().await;
         if request.name == STATUS_TOOL {
             let doc = json!({ "servers": live.status.iter().map(ServerStatus::json).collect::<Vec<_>>() });
@@ -363,7 +489,13 @@ pub fn run_stdio(config: HubConfig, store: Arc<dyn SecretStore>, state: PathBuf)
         .build()
         .map_err(|e| HubError::Invalid(format!("cannot start the async runtime: {e}")))?;
     runtime.block_on(async {
+        // A broken subagents file must not take the proxied servers down with it.
+        let subagents = SubagentConfig::load(&state).unwrap_or_else(|e| {
+            eprintln!("nativemem hub: {e}");
+            SubagentConfig::default()
+        });
         let server = HubServer::new(config, store, state)
+            .with_subagents(subagents, Runner::from_env())
             .serve(rmcp::transport::stdio())
             .await
             .map_err(|e| HubError::Invalid(format!("cannot start the hub: {e}")))?;

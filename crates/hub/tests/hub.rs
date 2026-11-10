@@ -77,7 +77,12 @@ async fn tools_are_prefixed_and_calls_are_forwarded_unchanged() {
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert_eq!(
         names,
-        ["nativemem_status", "fake__echo", "fake__env_matches"]
+        [
+            "nativemem_status",
+            "subagents_list",
+            "fake__echo",
+            "fake__env_matches"
+        ]
     );
     let echo = tools.iter().find(|t| t.name == "fake__echo").unwrap();
     assert_eq!(echo.description.as_deref(), Some("[fake] Returns its text"));
@@ -113,7 +118,7 @@ async fn failing_and_disabled_upstreams_are_reported_and_left_out() {
     let tools = client.peer().list_all_tools().await.unwrap();
     assert!(tools.iter().all(|t| {
         let n = t.name.as_ref();
-        n == "nativemem_status" || n.starts_with("good__")
+        n == "nativemem_status" || n == "subagents_list" || n.starts_with("good__")
     }));
 
     let status: Value =
