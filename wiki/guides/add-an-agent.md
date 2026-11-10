@@ -54,6 +54,8 @@ adapter) and Claude Code (full adapter with sessions) are the two reference impl
   constants with their evidence on the agent's page.
 - [ ] Every write goes through `fsx::atomic_write`; every delete or overwrite calls `fsx::backup`
   first. Content outside the managed regions stays byte-identical.
+- [ ] `create_original` for the kinds the agent can originate (memory, instruction), so `nativemem add`
+  works; it fails with `Error::Exists` when the native id is taken, and the default answers `unsupported`.
 - [ ] Replicas carry a marker that survives a lost ledger (`wiki/kinds/memory.md`,
   `wiki/kinds/sessions.md`).
 - [ ] `is_session_id` classifies session ids by the `.jsonl` suffix (`crates/core/src/session.rs`). A
@@ -72,7 +74,7 @@ adapter) and Claude Code (full adapter with sessions) are the two reference impl
 - [ ] Field on `Agents`; constructed in `Agents::open` only when the home exists (`present(...)`), so
   an agent without a home takes no part in a run, with `.with_blocked_kinds(&paused("<id>"))`. Add it to
   `all()`, `named()` and `AGENT_IDS`.
-- [ ] The `UnknownAgent` message and the `--agent` help text of `delete` and `edit` list the new id.
+- [ ] The `UnknownAgent` message and the `--agent` help text of `delete`, `add` and `edit` list the new id.
 - [ ] Skills: an agent with a native `skills/<name>/SKILL.md` directory gets `SkillStore` (`crates/core/src/adapters/skills.rs`) wired into `supports`, `scan`, `write_replica`, `write_original`, `remove`, `visible_copy`, `skill_report` and a `layout_check` probe; `AgentsFileAdapter` already does this. Native read roots outside the agent's own directory are passed with `with_visible_roots` from `Agents::open`.
 - [ ] `status`: add the agent to the session-report match when it has a session reader.
 - [ ] `crates/cli/src/schedule.rs`: add the root to `ExplicitRoots`, to `run_schedule` and to the flag
@@ -112,7 +114,7 @@ adapter) and Claude Code (full adapter with sessions) are the two reference impl
   agent's own listing and opens an item, then everything.
 - [ ] Record the outcome on the agent page and raise the evidence levels of the facts it confirmed.
 - [ ] Anything that writes into a store the agent builds its list from, and cannot be verified, stays
-  behind an opt-in switch and a schema probe (`wiki/decisions/codex-session-writes-gated.md`).
+  behind a schema probe that pauses the kind when it fails (`wiki/decisions/codex-session-writes-gated.md`).
 
 ## Source anchors
 

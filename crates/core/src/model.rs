@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 
 use crate::adapters::skills::SkillReport;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(pub String);
@@ -141,6 +141,11 @@ pub trait Adapter {
     fn scan(&self) -> Result<Vec<Observed>>;
     /// Create or update the replica of `key` in this agent. Returns its native_id and path.
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)>;
+    /// Create a new original in this agent's own store. Returns its native_id and path, and fails
+    /// with `Error::Exists` when that native_id is taken.
+    fn create_original(&self, _item: &Item) -> Result<(String, PathBuf)> {
+        Err(Error::unsupported(self.id().as_str(), "create"))
+    }
     /// Update an entry that originated in this agent (an edit made on a replica elsewhere).
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()>;
     /// Remove an entry (original or replica). Must back up first.

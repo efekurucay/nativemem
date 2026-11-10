@@ -22,11 +22,33 @@ struct ItemListView: View {
     @Bindable var model: AppModel
 
     var body: some View {
+        VStack(spacing: 0) {
+            if model.selectedFolderPath != nil {
+                modePicker
+            }
+            list
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .searchable(text: $model.itemSearch, prompt: searchPrompt)
+    }
+
+    private var modePicker: some View {
+        Picker("Show", selection: modeBinding) {
+            Text("Memory").tag(ItemMode.memory)
+            Text("Sessions (\(model.folderSessionCount))").tag(ItemMode.sessions)
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var list: some View {
         let sections = model.visibleSections
-        Group {
+        return Group {
             if sections.isEmpty {
                 if model.itemSearch.isEmpty {
-                    ContentUnavailableView(isSkills ? "No skills" : "No memories", systemImage: "tray")
+                    ContentUnavailableView(emptyTitle, systemImage: "tray")
                 } else {
                     ContentUnavailableView.search(text: model.itemSearch)
                 }
@@ -50,12 +72,52 @@ struct ItemListView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .searchable(text: $model.itemSearch, prompt: isSkills ? "Search skills" : "Search memories")
     }
 
     private var isSkills: Bool { model.sidebar == .skills }
 
+    private var emptyTitle: String {
+        if model.showsSessions { return "No sessions" }
+        return isSkills ? "No skills" : "No memories"
+    }
+
+    private var searchPrompt: String {
+        if model.showsSessions { return "Search sessions" }
+        return isSkills ? "Search skills" : "Search memories"
+    }
+
+    @ViewBuilder
     private func row(_ item: LogicalItem) -> some View {
+        if model.showsSessions {
+            sessionRow(item)
+        } else {
+            memoryRow(item)
+        }
+    }
+
+    private func sessionRow(_ item: LogicalItem) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(item.title).lineLimit(2)
+            if let stats = item.primary.session {
+                HStack(spacing: 8) {
+                    Text(stats.updated.formatted(.relative(presentation: .named)))
+                    Text(stats.turns == 1 ? "1 turn" : "\(stats.turns) turns")
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                ForEach(item.livesIn, id: \.self) { residence in
+                    Text(agentDisplayName(residence.agent))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .tag(item.id)
+    }
+
+    private func memoryRow(_ item: LogicalItem) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Text(item.primary.name).lineLimit(1)
@@ -80,6 +142,13 @@ struct ItemListView: View {
             }
         }
         .tag(item.id)
+    }
+
+    private var modeBinding: Binding<ItemMode> {
+        Binding(
+            get: { model.itemMode },
+            set: { model.requestMode($0) }
+        )
     }
 
     private var itemBinding: Binding<String?> {

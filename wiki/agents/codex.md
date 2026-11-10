@@ -15,9 +15,9 @@ Claude Code). SQLite files were inspected read-only (`immutable=1`, structure an
 
 | Kind | Status | Adapter |
 |---|---|---|
-| Project memory | Originals read from generated `memories/MEMORY.md` (read-only, never edited or deleted); replicas written to a nativemem-owned store plus a routing block | `crates/core/src/adapters/codex.rs`, `memory_store.rs` |
-| Instruction sections | Read and write in `AGENTS.md` | `codex.rs` through `sections.rs` |
-| Sessions | Originals always read; replicas (with their `threads` row) written only when `NATIVEMEM_CODEX_SESSION_WRITES=on` and the schema probes pass | `codex_sessions.rs`, `codex_rollout.rs`, `codex_imports.rs`, `codex_threads.rs` |
+| Project memory | Originals read from generated `memories/MEMORY.md` (read-only, never edited or deleted); in the nativemem-owned store, replicas and originals created through `add` (editable and deletable), plus a routing block | `crates/core/src/adapters/codex.rs`, `memory_store.rs` |
+| Instruction sections | Read and write in `AGENTS.md`, including a new section through `add` | `codex.rs` through `sections.rs` |
+| Sessions | Originals read; replicas (with their `threads` row) written while the schema probes pass | `codex_sessions.rs`, `codex_rollout.rs`, `codex_imports.rs`, `codex_threads.rs` |
 | Skills (global) | Read and write in `<codex home>/skills/`; `.system` and directories without `SKILL.md` are left alone; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `codex.rs` |
 | MCP servers | Read by `mcp import`; `mcp install` and `uninstall` write the one table `[mcp_servers.nativemem]` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
@@ -64,7 +64,7 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
 - Reads `memories/MEMORY.md` blocks, `AGENTS.md` sections, `memories/extensions/nativemem/resources/`
   replicas and `sessions/` rollouts (directory depth at most 4 below `sessions/`).
 - Writes replica memory items and the routing block, the instruction region at the end of
-  `AGENTS.md`, and, only with `NATIVEMEM_CODEX_SESSION_WRITES=on` while the schema probes pass, rollout files, the importer-ledger record for
+  `AGENTS.md`, and, while the schema probes pass, rollout files, the importer-ledger record for
   Claude-origin sessions and the `threads` row of every replica rollout (below). The ledger file is parsed and rewritten whole (every other key
   and record kept, key order not), backed up first, created only when the Codex home exists, and left
   alone when it does not parse.
@@ -99,7 +99,7 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
 
 ## Thread row writer
 
-`crates/core/src/adapters/codex_threads.rs`, called (only with the switch on) from `Adapter::finish` at the end of `sync --apply`.
+`crates/core/src/adapters/codex_threads.rs`, called (only while sessions are on and the probes pass) from `Adapter::finish` at the end of `sync --apply`.
 The row mirrors what Codex's importer inserts for an imported Claude thread (OBSERVED on 73 imported
 rows against 443 native ones) and is derived from the rollout file, so file and row agree:
 
@@ -219,7 +219,7 @@ layout.
 - `crates/core/src/adapters/codex_probes.rs`
 - `crates/core/src/adapters/codex_threads.rs`
 - `crates/core/src/adapters/memory_store.rs`
-- `crates/cli/src/main.rs` (`NATIVEMEM_CODEX_SESSION_WRITES`)
+- `crates/cli/src/main.rs` (`Agents::open`)
 - `crates/core/src/testkit.rs` (`CodexHome`, `write_state_db`) and `testkit_codex_state.sql` (structure of the real `threads` table)
 - `crates/core/tests/probes.rs`
 - `crates/core/tests/codex_threads.rs`, `crates/cli/tests/codex_threads.rs`
@@ -237,7 +237,7 @@ layout.
 
 ## Verification checklist
 
-- [ ] Without `NATIVEMEM_CODEX_SESSION_WRITES=on`, or with a failing schema probe, `sync` plans no session write for Codex
+- [ ] With `--no-sessions` or a failing schema probe, `sync` plans no session write for Codex
 - [ ] The staged check (`codex resume` lists and opens a copy) is recorded here
 - [ ] The README support table and this page agree on session writes
 

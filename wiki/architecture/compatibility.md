@@ -67,8 +67,8 @@ through behind the first. Probe observed values for failures are therefore built
 
 ## Notices
 
-`AgentReport.notices` carries informational lines that never change the status or the exit code. Three
-notices: while Codex session writes are off (`NATIVEMEM_CODEX_SESSION_WRITES` is not `on`), `codex: session writes are off; set NATIVEMEM_CODEX_SESSION_WRITES=on to let nativemem write sessions into Codex`; and while Claude Code's retention is the default 30 days (`cleanupPeriodDays` absent from its
+`AgentReport.notices` carries informational lines that never change the status or the exit code. Two
+notices: a skill whose own copy differs from a copy the agent also reads elsewhere; and while Claude Code's retention is the default 30 days (`cleanupPeriodDays` absent from its
 settings), `doctor` and `status` say `transcripts older than 30 days are deleted by Claude itself; set
 cleanupPeriodDays in Claude's settings to keep older sessions` when another agent holds a session
 Claude would delete (`add_notices` in `crates/cli/src/doctor.rs`, which scans those agents). It is the
@@ -105,13 +105,15 @@ Tests in `crates/cli/tests/doctor.rs`: `sync_pauses_exactly_the_protected_kinds_
 `a_paused_kind_leaves_existing_replicas_and_ledger_rows_alone`, `accepting_resumes_sync_without_duplicates`;
 `paused_codex_memory_leaves_existing_replicas_untouched` in `crates/core/tests/paused.rs`.
 
-Codex's checks gate a write path that is itself opt-in (`NATIVEMEM_CODEX_SESSION_WRITES=on`): with the switch on and while `codex.state_db`, `codex.threads_columns` and the other Codex
+Codex's checks gate its session write path: while `codex.state_db`, `codex.threads_columns` and the other Codex
 session checks pass, session replicas are written into Codex together with their `threads` row; a
 failing one pauses Codex sessions, so no rollout and no row is written
-(`schema_drift_or_a_switch_off_writes_no_row_and_takes_no_backup` in `crates/core/tests/codex_threads.rs`).
+(`schema_drift_or_paused_sessions_write_no_row_and_take_no_backup` in `crates/core/tests/codex_threads.rs`).
 The row writer sets explicit values for every column it writes and relies on none of the table's
 triggers; a Codex release that adds a column to `threads` therefore pauses it until the constants are
 reviewed.
+
+OpenCode's session checks protect `session` and exist only while `opencode.db` exists: `opencode.session_schema` (column signature of `session_v2`, `session_message`, `project` and `event_sequence`) and `opencode.version` (installed major version `2`, from the install path; unknown passes). A failing one pauses OpenCode sessions, so nothing is read or written; a busy database is not a failure. Writes into OpenCode follow these checks (`wiki/decisions/opencode-session-writes-gated.md`). Tests: `a_drifted_schema_pauses_opencode_sessions_in_both_directions` in `crates/cli/tests/opencode_sessions.rs`, `the_schema_probe_passes_on_the_real_structure_and_pauses_on_drift` in `crates/core/tests/opencode_sessions.rs`.
 
 ## `nativemem doctor`
 
@@ -162,6 +164,7 @@ never the real binary.
 - `crates/core/src/adapters/codex_threads.rs`
 - `crates/core/src/adapters/pi_probes.rs`
 - `crates/core/src/adapters/opencode_probes.rs`
+- `crates/core/src/adapters/opencode_sessions.rs`
 - `crates/cli/src/doctor.rs`
 - `crates/core/tests/probes.rs`
 - `crates/core/tests/paused.rs`
@@ -194,6 +197,7 @@ never the real binary.
 - `wiki/agents/pi.md`
 - `wiki/agents/opencode.md`
 - `wiki/decisions/codex-session-writes-gated.md`
+- `wiki/decisions/opencode-session-writes-gated.md`
 
 ## Last updated
 

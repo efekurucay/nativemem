@@ -34,7 +34,6 @@ fn adapter(f: &Fx, stamp: &str) -> CodexAdapter {
         BackupSession::with_stamp(stamp),
     )
     .with_sessions(SessionOptions::default())
-    .with_session_writes(true)
 }
 
 fn key(id: &str) -> ItemKey {
@@ -363,7 +362,7 @@ fn a_write_ahead_log_database_keeps_its_journal_mode() {
 }
 
 #[test]
-fn schema_drift_or_a_switch_off_writes_no_row_and_takes_no_backup() {
+fn schema_drift_or_paused_sessions_write_no_row_and_take_no_backup() {
     let f = fx();
     fs::remove_file(f.home.join("state_5.sqlite")).unwrap();
     CodexHome::new(&f.home).write_state_db(5, &["brand_new INTEGER NOT NULL DEFAULT 0"]);
@@ -380,8 +379,6 @@ fn schema_drift_or_a_switch_off_writes_no_row_and_takes_no_backup() {
     assert!(!paused.supports(Kind::Session, &project));
     let (id, _) = write(&probing, &key("s1"), &item("T", "q"));
     paused.finish().unwrap();
-    let off = adapter(&f, "T1").with_session_writes(false);
-    off.finish().unwrap();
     let no_sessions = CodexAdapter::new(
         f.home.clone(),
         f.state.clone(),

@@ -97,9 +97,9 @@ fallback. Test: `memory_is_planned_only_for_agents_that_support_it`.
 | Agent | Memory (Project) | Instruction (Global) | Skill (Global) | Session (Project) |
 |---|---|---|---|---|
 | Claude Code | yes, originals and replicas | yes | yes | yes |
-| Codex | yes; originals are generated and read-only, replicas are written | yes | yes | only with `NATIVEMEM_CODEX_SESSION_WRITES=on` while the Codex schema probes pass; each written replica also gets a `threads` row |
-| OpenCode | replicas only | yes | yes | no |
-| Pi | replicas only | yes | yes | yes |
+| Codex | yes; generated originals are read-only, store originals and replicas are written | yes | yes | yes while the Codex schema probes pass; each written replica also gets a `threads` row |
+| OpenCode | yes; store originals and replicas | yes | yes | yes while the OpenCode schema and version probes pass and `opencode.db` exists |
+| Pi | yes; store originals and replicas | yes | yes | yes |
 
 `Adapter::accepts(item)` (default true) is a second gate for one item: the engine plans nothing for a
 session a target does not accept, as Claude Code does for sessions older than its retention. Every
@@ -109,14 +109,21 @@ agent and what exists for it is left alone (`wiki/architecture/compatibility.md`
 
 Anchors: `supports` in `crates/core/src/adapters/claude.rs`, `codex.rs`, `pi.rs`, `agents_file.rs`.
 
+`Adapter::create_original(item)` creates a new original in the agent's own store and returns its
+`(native_id, path)`, or fails with `Error::Exists` when that id is taken. Memory (project scope) and
+instruction sections (global scope) are creatable in all four agents; the default answers
+`Error::Unsupported`. The engine is not involved: the next sync finds the new original through
+`scan` and replicates it by the table above (tests `created_memory_in_any_agent_reaches_the_others`,
+`created_instruction_in_any_agent_reaches_the_others`).
+
 ## Writer revisions
 
 `Adapter::writer_revision(kind)` is the version of the adapter's output format for a kind (0 unless
 overridden). The ledger records the revision a replica was written with. A session replica with a
 lower revision is rewritten (the file is backed up first) while it is unmodified; a modified one is
 left alone. Adopted replicas are recorded at the current revision. Current values: Claude sessions
-1, Codex sessions 1, Pi sessions 2, everything else 0
-(`SESSION_WRITER_REVISION` in the three adapter files). Bump the constant whenever the written
+1, Codex sessions 1, OpenCode sessions 1, Pi sessions 2, everything else 0
+(`SESSION_WRITER_REVISION` in the adapter files). Bump the constant whenever the written
 session format changes. Tests: `unmodified_replica_with_an_older_writer_revision_is_rewritten_once`,
 `modified_replica_with_an_older_writer_revision_is_left_alone`.
 
@@ -132,14 +139,14 @@ session format changes. Tests: `unmodified_replica_with_an_older_writer_revision
 ## CLI
 
 Commands: `status`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
-`delete`, `edit`, `skill show`, `mcp serve|list|add|edit|remove|enable|disable|set-secret|delete-secret|test|login|logout|install|uninstall|status|import`
+`delete`, `add`, `edit`, `skill show`, `session show`, `mcp serve|list|add|edit|remove|enable|disable|set-secret|delete-secret|test|login|logout|install|uninstall|status|import`
 (`wiki/architecture/hub.md`), `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
-`--opencode-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
-`NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`), `--session-days`
+`--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
+`NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_OPENCODE_DATA_HOME`, `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`), `--session-days`
 (`NATIVEMEM_SESSION_DAYS`), `--exclude-automated-sessions`, `--no-sessions`. Without a flag, a root
 falls back to `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, then
-`~/.claude`, `~/.codex`, `~/.config/opencode`, `~/.pi/agent`; the state directory defaults to
-`~/.nativemem`. `NATIVEMEM_CODEX_SESSION_WRITES=on` enables Codex session writes (off by default). `NATIVEMEM_REPO` names the repo in
+`~/.claude`, `~/.codex`, `~/.config/opencode`, `~/.pi/agent`; the OpenCode data home (it holds `opencode.db`) falls back to `$XDG_DATA_HOME/opencode`, then `~/.local/share/opencode`; the state directory defaults to
+`~/.nativemem`. `NATIVEMEM_REPO` names the repo in
 `doctor` prompts; `NATIVEMEM_NOTIFY_FILE` redirects notifications to a file. Exit codes: 0
 success, 2 when conflicts or skipped writes remain, 3 when `doctor` finds an agent that needs action,
 1 on error. With `--json`, one JSON document is
@@ -150,10 +157,13 @@ in `crates/cli/src/main.rs`.
 
 ## Desktop app
 
-`apps/macos` runs CLI commands with `--json` and renders the result. Display names come from
+`apps/macos` runs CLI commands with `--json` and renders the result. A toolbar "New" button opens a sheet that runs `add` for a memory entry or a global instruction section in any installed agent (`NewEntrySheet.swift`, `NewEntry.swift`). Display names come from
 `agentDisplayName` in `apps/macos/Sources/NativememKit/MemoryIndex.swift`. Skills are listed on their own "Skills" sidebar row, with `SKILL.md` read through `nativemem skill show`. Chat sessions are
-filtered out of the item views (`all.filter { $0.kind != Item.sessionKind }` in the same file);
-`status` counts them separately. The app finds the binary through app settings, `NATIVEMEM_BIN`, a
+filtered out of the memory views (`MemoryIndex.init` in the same file); `status` counts them
+separately. Selecting a project folder shows a "Memory" / "Sessions (N)" control above the list:
+the Sessions list (`SessionIndex.swift`, from `items --kind session --json`) covers the folder and
+below, sectioned by project, newest first, and the detail pane (`SessionDetailView.swift`) loads the
+read-only transcript through `nativemem session show`. There is no edit and no delete for sessions. The app finds the binary through app settings, `NATIVEMEM_BIN`, a
 file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebrew/bin`
 (`apps/macos/Sources/NativememKit/NativememCLI.swift`). It also runs `doctor --json` and shows the
 compatibility notices on the Overview (`wiki/architecture/compatibility.md`).

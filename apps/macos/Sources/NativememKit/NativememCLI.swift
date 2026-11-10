@@ -71,6 +71,16 @@ public struct NativememCLI: Sendable {
         try await run(["items", "--json"], as: ItemsDocument.self).items
     }
 
+    /// Chat sessions, without their turns.
+    public func sessions() async throws -> [Item] {
+        try await run(["items", "--kind", "session", "--json"], as: ItemsDocument.self).items
+    }
+
+    /// The transcript of one session; native ids often begin with "-", so the value is attached with "=".
+    public func sessionShow(agent: String, nativeId: String) async throws -> SessionTranscript {
+        try await run(["session", "show", "--agent", agent, "--id=\(nativeId)", "--json"])
+    }
+
     /// Exits with 3 while an agent needs action; the document is complete either way.
     public func doctor() async throws -> DoctorDocument {
         try await run(["doctor", "--json"])
@@ -103,12 +113,26 @@ public struct NativememCLI: Sendable {
 
     /// The new content goes to the process's stdin as one JSON document.
     public func edit(agent: String, nativeId: String, document: EditDocument) async throws -> EditResult {
+        try await run(
+            ["edit", "--agent", agent, "--id=\(nativeId)", "--json"],
+            stdin: try Self.encode(document)
+        )
+    }
+
+    /// Creates an original in the agent's own store; `project` is nil for a global instruction section.
+    /// The content goes to stdin like an edit.
+    public func add(
+        agent: String, kind: String, project: String?, document: EditDocument
+    ) async throws -> AddResult {
+        var arguments = ["add", "--agent", agent, "--kind", kind, "--json"]
+        if let project { arguments.append("--project=\(project)") }
+        return try await run(arguments, stdin: try Self.encode(document))
+    }
+
+    private static func encode(_ document: EditDocument) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        return try await run(
-            ["edit", "--agent", agent, "--id=\(nativeId)", "--json"],
-            stdin: try encoder.encode(document)
-        )
+        return try encoder.encode(document)
     }
 
     private func run<T: Decodable & Sendable>(

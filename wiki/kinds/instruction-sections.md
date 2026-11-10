@@ -20,7 +20,7 @@ shared by all adapters.
 | OpenCode | `<opencode home>/AGENTS.md` |
 | Pi | `<pi home>/AGENTS.md` |
 
-A missing file means no items; the first replica creates it. All four adapters support instruction
+A missing file means no items; the first replica or the first created section creates it. All four adapters support instruction
 originals: a section can originate in any agent.
 
 ## Items
@@ -54,6 +54,22 @@ originals: a section can originate in any agent.
 - Bytes outside the region are never changed by replica writes (test
   `rewrite_body_keeps_every_other_byte`).
 
+## Creating a section
+
+- `InstructionFile::create_original` (CLI `add --kind instruction`) appends `## <description>`, a
+  blank line and the body as a new user section, before the first managed region (the routing block
+  or the instruction region) and at the end of the file when there is none. One blank line separates
+  it from what precedes and follows it; every byte outside the inserted text stays identical. A
+  missing file is created. Tests: `insert_section_goes_before_the_first_managed_region_and_keeps_every_other_byte`,
+  `insert_section_without_a_region_appends_with_one_blank_line`.
+- `native_id` is `<file>#<slug(description)>`. When that id exists (a duplicate heading counts, as
+  its numbered ids keep the plain one), the call fails with `Error::Exists` and writes nothing (test
+  `insert_section_refuses_an_id_that_is_taken`).
+- A heading is one non-empty line. A body that would start another `## ` section outside a fence, or
+  holds a `<!-- nativemem` marker, would not read back as one section, so `section_problem` rejects it
+  (CLI code `invalid`; test `section_problem_rejects_what_would_not_read_back`).
+- The section reaches the other agents at the next sync (test `created_instruction_in_any_agent_reaches_the_others`).
+
 ## Edits and deletes
 
 - `write_original` rewrites the section body in place and keeps the heading line; every other byte
@@ -82,7 +98,7 @@ originals: a section can originate in any agent.
 - `crates/core/src/adapters/agents_file.rs`
 - `crates/core/src/adapters/claude.rs`
 - `crates/core/src/adapters/codex.rs`
-- `crates/cli/src/main.rs` (`edit`)
+- `crates/cli/src/main.rs` (`add`, `edit`)
 - `docs/design.md` (Instruction sections)
 
 ## Rules
@@ -90,6 +106,7 @@ originals: a section can originate in any agent.
 - MUST: Never modify the preamble or any byte outside the managed regions and the edited section.
 - MUST: Keep the heading as identity; never rename a section through a replica.
 - MUST: Back up the instruction file before every rewrite.
+- MUST: Create a section only through `create_original`, which refuses a taken id with `Error::Exists`.
 - SHOULD: Treat a parse error on an unterminated region as a stop, not something to repair.
 
 ## Verification checklist

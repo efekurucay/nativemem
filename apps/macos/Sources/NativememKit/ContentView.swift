@@ -3,6 +3,7 @@ import SwiftUI
 public struct ContentView: View {
     @Bindable var model: AppModel
     @State private var syncSession: SyncSession?
+    @State private var showNewEntry = false
 
     public init(model: AppModel) {
         self.model = model
@@ -17,6 +18,14 @@ public struct ContentView: View {
         .frame(minWidth: 900, minHeight: 560)
         .navigationTitle("nativemem")
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("New", systemImage: "plus") {
+                    showNewEntry = true
+                }
+                .labelStyle(.iconOnly)
+                .help("New memory")
+                .disabled(model.cli == nil || model.status == nil || model.isEditing)
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     syncSession = model.makeSyncSession()
@@ -39,6 +48,9 @@ public struct ContentView: View {
         .sheet(item: $syncSession) { session in
             SyncSheet(session: session)
         }
+        .sheet(isPresented: $showNewEntry) {
+            NewEntrySheet(model: model)
+        }
         .alert(
             "Something went wrong",
             isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })
@@ -60,6 +72,11 @@ public struct ContentView: View {
         .task { await model.reload() }
     }
 
+    private var emptyDetailTitle: String {
+        if model.showsSessions { return "No session selected" }
+        return model.sidebar == .skills ? "No skill selected" : "No memory selected"
+    }
+
     @ViewBuilder
     private var detailColumn: some View {
         switch model.sidebar {
@@ -69,16 +86,18 @@ public struct ContentView: View {
             HSplitView {
                 ItemListView(model: model)
                     .frame(minWidth: 260, idealWidth: 340, maxWidth: 520)
-                if let item = model.selectedItem {
+                if let item = model.selectedItem, model.showsSessions {
+                    SessionDetailView(model: model, item: item)
+                        .id(item.id)
+                        .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+                        .layoutPriority(1)
+                } else if let item = model.selectedItem {
                     ItemDetailView(model: model, item: item, onDelete: { await model.delete(item) })
                         .id(item.id)
                         .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
                         .layoutPriority(1)
                 } else {
-                    ContentUnavailableView(
-                        model.sidebar == .skills ? "No skill selected" : "No memory selected",
-                        systemImage: "doc.text"
-                    )
+                    ContentUnavailableView(emptyDetailTitle, systemImage: "doc.text")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }

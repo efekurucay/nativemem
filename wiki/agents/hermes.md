@@ -8,7 +8,7 @@ memory and sessions, so an adapter can be built without repeating the research.
 ## Scope
 
 **No Hermes adapter exists.** `nativemem` does not read or write anything of Hermes today: `hermes`
-is not a known agent id (`delete` and `edit` answer `unknown_agent`), there is no `--hermes-home`
+is not a known agent id (`delete`, `add` and `edit` answer `unknown_agent`), there is no `--hermes-home`
 flag and no wiki or README claim of support. This page is research for the day an adapter is added
 (`wiki/guides/add-an-agent.md`). Facts were gathered read-only from the installed sources and files of
 Hermes Agent 0.15.1 (state schema version 14); the agent itself was run at most to print its version.

@@ -1933,6 +1933,212 @@ mod tests {
             assert!(with_both.ends_with(text.trim_start()));
         }
     }
+
+    fn adapter_of<'a>(f: &'a Tri, agent: &str) -> &'a dyn Adapter {
+        match agent {
+            "claude" => &f.claude,
+            "codex" => &f.codex,
+            "opencode" => &f.opencode,
+            _ => &f.pi,
+        }
+    }
+
+    const AGENTS: [&str; 4] = ["claude", "codex", "opencode", "pi"];
+
+    fn created_memory(name: &str, body: &str) -> Item {
+        Item {
+            kind: Kind::Memory,
+            scope: Scope::Project(PathBuf::from(CWD)),
+            name: name.into(),
+            description: format!("about {name}"),
+            category: Some("feedback".into()),
+            body: body.into(),
+            source_dir: None,
+        }
+    }
+
+    fn created_instruction(heading: &str, body: &str) -> Item {
+        Item {
+            kind: Kind::Instruction,
+            scope: Scope::Global,
+            name: crate::slug::slugify(heading),
+            description: heading.into(),
+            category: None,
+            body: body.into(),
+            source_dir: None,
+        }
+    }
+
+    /// What `agent` holds named `name`: the entry itself when it is an original there.
+    fn find(f: &Tri, agent: &str, name: &str) -> Option<Observed> {
+        adapter_of(f, agent)
+            .scan()
+            .unwrap()
+            .into_iter()
+            .find(|o| o.item.name == name)
+    }
+
+    #[test]
+    fn created_memory_in_any_agent_reaches_the_others() {
+        for origin in AGENTS {
+            let f = tri();
+            let item = created_memory("note", "created body");
+            let (id, _) = adapter_of(&f, origin).create_original(&item).unwrap();
+            let r = f.sync();
+            assert!(r.notes.is_empty(), "{origin}: {}", r.notes.len());
+            assert_eq!(f.ledger.list_items().unwrap().len(), 1, "{origin}");
+            let key = ItemKey {
+                origin: AgentId::new(origin),
+                native_id: id,
+            };
+            for agent in AGENTS {
+                let found = find(&f, agent, "note").unwrap();
+                if agent == origin {
+                    assert!(found.replica_of.is_none(), "{origin}");
+                } else {
+                    assert_eq!(found.replica_of.as_ref(), Some(&key), "{origin} -> {agent}");
+                }
+                assert_eq!(
+                    crate::model::content_hash(&found.item),
+                    crate::model::content_hash(&item),
+                    "{origin} -> {agent}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replica_edit_writes_back_to_a_created_original() {
+        for origin in ["pi", "opencode", "codex"] {
+            let f = tri();
+            let (id, original) = adapter_of(&f, origin)
+                .create_original(&created_memory("note", "created body"))
+                .unwrap();
+            f.sync();
+            let replica = find(&f, "claude", "note").unwrap();
+            replace_in(&replica.path, "created body", "edited in claude");
+            f.sync();
+            assert!(
+                fs::read_to_string(&original)
+                    .unwrap()
+                    .contains("edited in claude"),
+                "{origin} {id}"
+            );
+            for agent in AGENTS {
+                let found = find(&f, agent, "note").unwrap();
+                assert_eq!(found.item.body.trim_end(), "edited in claude", "{agent}");
+            }
+        }
+    }
+
+    #[test]
+    fn created_original_edit_travels_to_the_replicas() {
+        let f = tri();
+        let (id, _) =
+            f.pi.create_original(&created_memory("note", "created body"))
+                .unwrap();
+        f.sync();
+        f.pi.write_original(&id, &created_memory("note", "second body"))
+            .unwrap();
+        f.sync();
+        for agent in ["claude", "codex", "opencode"] {
+            let found = find(&f, agent, "note").unwrap();
+            assert_eq!(found.item.body.trim_end(), "second body", "{agent}");
+        }
+    }
+
+    #[test]
+    fn deleting_a_created_original_removes_every_replica_and_routing() {
+        for origin in ["pi", "opencode", "codex"] {
+            let f = tri();
+            let (id, _) = adapter_of(&f, origin)
+                .create_original(&created_memory("note", "created body"))
+                .unwrap();
+            f.sync();
+            adapter_of(&f, origin).remove(&id).unwrap();
+            let r = f.sync();
+            assert!(r.notes.is_empty(), "{origin}");
+            for agent in AGENTS {
+                assert!(find(&f, agent, "note").is_none(), "{origin}: {agent}");
+            }
+            assert!(f.ledger.list_items().unwrap().is_empty());
+            for agent in ["codex", "opencode", "pi"] {
+                assert!(!f.agents_md(agent).contains("nativemem:begin"), "{agent}");
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_a_replica_of_a_created_original_removes_the_original() {
+        let f = tri();
+        let (_, original) =
+            f.pi.create_original(&created_memory("note", "created body"))
+                .unwrap();
+        f.sync();
+        fs::remove_file(find(&f, "claude", "note").unwrap().path).unwrap();
+        f.sync();
+        assert!(!original.exists());
+        for agent in AGENTS {
+            assert!(find(&f, agent, "note").is_none(), "{agent}");
+        }
+    }
+
+    #[test]
+    fn routing_block_lists_a_project_that_only_has_originals() {
+        let f = tri();
+        let mut item = created_memory("note", "created body");
+        item.scope = Scope::Project(PathBuf::from("/w/only"));
+        let (id, _) = f.pi.create_original(&item).unwrap();
+        let index = f
+            .pi_root
+            .join("nativemem/memory")
+            .join(id.split_once('/').unwrap().0)
+            .join("MEMORY.md");
+        let line = format!("- /w/only → {}\n", index.display());
+        assert!(f.agents_md("pi").contains(&line));
+        f.sync();
+        for agent in ["codex", "opencode"] {
+            let text = f.agents_md(agent);
+            assert!(text.contains("- /w/only → "), "{agent}");
+        }
+        assert!(f.agents_md("pi").contains(&line));
+    }
+
+    #[test]
+    fn created_instruction_in_any_agent_reaches_the_others() {
+        for origin in AGENTS {
+            let f = tri();
+            let user = "# Mine\n\n## Style\nbe terse\n";
+            for agent in AGENTS {
+                let file = if agent == "claude" {
+                    "CLAUDE.md"
+                } else {
+                    "AGENTS.md"
+                };
+                fs::write(f.root(agent).join(file), user).unwrap();
+            }
+            let (id, _) = adapter_of(&f, origin)
+                .create_original(&created_instruction("Fresh Rule", "do it"))
+                .unwrap();
+            f.sync();
+            for agent in AGENTS {
+                let found = find(&f, agent, "fresh-rule").unwrap();
+                assert_eq!(found.item.body, "do it", "{origin} -> {agent}");
+                assert_eq!(found.replica_of.is_none(), agent == origin);
+            }
+            let file = if origin == "claude" {
+                "CLAUDE.md"
+            } else {
+                "AGENTS.md"
+            };
+            assert_eq!(id, format!("{file}#fresh-rule"));
+            let text = fs::read_to_string(f.root(origin).join(file)).unwrap();
+            assert!(
+                text.starts_with("# Mine\n\n## Style\nbe terse\n\n## Fresh Rule\n\ndo it\n"),
+                "{origin}: {text}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1980,8 +2186,7 @@ mod session_tests {
             },
             codex: {
                 let a = CodexAdapter::new(root.join("codex"), state.clone(), backups.clone())
-                    .with_claude_home(root.join("claude"))
-                    .with_session_writes(true);
+                    .with_claude_home(root.join("claude"));
                 match options {
                     Some(o) => a.with_sessions(o),
                     None => a,

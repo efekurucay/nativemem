@@ -7,12 +7,12 @@ plugin, a config edit or a file inside a repository.
 
 ## Scope
 
-Codex, OpenCode and Pi replicas of project memory. Claude Code has native per-project memory and
+Codex, OpenCode and Pi project memory: replicas and the originals created in their store. Claude Code has native per-project memory and
 needs no block.
 
 ## Decision
 
-Replica items go to a store inside the agent's own home (item files, a per-project `MEMORY.md` index
+Item files (replicas, and originals created through `nativemem add`) go to a store inside the agent's own home (item files, a per-project `MEMORY.md` index
 and a `scope.json`). A block in the agent's global `AGENTS.md`, between `<!-- nativemem:begin -->` and
 `<!-- nativemem:end -->`, lists `<cwd> → <index file>` per project and tells the agent to read the
 matching project's index first and open the item files it lists when relevant. The block is
@@ -60,4 +60,4 @@ changed.
 
 ## Last updated
 
-2026-11-10
+2026-11-11

@@ -15,6 +15,21 @@ public struct ItemRef: Codable, Hashable, Sendable {
     public var nativeId: String
 }
 
+/// What `items --kind session --json` adds to a session: its times and how many turns it has.
+public struct SessionStats: Codable, Hashable, Sendable {
+    public var createdMs: Int64
+    public var updatedMs: Int64
+    public var turns: Int
+
+    public init(createdMs: Int64, updatedMs: Int64, turns: Int) {
+        self.createdMs = createdMs
+        self.updatedMs = updatedMs
+        self.turns = turns
+    }
+
+    public var updated: Date { Date(timeIntervalSince1970: Double(updatedMs) / 1000) }
+}
+
 public struct Item: Codable, Hashable, Sendable {
     public static let memoryKind = "memory"
     public static let instructionKind = "instruction"
@@ -32,6 +47,8 @@ public struct Item: Codable, Hashable, Sendable {
     public var body: String
     public var replicaOf: ItemRef?
     public var hash: String
+    /// Present on chat sessions only.
+    public var session: SessionStats?
 
     public var isInstruction: Bool { kind == Item.instructionKind }
     public var isSkill: Bool { kind == Item.skillKind }
@@ -39,7 +56,7 @@ public struct Item: Codable, Hashable, Sendable {
     public init(
         agent: String, nativeId: String, kind: String = Item.memoryKind, path: String, scope: Scope,
         name: String, description: String? = nil, category: String? = nil, body: String = "",
-        replicaOf: ItemRef? = nil, hash: String = ""
+        replicaOf: ItemRef? = nil, hash: String = "", session: SessionStats? = nil
     ) {
         self.agent = agent
         self.nativeId = nativeId
@@ -52,6 +69,7 @@ public struct Item: Codable, Hashable, Sendable {
         self.body = body
         self.replicaOf = replicaOf
         self.hash = hash
+        self.session = session
     }
 
     /// `kind` defaults to memory when the CLI output does not carry it.
@@ -68,6 +86,7 @@ public struct Item: Codable, Hashable, Sendable {
         body = try container.decode(String.self, forKey: .body)
         replicaOf = try container.decodeIfPresent(ItemRef.self, forKey: .replicaOf)
         hash = try container.decode(String.self, forKey: .hash)
+        session = try container.decodeIfPresent(SessionStats.self, forKey: .session)
     }
 }
 
@@ -108,6 +127,14 @@ public struct StatusDocument: Codable, Sendable {
     /// Logical items: every original counted once, so it always matches the per-agent numbers.
     public var logicalItems: Int {
         agents.reduce(0) { $0 + $1.originals }
+    }
+
+    /// The agent that holds the most originals, the first one on a tie; nil without agents.
+    public var agentWithMostOriginals: String? {
+        agents.reduce(nil as AgentStatus?) { best, agent in
+            guard let best else { return agent }
+            return agent.originals > best.originals ? agent : best
+        }?.id
     }
 
     /// Agents that hold every logical item: nothing left to write for them.
@@ -160,6 +187,26 @@ public struct SkillText: Codable, Hashable, Sendable {
     public var text: String
 }
 
+public struct SessionTurn: Codable, Hashable, Sendable {
+    public var role: String
+    public var text: String
+    public var tsMs: Int64
+
+    /// "You" or "Assistant".
+    public var speaker: String { role == "user" ? "You" : "Assistant" }
+}
+
+/// One session with its turns, as `session show --json` prints it.
+public struct SessionTranscript: Codable, Hashable, Sendable {
+    public var agent: String
+    public var nativeId: String
+    public var title: String
+    public var cwd: String
+    public var createdMs: Int64
+    public var updatedMs: Int64
+    public var turns: [SessionTurn]
+}
+
 public struct EntryRef: Codable, Hashable, Sendable {
     public var agent: String
     public var nativeId: String
@@ -199,6 +246,14 @@ public struct EditDocument: Encodable, Equatable, Sendable {
 
 public struct EditResult: Codable, Sendable {
     public var edited: EntryRef
+    public var hash: String
+    public var backupDir: String
+}
+
+public struct AddResult: Codable, Sendable {
+    public var agent: String
+    public var nativeId: String
+    public var path: String
     public var hash: String
     public var backupDir: String
 }

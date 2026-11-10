@@ -44,7 +44,7 @@ nativemem-sync/
 │   │       ├── probe.rs          read-only helpers for probes: tails, newest files, executable lookup
 │   │       ├── slug.rs           slugify
 │   │       ├── error.rs          Error enum (Io, Parse, Ledger, Unsupported, MassDelete)
-│   │       ├── testkit.rs        fixture builders: ClaudeHome, CodexHome, PiHome (temp dirs only)
+│   │       ├── testkit.rs        fixture builders: ClaudeHome, CodexHome, PiHome, OpencodeData (temp dirs only; `testkit_opencode_schema.sql` is the real structure of OpenCode's session tables)
 │   │       └── adapters/
 │   │           ├── mod.rs        adapter module list
 │   │           ├── claude.rs     Claude Code: project memory, CLAUDE.md sections, session replicas
@@ -52,18 +52,21 @@ nativemem-sync/
 │   │           ├── codex.rs      Codex: generated-memory originals, replica store, AGENTS.md, rollouts
 │   │           ├── codex_sessions.rs   Codex rollout reader (originals, replica detection, automated markers)
 │   │           ├── codex_threads.rs    `threads` row writer for replica rollouts, database backup and retention
+│   │           ├── sqlite_guard.rs     shared by the Codex and OpenCode row writers: busy timeout, busy-or-failed, online backup once per run, 5 kept
+│   │           ├── opencode_sessions.rs  OpenCode session reader and writer for `opencode.db` (rows, marker, verify)
+│   │           ├── opencode_project.rs   OpenCode project id and worktree for a directory (SHA-1, git rules)
 │   │           ├── codex_rollout.rs    Codex rollout writer shaped like Codex's own importer output
 │   │           ├── codex_imports.rs    Codex importer ledger (`external_agent_session_imports.json`)
 │   │           ├── claude_probes.rs    Claude compatibility probes and their expected constants
 │   │           ├── codex_probes.rs     Codex probes: state database, rollouts, import ledger
 │   │           ├── pi_probes.rs        Pi probes: session header, entry types, directory encoding
-│   │           ├── opencode_probes.rs  OpenCode probes: config directory and AGENTS.md
+│   │           ├── opencode_probes.rs  OpenCode probes: config directory, AGENTS.md, session tables, installed version
 │   │           ├── pi.rs         Pi: AGENTS.md through agents_file, session reader and writer
 │   │           ├── agents_file.rs      generic adapter for agents that only read a global AGENTS.md (OpenCode, Pi)
 │   │           ├── skills.rs     skill directories: manifest hash, atomic tree copy, visible roots, layout probe
-│   │           ├── memory_store.rs     replica store plus routing block, shared by Codex, OpenCode, Pi
+│   │           ├── memory_store.rs     item-file store (originals and replicas) plus routing block, shared by Codex, OpenCode, Pi
 │   │           └── sections.rs   instruction-section parser, managed regions, byte-preserving edits, markers
-│   │   └── tests/                probes.rs (probes, drift, blocked kinds), skills.rs (skill mirroring over four temp homes)
+│   │   └── tests/                probes.rs (probes, drift, blocked kinds), opencode_sessions.rs (OpenCode reader, writer, database safety, probes, engine flow), skills.rs (skill mirroring over four temp homes)
 │   ├── hub/                      library `nativemem-hub`: the MCP hub; not a sync kind, no engine or ledger
 │   │   ├── src/
 │   │   │   ├── lib.rs            module list
@@ -78,16 +81,18 @@ nativemem-sync/
 │   │   └── tests/                hub.rs (proxy, failures, secrets, HTTP headers), import.rs (four fake agent homes), oauth.rs (sign-in, refresh, needs_login over a fake authorization server), register.rs (the entry in four fake agent homes), common/fake_oauth.rs (the fake server, also used by the CLI tests)
 │   └── cli/                      binary `nativemem`
 │       ├── src/
-│       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/edit, JSON output
+│       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/add/edit, JSON output
 │       │   ├── doctor.rs         `doctor`, compatibility reports, warnings, notification delivery
 │       │   ├── mcp.rs            `mcp` subcommands over the hub crate
 │       │   └── schedule.rs       launchd scheduling (macOS only)
-│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications), mcp.rs (hub commands, sign-in, registration and `mcp serve` over temp roots)
+│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications), opencode_sessions.rs (drift, data-home resolution), mcp.rs (hub commands, sign-in, registration and `mcp serve` over temp roots)
 ├── apps/macos/                   Swift package, macOS 14+, no third-party dependencies
 │   ├── Package.swift
 │   ├── Sources/Nativemem/        app entry point (`NativememApp.swift`)
 │   ├── Sources/NativememKit/     app logic and views
 │   │   ├── SkillTextView.swift   read-only SKILL.md of a skill
+│   │   ├── SessionIndex.swift, SessionDetailView.swift  sessions per project folder, read-only transcript
+│   │   ├── NewEntry.swift, NewEntrySheet.swift  the New sheet: draft and validation, the form
 │   │   ├── NativememCLI.swift    finds and runs the binary, decodes JSON
 │   │   ├── Contract.swift        Codable types mirroring the CLI JSON contract
 │   │   ├── AppModel.swift        observable state, grouping, copy folding
@@ -96,7 +101,7 @@ nativemem-sync/
 │   │   ├── SyncSession.swift     preview then apply flow
 │   │   ├── BodyText.swift, MarkdownBlocks.swift  body rendering
 │   │   └── SidebarView, ItemListView, ItemDetailView, OverviewView, SyncSheet, ContentView
-│   ├── Tests/NativememKitTests/  contract, doctor, index, tree, sectioning, body parser, sync headline tests
+│   ├── Tests/NativememKitTests/  contract, doctor, index, session, tree, sectioning, body parser, sync headline, new entry tests
 │   │   └── Fixtures/             one JSON file per CLI document shape
 │   ├── Resources/AppIcon.png
 │   └── scripts/bundle.sh         builds the app bundle into `apps/macos/build/` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`)

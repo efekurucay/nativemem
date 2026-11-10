@@ -12,8 +12,9 @@ fn run(claude: &Path, codex: &Path, state: &Path, args: &[&str]) -> Output {
         .env_remove("OPENCODE_CONFIG_DIR")
         .env_remove("PI_CODING_AGENT_DIR")
         .env("HOME", state.with_file_name("home"))
-        .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
         .env_remove("NATIVEMEM_OPENCODE_HOME")
+        .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
+        .env_remove("XDG_DATA_HOME")
         .env_remove("NATIVEMEM_PI_HOME")
         .arg("--claude-home")
         .arg(claude)
@@ -21,6 +22,8 @@ fn run(claude: &Path, codex: &Path, state: &Path, args: &[&str]) -> Output {
         .arg(codex)
         .arg("--opencode-home")
         .arg(state.with_file_name("opencode"))
+        .arg("--opencode-data-home")
+        .arg(state.with_file_name("opencode-data"))
         .arg("--pi-home")
         .arg(state.with_file_name("pi"))
         .arg("--state-dir")
@@ -448,8 +451,9 @@ fn run_stdin(f: &Fx, stdin: &str, args: &[&str]) -> (Option<i32>, Value) {
         .env_remove("OPENCODE_CONFIG_DIR")
         .env_remove("PI_CODING_AGENT_DIR")
         .env("HOME", f.state.with_file_name("home"))
-        .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
         .env_remove("NATIVEMEM_OPENCODE_HOME")
+        .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
+        .env_remove("XDG_DATA_HOME")
         .env_remove("NATIVEMEM_PI_HOME")
         .arg("--claude-home")
         .arg(&f.claude)
@@ -457,6 +461,8 @@ fn run_stdin(f: &Fx, stdin: &str, args: &[&str]) -> (Option<i32>, Value) {
         .arg(&f.codex)
         .arg("--opencode-home")
         .arg(f.state.with_file_name("opencode"))
+        .arg("--opencode-data-home")
+        .arg(f.state.with_file_name("opencode-data"))
         .arg("--pi-home")
         .arg(f.state.with_file_name("pi"))
         .arg("--state-dir")
@@ -637,6 +643,8 @@ mod schedule {
             .env_remove("OPENCODE_CONFIG_DIR")
             .env_remove("PI_CODING_AGENT_DIR")
             .env_remove("NATIVEMEM_OPENCODE_HOME")
+            .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
+            .env_remove("XDG_DATA_HOME")
             .env_remove("NATIVEMEM_PI_HOME")
             .env_remove("NATIVEMEM_LAUNCH_AGENTS_DIR")
             .arg("--state-dir")
@@ -752,10 +760,11 @@ mod schedule {
             .env_remove("OPENCODE_CONFIG_DIR")
             .env_remove("PI_CODING_AGENT_DIR")
             .env_remove("NATIVEMEM_OPENCODE_HOME")
+            .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
+            .env_remove("XDG_DATA_HOME")
             .env_remove("NATIVEMEM_PI_HOME")
             .env_remove("NATIVEMEM_STATE_DIR")
             .env("HOME", e.state.parent().unwrap())
-            .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
             .args(["schedule", "--no-launchctl", "--launch-agents-dir"])
             .arg(&e.agents)
             .arg("install")
@@ -896,6 +905,236 @@ fn edit_instruction_heading_is_invalid_and_writes_nothing() {
     assert!(!f.state.join("backups").exists());
 }
 
+fn add(
+    f: &Fx,
+    agent: &str,
+    kind: &str,
+    project: Option<&str>,
+    stdin: &str,
+) -> (Option<i32>, Value) {
+    let mut args = vec!["add", "--agent", agent, "--kind", kind, "--json"];
+    if let Some(p) = project {
+        args.extend(["--project", p]);
+    }
+    run_stdin(f, stdin, &args)
+}
+
+const NEW_MEMORY: &str = r#"{"name":"created-note","description":"made by hand","category":"feedback","body":"hand body"}"#;
+const NEW_SECTION: &str =
+    r#"{"name":"x","description":"Fresh Rule","category":"user","body":"do it"}"#;
+
+fn items_of(f: &Fx) -> Vec<Value> {
+    f.json(&["items", "--json"]).1["items"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn add_memory_in_every_agent_then_sync_spreads_it() {
+    for agent in ["claude", "codex", "opencode", "pi"] {
+        let f = four_agents();
+        let (code, doc) = add(&f, agent, "memory", Some("/w/app/"), NEW_MEMORY);
+        assert_eq!(code, Some(0), "{agent}: {doc}");
+        assert_eq!(doc["agent"], agent);
+        assert!(
+            Path::new(doc["path"].as_str().unwrap()).is_file(),
+            "{agent}"
+        );
+        assert!(Path::new(doc["backup_dir"].as_str().unwrap()).starts_with(f.state.join("backups")));
+        let id = doc["native_id"].as_str().unwrap();
+        let created = items_of(&f)
+            .into_iter()
+            .find(|i| i["agent"] == agent && i["native_id"] == id)
+            .unwrap();
+        assert_eq!(
+            created["scope"],
+            json!({ "type": "project", "path": "/w/app" })
+        );
+        assert_eq!(created["category"], "feedback");
+        assert!(created["replica_of"].is_null());
+        assert_eq!(created["hash"], doc["hash"]);
+
+        let (code, sync) = f.json(&["sync", "--apply", "--json"]);
+        assert_eq!(code, Some(0), "{agent}: {sync}");
+        assert_eq!(sync["notes"], json!([]));
+        let copies: Vec<Value> = items_of(&f)
+            .into_iter()
+            .filter(|i| i["name"] == "created-note" && !i["replica_of"].is_null())
+            .collect();
+        assert_eq!(copies.len(), 3, "{agent}");
+        for c in &copies {
+            assert_eq!(c["replica_of"], json!({ "origin": agent, "native_id": id }));
+            assert_eq!(c["hash"], doc["hash"]);
+        }
+        let (_, again) = f.json(&["sync", "--json"]);
+        assert_eq!(again["actions"], json!([]), "{agent}");
+    }
+}
+
+#[test]
+fn add_instruction_in_every_agent_then_sync_spreads_it() {
+    for agent in ["claude", "codex", "opencode", "pi"] {
+        let f = four_agents();
+        let (code, doc) = add(&f, agent, "instruction", None, NEW_SECTION);
+        assert_eq!(code, Some(0), "{agent}: {doc}");
+        let file = if agent == "claude" {
+            "CLAUDE.md"
+        } else {
+            "AGENTS.md"
+        };
+        assert_eq!(doc["native_id"], format!("{file}#fresh-rule"));
+        let created = items_of(&f)
+            .into_iter()
+            .find(|i| i["agent"] == agent && i["native_id"] == doc["native_id"])
+            .unwrap();
+        assert_eq!(created["scope"], json!({ "type": "global" }));
+        assert_eq!(created["name"], "fresh-rule");
+        assert_eq!(created["description"], "Fresh Rule");
+        assert_eq!(created["category"], Value::Null);
+        assert_eq!(created["hash"], doc["hash"]);
+
+        let (code, sync) = f.json(&["sync", "--apply", "--json"]);
+        assert_eq!(code, Some(0), "{agent}: {sync}");
+        let copies: Vec<Value> = items_of(&f)
+            .into_iter()
+            .filter(|i| i["name"] == "fresh-rule" && !i["replica_of"].is_null())
+            .collect();
+        assert_eq!(copies.len(), 3, "{agent}");
+        for c in &copies {
+            assert_eq!(c["body"], "do it");
+            assert_eq!(c["hash"], doc["hash"]);
+        }
+    }
+}
+
+#[test]
+fn add_refuses_a_taken_id_and_leaves_the_file_alone() {
+    let f = four_agents();
+    for (kind, project, input) in [
+        ("memory", Some("/w/app"), NEW_MEMORY),
+        ("instruction", None, NEW_SECTION),
+    ] {
+        let (code, _) = add(&f, "pi", kind, project, input);
+        assert_eq!(code, Some(0));
+        let before = fs::read_to_string(f.state.with_file_name("pi").join("AGENTS.md")).unwrap();
+        let (code, doc) = add(&f, "pi", kind, project, input);
+        assert_eq!(code, Some(1), "{kind}");
+        assert_eq!(doc["code"], "exists", "{kind}");
+        assert_eq!(
+            fs::read_to_string(f.state.with_file_name("pi").join("AGENTS.md")).unwrap(),
+            before
+        );
+    }
+    let (code, doc) = add(
+        &f,
+        "claude",
+        "memory",
+        Some("/w/app"),
+        r#"{"name":"a","description":"d","category":null,"body":"b"}"#,
+    );
+    assert_eq!((code, &doc["code"]), (Some(1), &json!("exists")));
+    assert!(fs::read_to_string(&f.claude_file)
+        .unwrap()
+        .contains("alpha body"));
+}
+
+#[test]
+fn add_reports_invalid_input_and_writes_nothing() {
+    let f = four_agents();
+    let section = |description: &str, body: &str| {
+        json!({ "name": "n", "description": description, "category": null, "body": body })
+            .to_string()
+    };
+    let memory = |name: &str, description: &str, category: Value| {
+        json!({ "name": name, "description": description, "category": category, "body": "b" })
+            .to_string()
+    };
+    let cases: Vec<(&str, Option<&str>, String)> = vec![
+        ("memory", None, NEW_MEMORY.into()),
+        ("memory", Some("w/app"), NEW_MEMORY.into()),
+        ("memory", Some("/w/../app"), NEW_MEMORY.into()),
+        ("memory", Some("/w/app"), memory(" ", "d", Value::Null)),
+        ("memory", Some("/w/app"), memory("n", "", Value::Null)),
+        (
+            "memory",
+            Some("/w/app"),
+            memory("n", "two\nlines", Value::Null),
+        ),
+        ("memory", Some("/w/app"), memory("n", "d", json!("a\nb"))),
+        ("instruction", Some("/w/app"), NEW_SECTION.into()),
+        ("instruction", None, section("", "b")),
+        ("instruction", None, section("two\nlines", "b")),
+        (
+            "instruction",
+            None,
+            section("Fine", "text\n## Another\nmore"),
+        ),
+    ];
+    for (kind, project, input) in &cases {
+        for agent in ["claude", "pi"] {
+            let (code, doc) = add(&f, agent, kind, *project, input);
+            assert_eq!(code, Some(1), "{agent} {kind} {project:?} {input}");
+            assert_eq!(doc["code"], "invalid", "{agent} {kind} {project:?} {input}");
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(f.claude.join("CLAUDE.md")).unwrap(),
+        "# Mine\n\n## Style\nbe terse\n"
+    );
+    assert!(!f.state.with_file_name("pi").join("AGENTS.md").exists());
+    assert!(!f
+        .claude
+        .join("projects/-w-app/memory/created-note.md")
+        .exists());
+}
+
+#[test]
+fn add_trims_the_project_and_treats_an_empty_category_as_none() {
+    let f = four_agents();
+    let input = r#"{"name":"n","description":"d","category":"","body":"b"}"#;
+    let (code, doc) = add(&f, "pi", "memory", Some("/w/app//"), input);
+    assert_eq!(code, Some(0), "{doc}");
+    let created = items_of(&f)
+        .into_iter()
+        .find(|i| i["agent"] == "pi")
+        .unwrap();
+    assert_eq!(created["scope"]["path"], "/w/app");
+    assert_eq!(created["category"], Value::Null);
+}
+
+#[test]
+fn add_error_codes_for_agents_and_stdin() {
+    let f = Fx::new();
+    let (code, doc) = add(&f, "pi", "memory", Some("/w/app"), NEW_MEMORY);
+    assert_eq!((code, &doc["code"]), (Some(1), &json!("not_installed")));
+    assert!(!f.state.with_file_name("pi").exists());
+    let (code, doc) = add(&f, "nobody", "memory", Some("/w/app"), NEW_MEMORY);
+    assert_eq!((code, &doc["code"]), (Some(1), &json!("unknown_agent")));
+    for input in ["", "not json", r#"{"name":"n"}"#] {
+        let (code, doc) = add(&f, "claude", "memory", Some("/w/app"), input);
+        assert_eq!((code, &doc["code"]), (Some(1), &json!("parse")), "{input}");
+    }
+    let o = run(
+        &f.claude,
+        &f.codex,
+        &f.state,
+        &["add", "--agent", "claude", "--kind", "session", "--json"],
+    );
+    assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
+fn add_is_refused_while_the_lock_is_held() {
+    let f = four_agents();
+    fs::create_dir_all(&f.state).unwrap();
+    let held = fs::File::create(f.state.join("sync.lock")).unwrap();
+    held.try_lock().unwrap();
+    let (code, doc) = add(&f, "pi", "memory", Some("/w/app"), NEW_MEMORY);
+    assert_eq!((code, &doc["code"]), (Some(1), &json!("busy")));
+    assert!(!f.state.with_file_name("pi").join("AGENTS.md").exists());
+}
+
 const CHAT: &[(&str, &str)] = &[
     ("user", "how do I fix the login?"),
     ("assistant", "check the token expiry"),
@@ -980,12 +1219,86 @@ fn items_leaves_sessions_out_unless_asked_and_never_prints_bodies() {
         assert_eq!(i["body"], "");
         assert_eq!(i["scope"], json!({"type": "project", "path": "/w/app"}));
         assert_eq!(i["description"], "Fix login");
+        let session = i["session"].as_object().unwrap();
+        assert_eq!(session["turns"], CHAT.len());
+        assert!(session["updated_ms"].as_i64().unwrap() > 0);
     }
     assert_eq!(list.iter().filter(|i| i["replica_of"].is_null()).count(), 1);
     let pi = list.iter().find(|i| i["agent"] == "pi").unwrap();
     assert_eq!(pi["replica_of"]["origin"], "claude");
     let human = text(&run(&f.claude, &f.codex, &f.state, &["items"]));
     assert!(!human.contains("session"), "{human}");
+}
+
+#[test]
+fn memory_items_carry_no_session_object() {
+    let f = Fx::new();
+    let (_, items) = f.json(&["items", "--json"]);
+    assert!(items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|i| i.get("session").is_none()));
+}
+
+#[test]
+fn session_show_prints_the_transcript_read_only() {
+    let (f, _) = with_session();
+    let (code, doc) = f.json(&[
+        "session",
+        "show",
+        "--agent",
+        "claude",
+        "--id",
+        "-w-app/c1.jsonl",
+        "--json",
+    ]);
+    assert_eq!(code, Some(0), "{doc}");
+    assert_eq!(doc["agent"], "claude");
+    assert_eq!(doc["native_id"], "-w-app/c1.jsonl");
+    assert_eq!(doc["title"], "Fix login");
+    assert_eq!(doc["cwd"], "/w/app");
+    assert!(doc["created_ms"].as_i64().unwrap() > 0);
+    let turns = doc["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), CHAT.len());
+    for (turn, (role, text)) in turns.iter().zip(CHAT) {
+        assert_eq!(
+            (turn["role"].as_str(), turn["text"].as_str()),
+            (Some(*role), Some(*text))
+        );
+        assert!(turn["ts_ms"].as_i64().unwrap() > 0);
+    }
+    let human = text(&run(
+        &f.claude,
+        &f.codex,
+        &f.state,
+        &[
+            "session",
+            "show",
+            "--agent",
+            "claude",
+            "--id",
+            "-w-app/c1.jsonl",
+        ],
+    ));
+    assert!(
+        human.contains("Fix login") && human.contains("You:") && human.contains("Assistant:"),
+        "{human}"
+    );
+    assert!(!f.state.join("sync.lock").exists(), "no lock is taken");
+}
+
+#[test]
+fn session_show_reports_unknown_agent_invalid_id_and_missing_session() {
+    let (f, _) = with_session();
+    let code_of = |agent: &str, id: &str| {
+        let (code, doc) = f.json(&["session", "show", "--agent", agent, "--id", id, "--json"]);
+        assert_eq!(code, Some(1), "{doc}");
+        doc["code"].as_str().unwrap().to_string()
+    };
+    assert_eq!(code_of("nobody", "-w-app/c1.jsonl"), "unknown_agent");
+    assert_eq!(code_of("claude", "memory/x.md"), "invalid");
+    assert_eq!(code_of("claude", "-w-app/missing.jsonl"), "not_found");
 }
 
 #[test]
@@ -1000,7 +1313,8 @@ fn delete_and_edit_refuse_session_ids() {
     );
     let mut child = Command::new(env!("CARGO_BIN_EXE_nativemem"))
         .env("HOME", f.state.with_file_name("home"))
-        .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
+        .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
+        .env_remove("XDG_DATA_HOME")
         .arg("--claude-home")
         .arg(&f.claude)
         .arg("--codex-home")
@@ -1201,6 +1515,8 @@ fn skill_edit_is_unsupported() {
     skill_dir(&skills_of(&f, "claude"), "demo-skill", "text");
     let mut child = Command::new(env!("CARGO_BIN_EXE_nativemem"))
         .env("HOME", f.state.with_file_name("home"))
+        .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
+        .env_remove("XDG_DATA_HOME")
         .args(["--claude-home"])
         .arg(&f.claude)
         .arg("--codex-home")

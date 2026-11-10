@@ -8,7 +8,9 @@ use clap::{Parser, Subcommand};
 use nativemem_core::adapters::agents_file::AgentsFileAdapter;
 use nativemem_core::adapters::claude::ClaudeAdapter;
 use nativemem_core::adapters::codex::CodexAdapter;
+use nativemem_core::adapters::opencode_sessions::DATABASE;
 use nativemem_core::adapters::pi::PiAdapter;
+use nativemem_core::adapters::sections::section_problem;
 use nativemem_core::adapters::skills::skill_name;
 use nativemem_core::compat::{self, AgentReport, CompatState};
 use nativemem_core::engine::{self, Action, ApplyOptions, Note};
@@ -16,7 +18,8 @@ use nativemem_core::error::{Error, Result};
 use nativemem_core::fsx::BackupSession;
 use nativemem_core::ledger::Ledger;
 use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Kind, Observed, Scope};
-use nativemem_core::session::{is_session_id, SessionOptions};
+use nativemem_core::session::{is_session_id, Role, Session, SessionOptions};
+use nativemem_core::slug::slugify;
 use serde_json::{json, Value};
 
 mod doctor;
@@ -40,6 +43,9 @@ struct Cli {
     /// OpenCode home [default: $OPENCODE_CONFIG_DIR or ~/.config/opencode]
     #[arg(long, global = true, env = "NATIVEMEM_OPENCODE_HOME")]
     opencode_home: Option<PathBuf>,
+    /// OpenCode data home, which holds opencode.db [default: $XDG_DATA_HOME/opencode or ~/.local/share/opencode]
+    #[arg(long, global = true, env = "NATIVEMEM_OPENCODE_DATA_HOME")]
+    opencode_data_home: Option<PathBuf>,
     /// Pi home [default: $PI_CODING_AGENT_DIR or ~/.pi/agent]
     #[arg(long, global = true, env = "NATIVEMEM_PI_HOME")]
     pi_home: Option<PathBuf>,
@@ -117,6 +123,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Create one new original entry from a JSON document on stdin; does not sync
+    Add {
+        /// claude, codex, opencode or pi
+        #[arg(long)]
+        agent: String,
+        /// memory (needs --project) or instruction (a global section)
+        #[arg(long, value_parser = ["memory", "instruction"])]
+        kind: String,
+        /// Absolute path of the project a memory entry belongs to
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
     /// Rewrite one original entry from a JSON document on stdin; does not sync
     Edit {
         /// claude, codex, opencode or pi
@@ -133,6 +154,8 @@ enum Command {
     Skill(SkillArgs),
     /// The MCP hub: one local MCP server that holds the real servers and their secrets
     Mcp(mcp::McpArgs),
+    /// Chat sessions of the agents
+    Session(SessionArgs),
     /// Run `sync --apply` on a timer through a launchd agent (macOS)
     Schedule(ScheduleArgs),
 }
@@ -153,6 +176,28 @@ enum SkillCommand {
         /// The skill's directory name
         #[arg(long, allow_hyphen_values = true)]
         name: String,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct SessionArgs {
+    #[command(subcommand)]
+    command: SessionCommand,
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Print the transcript of one session; reads only
+    Show {
+        /// claude, codex, opencode or pi
+        #[arg(long)]
+        agent: String,
+        /// The session's native id, as listed by `items --kind session`
+        #[arg(long, allow_hyphen_values = true)]
+        id: String,
         /// Print one JSON document
         #[arg(long)]
         json: bool,
@@ -213,6 +258,7 @@ impl Failure {
             Failure::Replica => "unsupported",
             Failure::Core(Error::MassDelete { .. }) => "mass_delete",
             Failure::Core(Error::Unsupported { .. }) => "unsupported",
+            Failure::Core(Error::Exists(_)) => "exists",
             Failure::Core(Error::Io { .. }) => "io",
             Failure::Core(Error::Parse(_)) => "parse",
             Failure::Core(Error::Ledger(_)) => "ledger",
@@ -258,6 +304,7 @@ struct ExplicitRoots {
     claude: Option<PathBuf>,
     codex: Option<PathBuf>,
     opencode: Option<PathBuf>,
+    opencode_data: Option<PathBuf>,
     pi: Option<PathBuf>,
     state: Option<PathBuf>,
 }
@@ -270,6 +317,7 @@ impl ExplicitRoots {
             ("--claude-home", &self.claude),
             ("--codex-home", &self.codex),
             ("--opencode-home", &self.opencode),
+            ("--opencode-data-home", &self.opencode_data),
             ("--pi-home", &self.pi),
             ("--state-dir", &self.state),
         ] {
@@ -294,6 +342,8 @@ struct Roots {
     claude: PathBuf,
     codex: PathBuf,
     opencode: PathBuf,
+    /// The directory that holds `opencode.db`.
+    opencode_data: PathBuf,
     pi: PathBuf,
     state: PathBuf,
     /// The shared skills directory Codex and Pi also read: `<user home>/.agents/skills`.
@@ -315,9 +365,6 @@ impl Agents {
         sessions: Option<SessionOptions>,
         blocked: &Blocked,
     ) -> Self {
-        // Codex session writes are opt-in and, once on, still follow the compatibility probes.
-        let codex_session_writes =
-            std::env::var("NATIVEMEM_CODEX_SESSION_WRITES").is_ok_and(|v| v == "on");
         let state = || roots.state.clone();
         let present = |dir: &Path| dir.is_dir();
         let paused = |id: &str| blocked.get(id).cloned().unwrap_or_default();
@@ -334,7 +381,6 @@ impl Agents {
             codex: present(&roots.codex).then(|| {
                 let a = CodexAdapter::new(roots.codex.clone(), state(), backups.clone())
                     .with_claude_home(roots.claude.clone())
-                    .with_session_writes(codex_session_writes)
                     .with_visible_roots(shared())
                     .with_blocked_kinds(&paused("codex"));
                 match sessions {
@@ -343,8 +389,19 @@ impl Agents {
                 }
             }),
             opencode: present(&roots.opencode).then(|| {
-                AgentsFileAdapter::new("opencode", roots.opencode.clone(), state(), backups.clone())
-                    .with_blocked_kinds(&paused("opencode"))
+                let a = AgentsFileAdapter::new(
+                    "opencode",
+                    roots.opencode.clone(),
+                    state(),
+                    backups.clone(),
+                )
+                .with_blocked_kinds(&paused("opencode"));
+                let db = roots.opencode_data.join(DATABASE);
+                if db.is_file() {
+                    a.with_opencode_sessions(db, sessions)
+                } else {
+                    a
+                }
             }),
             pi: present(&roots.pi).then(|| {
                 let a = PiAdapter::new(roots.pi.clone(), state(), backups.clone())
@@ -407,6 +464,11 @@ fn resolve(cli: &Cli) -> Result<Roots> {
             Some("OPENCODE_CONFIG_DIR"),
             ".config/opencode",
         )?,
+        opencode_data: match (&cli.opencode_data_home, env_path("XDG_DATA_HOME")) {
+            (Some(p), _) => p.clone(),
+            (None, Some(xdg)) => xdg.join("opencode"),
+            (None, None) => home()?.join(".local/share/opencode"),
+        },
         pi: pick(&cli.pi_home, Some("PI_CODING_AGENT_DIR"), ".pi/agent")?,
         state: pick(&cli.state_dir, None, ".nativemem")?,
         shared_skills: std::env::home_dir().map(|h| h.join(SHARED_SKILLS)),
@@ -486,6 +548,7 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
         let report = match a.id().as_str() {
             "claude" => present.claude.as_ref().map(|c| c.session_report()),
             "codex" => present.codex.as_ref().map(|c| c.session_report()),
+            "opencode" => present.opencode.as_ref().map(|c| c.session_report()),
             "pi" => present.pi.as_ref().map(|c| c.session_report()),
             _ => None,
         };
@@ -564,7 +627,7 @@ fn items(roots: &Roots, agents: &Agents, kind: Option<Kind>, json: bool) -> Resu
         let list: Vec<Value> = observed
             .iter()
             .map(|o| {
-                json!({
+                let mut item = json!({
                     "agent": o.agent.as_str(),
                     "native_id": o.native_id,
                     "kind": o.item.kind.as_str(),
@@ -576,7 +639,15 @@ fn items(roots: &Roots, agents: &Agents, kind: Option<Kind>, json: bool) -> Resu
                     "body": if matches!(o.item.kind, Kind::Session | Kind::Skill) { "" } else { &o.item.body },
                     "replica_of": o.replica_of.as_ref().map(key_json),
                     "hash": content_hash(&o.item),
-                })
+                });
+                if let Some(session) = Session::from_body(&o.item.body).filter(|_| o.item.kind == Kind::Session) {
+                    item["session"] = json!({
+                        "created_ms": session.created_ms,
+                        "updated_ms": session.updated_ms,
+                        "turns": session.turns.len(),
+                    });
+                }
+                item
             })
             .collect();
         print_json(&json!({ "items": list }));
@@ -636,6 +707,52 @@ fn refuse_session(id: &str) -> Outcome<()> {
             code: "unsupported",
             message: "chat sessions cannot be deleted or edited from here".into(),
         });
+    }
+    Ok(())
+}
+
+fn session_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<()> {
+    let not_found = || Failure::NotFound {
+        agent: agent.to_string(),
+        id: id.to_string(),
+    };
+    let adapter = agents.named(agent)?;
+    if !is_session_id(id) {
+        return Err(Failure::Coded {
+            code: "invalid",
+            message: format!("{id:?} is not a session id"),
+        });
+    }
+    let found = find_entry(adapter.ok_or_else(not_found)?, id)?
+        .filter(|o| o.item.kind == Kind::Session)
+        .ok_or_else(not_found)?;
+    let session = Session::from_body(&found.item.body)
+        .ok_or_else(|| Error::Parse(format!("unreadable session {id:?}")))?;
+    if json {
+        let turns: Vec<Value> = session
+            .turns
+            .iter()
+            .map(|t| json!({ "role": t.role.as_str(), "text": t.text, "ts_ms": t.ts_ms }))
+            .collect();
+        print_json(&json!({
+            "agent": agent,
+            "native_id": id,
+            "title": session.title,
+            "cwd": session.cwd.display().to_string(),
+            "created_ms": session.created_ms,
+            "updated_ms": session.updated_ms,
+            "turns": turns,
+        }));
+    } else {
+        println!("{}", session.title);
+        println!("{agent}  {id}  {}", session.cwd.display());
+        for t in &session.turns {
+            let who = match t.role {
+                Role::User => "You",
+                Role::Assistant => "Assistant",
+            };
+            println!("\n{who}:\n{}", t.text);
+        }
     }
     Ok(())
 }
@@ -751,6 +868,109 @@ fn edit(
         }));
     } else {
         println!("edited {agent}  {id}  backup: {}", backup_dir.display());
+    }
+    Ok(())
+}
+
+fn invalid(message: impl Into<String>) -> Failure {
+    Failure::Coded {
+        code: "invalid",
+        message: message.into(),
+    }
+}
+
+/// A single non-empty line without surrounding blanks.
+fn one_line(field: &str, value: &str) -> Outcome<String> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(['\n', '\r']) {
+        return Err(invalid(format!("{field} must be one non-empty line")));
+    }
+    Ok(value.to_string())
+}
+
+/// An absolute path without trailing slashes, `.` parts or doubled separators.
+fn project_path(project: &Path) -> Outcome<PathBuf> {
+    if !project.is_absolute() || project.components().any(|c| c.as_os_str() == "..") {
+        return Err(invalid("--project must be an absolute path without `..`"));
+    }
+    Ok(project.components().collect())
+}
+
+fn add(
+    roots: &Roots,
+    backups: &BackupSession,
+    agents: &Agents,
+    (agent, kind, project): (&str, &str, Option<&Path>),
+    json: bool,
+) -> Outcome<()> {
+    let adapter = agents.named(agent)?.ok_or_else(|| Failure::Coded {
+        code: "not_installed",
+        message: format!("{agent} has no home directory"),
+    })?;
+    let (kind, scope) = match (Kind::parse(kind), project) {
+        (Some(Kind::Memory), Some(p)) => (Kind::Memory, Scope::Project(project_path(p)?)),
+        (Some(Kind::Memory), None) => return Err(invalid("a memory entry needs --project")),
+        (Some(Kind::Instruction), None) => (Kind::Instruction, Scope::Global),
+        (Some(Kind::Instruction), Some(_)) => {
+            return Err(invalid(
+                "an instruction section is global and takes no --project",
+            ))
+        }
+        _ => return Err(invalid("--kind must be memory or instruction")),
+    };
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(Error::from)?;
+    let (name, description, category, body) = parse_edit(&input)?;
+    let item = if kind == Kind::Instruction {
+        let heading = one_line("description", &description)?;
+        if let Some(problem) = section_problem(&heading, &body) {
+            return Err(invalid(problem));
+        }
+        Item {
+            kind,
+            scope,
+            name: slugify(&heading),
+            description: heading,
+            category: None,
+            body,
+            source_dir: None,
+        }
+    } else {
+        Item {
+            kind,
+            scope,
+            name: one_line("name", &name)?,
+            description: one_line("description", &description)?,
+            category: category
+                .filter(|c| !c.trim().is_empty())
+                .map(|c| one_line("category", &c))
+                .transpose()?,
+            body,
+            source_dir: None,
+        }
+    };
+    if !adapter.supports(item.kind, &item.scope) {
+        return Err(Error::unsupported(agent, "create").into());
+    }
+    let (id, path) = adapter.create_original(&item)?;
+    let written = find_entry(adapter, &id)?.ok_or_else(|| Failure::NotFound {
+        agent: agent.to_string(),
+        id: id.clone(),
+    })?;
+    let hash = content_hash(&written.item);
+    let backup_dir = roots.state.join("backups").join(backups.stamp());
+    if json {
+        print_json(&json!({
+            "agent": agent,
+            "native_id": id,
+            "path": path.display().to_string(),
+            "hash": hash,
+            "backup_dir": backup_dir.display().to_string(),
+        }));
+    } else {
+        println!("added {agent}  {id}  {}", path.display());
     }
     Ok(())
 }
@@ -916,6 +1136,7 @@ fn explicit_roots(cli: &Cli) -> ExplicitRoots {
             .opencode_home
             .clone()
             .or_else(|| env_path("OPENCODE_CONFIG_DIR")),
+        opencode_data: cli.opencode_data_home.clone(),
         pi: cli
             .pi_home
             .clone()
@@ -950,6 +1171,7 @@ fn run(cli: &Cli) -> Outcome<u8> {
     let _lock = match &cli.command {
         Command::Sync { apply: true, .. }
         | Command::Delete { .. }
+        | Command::Add { .. }
         | Command::Edit { .. }
         | Command::Doctor {
             accept: Some(_), ..
@@ -1031,6 +1253,19 @@ fn run(cli: &Cli) -> Outcome<u8> {
         Command::Delete { agent, id, json } => {
             delete(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
+        Command::Add {
+            agent,
+            kind,
+            project,
+            json,
+        } => add(
+            &roots,
+            &backups,
+            &agents,
+            (agent, kind, project.as_deref()),
+            *json,
+        )
+        .map(|()| 0),
         Command::Edit { agent, id, json } => {
             edit(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
@@ -1038,6 +1273,9 @@ fn run(cli: &Cli) -> Outcome<u8> {
             command: SkillCommand::Show { agent, name, json },
         }) => skill_show(&agents, agent, name, *json).map(|()| 0),
         Command::Mcp(args) => mcp::run(args, &roots, &explicit_roots(cli), &backups),
+        Command::Session(SessionArgs {
+            command: SessionCommand::Show { agent, id, json },
+        }) => session_show(&agents, agent, id, *json).map(|()| 0),
         Command::Schedule(args) => run_schedule(cli, args, &roots).map(|()| 0),
     }
 }
@@ -1049,9 +1287,13 @@ fn wants_json(command: &Command) -> bool {
         | Command::Doctor { json, .. }
         | Command::Items { json, .. }
         | Command::Delete { json, .. }
+        | Command::Add { json, .. }
         | Command::Edit { json, .. }
         | Command::Skill(SkillArgs {
             command: SkillCommand::Show { json, .. },
+        })
+        | Command::Session(SessionArgs {
+            command: SessionCommand::Show { json, .. },
         })
         | Command::Schedule(ScheduleArgs {
             command: ScheduleCommand::Status { json },

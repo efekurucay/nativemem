@@ -17,7 +17,7 @@ use super::codex_rollout;
 use super::codex_sessions::CodexSessions;
 use super::codex_threads;
 #[cfg(test)]
-use super::memory_store::{parse_replica, render};
+use super::memory_store::{parse_entry, render};
 use super::memory_store::{read_opt, MemoryStore};
 use super::sections::InstructionFile;
 #[cfg(test)]
@@ -59,7 +59,6 @@ pub struct CodexAdapter {
     skills: SkillStore,
     sessions: Option<CodexSessions>,
     claude_home: Option<PathBuf>,
-    session_writes: bool,
     /// Rollouts written in this run whose `threads` row `finish` refreshes.
     written: RefCell<Vec<PathBuf>>,
     blocked: Vec<Kind>,
@@ -153,7 +152,6 @@ impl CodexAdapter {
             backups,
             sessions: None,
             claude_home: None,
-            session_writes: false,
             written: RefCell::new(Vec::new()),
             blocked: Vec::new(),
         }
@@ -169,17 +167,6 @@ impl CodexAdapter {
     pub fn with_blocked_kinds(mut self, kinds: &[Kind]) -> Self {
         self.blocked = kinds.to_vec();
         self
-    }
-
-    /// Whether session replicas are written into Codex; off unless the caller opts in. Codex lists a thread only when its
-    /// state database has a row for it; `finish` maintains that row.
-    pub fn with_session_writes(mut self, enabled: bool) -> Self {
-        self.session_writes = enabled;
-        self
-    }
-
-    pub fn session_writes_enabled(&self) -> bool {
-        self.session_writes
     }
 
     /// Where Claude Code's transcripts live. Codex's importer ledger records the bytes of the
@@ -243,8 +230,9 @@ impl CodexAdapter {
         Ok((native_id, path))
     }
 
-    /// Reads rollouts as session originals; without this call sessions stay out. Replicas are
-    /// written only while session writes are enabled (`with_session_writes`).
+    /// Reads rollouts as session originals and lets replicas be written; without this call
+    /// sessions stay out. Codex lists a thread only when its state database has a row for it;
+    /// `finish` maintains that row.
     pub fn with_sessions(mut self, options: SessionOptions) -> Self {
         self.sessions = Some(CodexSessions::new(self.home.clone(), options));
         self
@@ -300,7 +288,7 @@ impl Adapter for CodexAdapter {
             return false;
         }
         match (kind, scope) {
-            (Kind::Session, Scope::Project(_)) => self.session_writes,
+            (Kind::Session, Scope::Project(_)) => self.sessions.is_some(),
             (Kind::Memory, Scope::Project(_))
             | (Kind::Instruction | Kind::Skill, Scope::Global) => true,
             _ => false,
@@ -327,8 +315,7 @@ impl Adapter for CodexAdapter {
     /// Writes the `threads` rows of the replica rollouts; a busy database is left for the next run.
     fn finish(&self) -> Result<Vec<(String, String)>> {
         let written = self.written.take();
-        if self.sessions.is_none() || !self.session_writes || self.blocked.contains(&Kind::Session)
-        {
+        if self.sessions.is_none() || self.blocked.contains(&Kind::Session) {
             return Ok(Vec::new());
         }
         let busy = codex_threads::sync_rows(
@@ -416,6 +403,14 @@ impl Adapter for CodexAdapter {
         self.memory.write_replica(key, item)
     }
 
+    fn create_original(&self, item: &Item) -> Result<(String, PathBuf)> {
+        match item.kind {
+            Kind::Instruction => self.instructions.create_original(item),
+            Kind::Memory => self.memory.create_original(item),
+            _ => Err(Error::unsupported(AGENT, "create")),
+        }
+    }
+
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
         if skill_name(native_id).is_some() {
             return self.skills.write(item).map(|_| ());
@@ -426,7 +421,7 @@ impl Adapter for CodexAdapter {
         if self.instructions.owns(native_id) {
             return self.instructions.write_original(native_id, item);
         }
-        Err(Error::unsupported(AGENT, "write_original"))
+        self.memory.write_original(native_id, item)
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
@@ -567,9 +562,9 @@ mod tests {
                 origin: AgentId::new("claude"),
                 native_id: id.into(),
             };
-            let text = render(&k, &item("/p", "n", None, "b"));
-            let r = parse_replica(&text).unwrap();
-            assert_eq!((r.origin.as_str(), r.id.as_str()), ("claude", id));
+            let text = render(Some(&k), &item("/p", "n", None, "b"));
+            let r = parse_entry(&text).unwrap();
+            assert_eq!(r.marker, Some(("claude".to_string(), id.to_string())));
         }
     }
 
@@ -833,6 +828,38 @@ mod tests {
         ));
         assert!(matches!(
             f.a.remove("/w/app#x"),
+            Err(Error::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn created_memory_lives_in_the_resources_store_and_is_editable() {
+        let f = fx();
+        let (id, path) =
+            f.a.create_original(&item("/w/app", "Alpha", Some("user"), "b"))
+                .unwrap();
+        let dir = layout::project_dir(&f.home, id.split_once('/').unwrap().0);
+        assert_eq!(path, dir.join("alpha.md"));
+        assert!(agents(&f).contains("- /w/app → "));
+        let found = f.a.scan().unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].replica_of.is_none());
+        f.a.write_original(&id, &item("/w/app", "Alpha", None, "edited"))
+            .unwrap();
+        assert_eq!(f.a.scan().unwrap()[0].item.body, "edited");
+        f.a.remove(&id).unwrap();
+        assert!(f.a.scan().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_memory_and_instructions_can_be_created() {
+        let f = fx();
+        let session = Item {
+            kind: Kind::Session,
+            ..item("/w", "s", None, "b")
+        };
+        assert!(matches!(
+            f.a.create_original(&session),
             Err(Error::Unsupported { .. })
         ));
     }

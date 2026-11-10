@@ -226,7 +226,7 @@ Error type design, module-internal structure, slug function details, output form
 
 Capabilities: `Adapter::supports(kind, scope)` says what an agent can store (default: everything).
 All four agents store memory in `Project` scope and instructions in `Global` scope. OpenCode and Pi
-never originate memory: they hold replicas only. The engine leaves agents that do not support an item out of its
+have no native memory: their store holds replicas and the originals created there with `add`. The engine leaves agents that do not support an item out of its
 replica targets, write-back targets, absent sets and adoption, so they never produce actions,
 skipped notes or counts for it. `Error::Unsupported` remains a runtime fallback.
 

@@ -11,7 +11,10 @@ command and shows the result. The app holds no logic of its own about agents or 
 1. See every memory item, grouped by project, and read it.
 2. See where each item lives (Claude Code, Codex).
 3. Delete an item that is stale or wrong. The next sync removes it from the other agent too.
-4. Press Sync: see the plan in plain words, then apply it.
+4. Create a memory entry or a global instruction section in any agent. The next sync copies it to
+   the other agents.
+5. Read the chat sessions of a project folder, in any agent, as a transcript.
+6. Press Sync: see the plan in plain words, then apply it.
 
 ## Look and feel
 
@@ -57,6 +60,20 @@ hand-drawn borders, dividers or backgrounds.
 - Each logical item appears once even though it exists in several agents: rows are originals;
   copies are folded into their original.
 
+**Sessions** (a folder is selected)
+- Above the list, a segmented control switches "Memory" and "Sessions (N)"; N counts the
+  sessions of that folder and below. It is shown for project folders only; every other row lists
+  memory. Chat sessions never appear in the memory list.
+- The Sessions list covers the folder and below, sectioned by project like memory, newest first
+  inside each section. A search field filters by title.
+- One row each: title (two lines max), relative date and turn count, and a small label per agent
+  that holds the session. Copies are folded into their original like memory rows.
+- The detail pane shows the title, "Lives in" (original / copy) and the transcript read-only,
+  loaded with `session show`: each turn is labelled "You" or "Assistant" and rendered with the
+  same block rendering as memory bodies. There is no Edit and no Delete (sessions are snapshots;
+  `delete` and `edit` refuse them). "Show in Finder" appears for the agents that keep one file per
+  session (Claude Code, Pi, Codex) and is hidden for OpenCode, whose sessions live in a database.
+
 **Skills** ("Skills" row selected)
 - One row each: name, description and a small label per agent that holds the skill.
 - The detail pane shows the `SKILL.md` text read-only (loaded with `skill show`), "Lives in", and
@@ -100,6 +117,19 @@ hand-drawn borders, dividers or backgrounds.
 **Toolbar**
 - Every toolbar button has a tooltip. "Sync" shows its title next to its icon; "Reload" is
   icon-only with the tooltip "Reload".
+- "New" button (plus icon, tooltip "New memory"). Opens a sheet; disabled while an item is being
+  edited. Fields:
+  - "Where": Global, or Project. Project shows a picker of the known project paths plus "Choose
+    folder…", which opens an `NSOpenPanel` for a directory. The sheet starts on the project of the
+    selected sidebar folder, else on Global.
+  - "Agent": the installed agents (those in `status`); the default is the agent with the most
+    originals, the first on a tie.
+  - Project: name, description, a category picker (none, user, feedback, project, reference) and a
+    monospaced body editor. Create runs `add --kind memory`.
+  - Global: a heading field and a monospaced body editor. Create runs `add --kind instruction`.
+  - Footer: "It reaches the other agents at the next sync." Buttons "Cancel" and "Create" (disabled
+    until the required fields are filled). Create reloads and selects the new item; a CLI error is
+    shown inline in the sheet and nothing is closed.
 - "Sync" button. Runs the preview command and opens a sheet:
   - headline: "12 to add, 3 to update, 1 to remove" or "Everything is in sync."
   - list of changes grouped by project; each line: sign (add / update / remove), item name,
@@ -157,7 +187,7 @@ One entry per agent in the order claude, codex, opencode, pi (`--agent <id>` kee
 `status` is `ok`, `updated`, `action_required` or `not_installed`; `paused` lists the kinds
 (`memory`, `instruction`, `session`, `skill`) that failing checks stop. `prompt` is present only for
 `action_required`. `notices` are informational lines (the app shows them as secondary text in the
-agent's Overview box; Codex carries `session writes are off; set NATIVEMEM_CODEX_SESSION_WRITES=on to let nativemem write sessions into Codex` until that switch is on); they never change `status`. `doctor --accept <agent> --json` records the failing checks' observed values
+agent's Overview box; they name skills whose own copy differs from a copy the agent also reads elsewhere, and sessions other agents hold that Claude Code would delete under its default retention); they never change `status`. `doctor --accept <agent> --json` records the failing checks' observed values
 as reviewed, returns the document after that and adds
 `"accepted": [ { "agent": "codex", "check": "codex.threads_columns", "observed": "…" } ]`.
 An agent without a home directory fails with code `not_installed`.
@@ -179,7 +209,7 @@ An agent without a home directory fails with code `not_installed`.
       "replica_of": { "origin": "claude", "native_id": "-Users-x-app/feedback_tests.md" },
       "hash": "ab12…" } ] }
 ```
-`kind` is `memory`, `instruction` or `skill`. A skill item is one directory with a top-level
+`kind` is `memory`, `instruction`, `skill` or `session`. A skill item is one directory with a top-level
 `SKILL.md` in an agent's own skills directory: `native_id` is `skill:<directory name>`, `path` is
 the skill directory, `scope` is global, `name` is the directory name, `description` is the
 frontmatter `description` (empty when it cannot be read), `category` is `null` and `body` is always
@@ -190,6 +220,34 @@ first of Claude Code, Codex, OpenCode, Pi that holds it. The skills list is also
 instruction file (`CLAUDE.md`, `AGENTS.md`): `native_id` is `<file>#<slug>`, `scope` is global,
 `description` is the heading text and `category` is `null`.
 `scope` is `{ "type": "global" }` for global items. `category` may be `null`.
+
+Sessions are listed only with `items --kind session --json`. A session item has `native_id` ending
+in `.jsonl`, `path` the file (OpenCode: the database), `scope` the project directory, `name` the
+session's own id, `description` its title, `category` `null`, `body` always `""` (transcripts are
+never listed), and an extra object, present on sessions only:
+```json
+{ "agent": "pi", "native_id": "--Users-x-app--/2026-11-10T10-00-00-000Z_0198a1b3.jsonl", "kind": "session",
+  "path": "/Users/x/.pi/agent/sessions/--Users-x-app--/2026-11-10T10-00-00-000Z_0198a1b3.jsonl",
+  "scope": { "type": "project", "path": "/Users/x/app" },
+  "name": "0198a1b3", "description": "Fix login", "category": null, "body": "",
+  "replica_of": { "origin": "claude", "native_id": "-Users-x-app/0198a1b2.jsonl" }, "hash": "ef56…",
+  "session": { "created_ms": 1794304800000, "updated_ms": 1794308400000, "turns": 12 } }
+```
+`turns` is the number of turns.
+
+`nativemem session show --agent <id> --id <native_id> --json`
+```json
+{ "agent": "claude", "native_id": "-Users-x-app/0198a1b2.jsonl",
+  "title": "Fix login", "cwd": "/Users/x/app",
+  "created_ms": 1794304800000, "updated_ms": 1794308400000,
+  "turns": [ { "role": "user", "text": "how do I fix the login?", "ts_ms": 1794304800000 },
+             { "role": "assistant", "text": "…", "ts_ms": 1794304860000 } ] }
+```
+Reads one session from that agent's own store; it takes no lock and writes nothing. `role` is
+`user` or `assistant`; tool activity is already rendered into assistant text. Failures:
+`unknown_agent`, `invalid` when the id is not a session id (it does not end in `.jsonl`),
+`not_found` when the agent is not installed or holds no such session. Without `--json` it prints
+the title and a readable transcript.
 
 `nativemem skill show --agent <id> --name <skill> --json`
 ```json
@@ -221,6 +279,28 @@ mass-delete guard: `mass_delete`.
   "backup_dir": "/Users/x/.nativemem/backups/20261110T062319Z" }
 ```
 Removes that one entry (with backup). It does not sync; the next sync propagates the removal.
+
+`nativemem add --agent <id> --kind memory|instruction [--project <abs path>] --json`, with the
+content as one JSON document on stdin (the same document `edit` reads):
+```json
+{ "name": "feedback-tests", "description": "Run the fast suite first",
+  "category": "feedback", "body": "…markdown…" }
+```
+Output:
+```json
+{ "agent": "pi", "native_id": "app-1a2b3c4d/feedback-tests.md",
+  "path": "/Users/x/.pi/agent/nativemem/memory/app-1a2b3c4d/feedback-tests.md",
+  "hash": "ef56…", "backup_dir": "/Users/x/.nativemem/backups/20261110T062319Z" }
+```
+Creates a new original in that agent's own store; it does not sync, and the next sync copies it to
+the other agents. `--kind memory` needs `--project`, an absolute path without `..` (a trailing slash
+is dropped); `name`, `description` and `category` (an empty one means none) must be single lines
+and `name`, `description` non-empty. `--kind instruction` takes no `--project`: `description` is the
+heading of a new `## ` section in the agent's global instruction file, `name` is derived from it and
+`category` is ignored; a body that would start another `## ` section outside a code fence fails.
+Failures: `invalid` for bad input, `exists` when the entry's file or section id is already there,
+`not_installed` when the agent has no home directory, `unsupported` when the agent cannot hold the
+kind, `unknown_agent`, `parse` for a bad stdin document.
 
 `nativemem edit --agent <id> --id <native_id> --json`, with the new content as one JSON
 document on stdin:
@@ -353,9 +433,15 @@ Swift package at `apps/macos` (SwiftUI app, macOS 14+, Swift 6, no third-party d
   `Codable` types that mirror the contract above. All calls are `async` and off the main actor.
 - `AppModel` (`@Observable`): loaded items, status, selection, loading and error state.
   Groups items by project, folds copies into originals.
+- `SessionIndex` (from `items --kind session --json`) folds copies into originals and sections the
+  sessions of a folder like memory; `AppModel.itemMode` and `showsSessions` choose what the list
+  shows; `SessionDetailView` loads the transcript with `session show`.
 - `DoctorDocument` (decoded from `doctor --json`) feeds the Overview notices and the sidebar badge.
-- Views: `SidebarView`, `ItemListView`, `ItemDetailView`, `OverviewView`, `SyncSheet`.
+- `NewEntryDraft` (what the New sheet collects: validation and the `add` document) and
+  `AppModel.add`, which runs `add`, reloads and selects the new item.
+- Views: `SidebarView`, `ItemListView`, `ItemDetailView`, `SessionDetailView`, `OverviewView`, `SyncSheet`, `NewEntrySheet`.
 - `scripts/bundle.sh`: builds release and assembles `build/nativemem.app` (Info.plist, the
   executable, and the `nativemem` CLI binary copied next to it when
   `../../target/release/nativemem` exists).
-- Tests: decoding of each contract document from fixture JSON; grouping and folding logic.
+- Tests: decoding of each contract document from fixture JSON; grouping and folding logic; the New
+  entry draft.

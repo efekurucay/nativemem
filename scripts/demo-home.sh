@@ -22,8 +22,9 @@ CLAUDE="$BASE/claude"
 CODEX="$BASE/codex"
 PI="$BASE/pi"
 OPENCODE="$BASE/opencode"
+OPENCODE_DATA="$BASE/opencode-data"
 STATE="$BASE/state"
-for d in "$CLAUDE" "$CODEX" "$PI" "$OPENCODE" "$STATE"; do
+for d in "$CLAUDE" "$CODEX" "$PI" "$OPENCODE" "$OPENCODE_DATA" "$STATE"; do
     case "$d" in "$BASE"/*) ;; *) exit 1 ;; esac
     mkdir -p "$d"
 done
@@ -289,7 +290,8 @@ echo "Created $COUNT memory items in 4 Claude Code projects under $BASE"
 
 if [ -n "$BIN" ]; then
     "$BIN" --claude-home "$CLAUDE" --codex-home "$CODEX" --pi-home "$PI" \
-        --opencode-home "$OPENCODE" --state-dir "$STATE" sync --apply
+        --opencode-home "$OPENCODE" --opencode-data-home "$OPENCODE_DATA" \
+        --state-dir "$STATE" sync --apply
 fi
 
 cat <<EOF
@@ -300,5 +302,6 @@ export NATIVEMEM_CLAUDE_HOME="$CLAUDE"
 export NATIVEMEM_CODEX_HOME="$CODEX"
 export NATIVEMEM_PI_HOME="$PI"
 export NATIVEMEM_OPENCODE_HOME="$OPENCODE"
+export NATIVEMEM_OPENCODE_DATA_HOME="$OPENCODE_DATA"
 export NATIVEMEM_STATE_DIR="$STATE"
 EOF
