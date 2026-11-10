@@ -75,7 +75,7 @@ hand-drawn borders, dividers or backgrounds.
   ~/.nativemem/backups." On confirm run the delete command, then reload.
 
 **Overview** (selected in sidebar)
-- Three figures: items, projects, agents in sync (an agent is in sync when it holds every item it can store; OpenCode and Pi only store instruction sections).
+- Three figures: items, projects, agents in sync (an agent is in sync when it holds every item).
 - Per agent: originals, copies.
 - "Skipped" disclosure list: label + reason, as given by the CLI.
 - If the CLI binary cannot be found: a clear message and a "Choose…" button to pick it.

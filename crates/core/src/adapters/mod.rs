@@ -5,5 +5,6 @@ pub mod codex;
 pub mod codex_imports;
 pub mod codex_rollout;
 pub mod codex_sessions;
+pub mod memory_store;
 pub mod pi;
 pub mod sections;

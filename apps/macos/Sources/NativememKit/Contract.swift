@@ -105,13 +105,9 @@ public struct StatusDocument: Codable, Sendable {
         agents.reduce(0) { $0 + $1.originals }
     }
 
-    /// Agents that hold every item they can store: nothing left to write for them. Agents without
-    /// project memory only need the instruction items.
-    public func agentsInSync(instructionItems: Int) -> Int {
-        let memoryItems = logicalItems - instructionItems
-        return agents.filter {
-            $0.originals + $0.replicas >= instructionItems + (agentHoldsMemory($0.id) ? memoryItems : 0)
-        }.count
+    /// Agents that hold every logical item: nothing left to write for them.
+    public var agentsInSync: Int {
+        agents.filter { $0.originals + $0.replicas >= logicalItems }.count
     }
 }
 

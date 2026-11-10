@@ -12,6 +12,7 @@ fn run(claude: &Path, codex: &Path, state: &Path, args: &[&str]) -> Output {
         .env_remove("OPENCODE_CONFIG_DIR")
         .env_remove("PI_CODING_AGENT_DIR")
         .env("HOME", state.with_file_name("home"))
+        .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
         .env_remove("NATIVEMEM_OPENCODE_HOME")
         .env_remove("NATIVEMEM_PI_HOME")
         .arg("--claude-home")
@@ -188,12 +189,12 @@ fn four_agents() -> Fx {
 }
 
 #[test]
-fn instruction_sections_reach_all_four_agents_and_memory_only_two() {
+fn instruction_sections_and_memory_reach_all_four_agents() {
     let f = four_agents();
     let (code, doc) = f.json(&["sync", "--apply", "--json"]);
     assert_eq!(code, Some(0), "{doc}");
     assert_eq!(doc["notes"], json!([]));
-    assert_eq!(doc["summary"]["add"], 4);
+    assert_eq!(doc["summary"]["add"], 6);
     let (_, status) = f.json(&["status", "--json"]);
     let agents: Vec<(&str, u64, u64)> = status["agents"]
         .as_array()
@@ -212,13 +213,17 @@ fn instruction_sections_reach_all_four_agents_and_memory_only_two() {
         [
             ("claude", 2, 0),
             ("codex", 0, 2),
-            ("opencode", 0, 1),
-            ("pi", 0, 1)
+            ("opencode", 0, 2),
+            ("pi", 0, 2)
         ]
     );
     for name in ["opencode", "pi"] {
-        let file = f.state.with_file_name(name).join("AGENTS.md");
-        assert!(fs::read_to_string(file).unwrap().contains("be terse"));
+        let home = f.state.with_file_name(name);
+        let agents = fs::read_to_string(home.join("AGENTS.md")).unwrap();
+        assert!(agents.contains("be terse"));
+        assert!(agents.contains("<!-- nativemem:begin -->\n## Project memory"));
+        assert!(agents.contains("- /w/app → "));
+        assert!(home.join("nativemem/memory").is_dir());
     }
     let (code, doc) = f.json(&["sync", "--json"]);
     assert_eq!(code, Some(0));
@@ -440,6 +445,7 @@ fn run_stdin(f: &Fx, stdin: &str, args: &[&str]) -> (Option<i32>, Value) {
         .env_remove("OPENCODE_CONFIG_DIR")
         .env_remove("PI_CODING_AGENT_DIR")
         .env("HOME", f.state.with_file_name("home"))
+        .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
         .env_remove("NATIVEMEM_OPENCODE_HOME")
         .env_remove("NATIVEMEM_PI_HOME")
         .arg("--claude-home")
@@ -920,7 +926,7 @@ fn sessions_sync_to_pi_and_show_in_status_separately() {
         (json!(1), json!(1))
     );
     assert_eq!(by_id("pi")["sessions"], 1);
-    assert_eq!(by_id("pi")["replicas"], 0);
+    assert_eq!(by_id("pi")["replicas"], 1, "the memory item");
     assert_eq!(
         (
             by_id("codex")["sessions"].clone(),
@@ -988,6 +994,7 @@ fn delete_and_edit_refuse_session_ids() {
     );
     let mut child = Command::new(env!("CARGO_BIN_EXE_nativemem"))
         .env("HOME", f.state.with_file_name("home"))
+        .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
         .arg("--claude-home")
         .arg(&f.claude)
         .arg("--codex-home")

@@ -1,5 +1,5 @@
-//! Pi: global `AGENTS.md` instruction sections (through the generic agents-file adapter) and
-//! chat sessions, `sessions/--<cwd>--/<ISO ts>_<session id>.jsonl`.
+//! Pi: global `AGENTS.md` instruction sections and project memory (through the generic
+//! agents-file adapter) and chat sessions, `sessions/--<cwd>--/<ISO ts>_<session id>.jsonl`.
 
 use std::collections::HashSet;
 use std::fs;

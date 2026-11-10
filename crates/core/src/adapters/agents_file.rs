@@ -1,5 +1,6 @@
-//! Agents that only read a global `AGENTS.md` (OpenCode, Pi): instruction sections and nothing
-//! else.
+//! Agents that only read a global `AGENTS.md` (OpenCode, Pi): instruction sections, and project
+//! memory replicas stored below `<dir>/nativemem/memory/` and announced by a routing block in
+//! that file. They never originate memory.
 
 use std::path::PathBuf;
 
@@ -7,13 +8,16 @@ use crate::error::{Error, Result};
 use crate::fsx::BackupSession;
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 
+use super::memory_store::MemoryStore;
 use super::sections::InstructionFile;
 
 const INSTRUCTION_FILE: &str = "AGENTS.md";
+const MEMORY_DIR: &str = "nativemem/memory";
 
 pub struct AgentsFileAdapter {
     agent: AgentId,
     instructions: InstructionFile,
+    memory: MemoryStore,
 }
 
 impl AgentsFileAdapter {
@@ -21,6 +25,15 @@ impl AgentsFileAdapter {
     pub fn new(id: &str, dir: PathBuf, state_dir: PathBuf, backups: BackupSession) -> Self {
         let agent = AgentId::new(id);
         AgentsFileAdapter {
+            memory: MemoryStore::new(
+                agent.clone(),
+                dir.clone(),
+                state_dir.clone(),
+                backups.clone(),
+                dir.join(MEMORY_DIR),
+                dir.clone(),
+                dir.join(INSTRUCTION_FILE),
+            ),
             instructions: InstructionFile::new(
                 agent.clone(),
                 dir,
@@ -43,18 +56,24 @@ impl Adapter for AgentsFileAdapter {
     }
 
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
-        (kind, scope) == (Kind::Instruction, &Scope::Global)
+        matches!(
+            (kind, scope),
+            (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
+        )
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
-        self.instructions.scan()
+        let mut out = self.instructions.scan()?;
+        out.extend(self.memory.scan()?);
+        Ok(out)
     }
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
-        if item.kind != Kind::Instruction {
-            return Err(self.unsupported("write_replica memory"));
+        match item.kind {
+            Kind::Instruction => self.instructions.write_replica(key, item),
+            Kind::Memory => self.memory.write_replica(key, item),
+            Kind::Session => Err(self.unsupported("write_replica session")),
         }
-        self.instructions.write_replica(key, item)
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
@@ -65,10 +84,10 @@ impl Adapter for AgentsFileAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
-        if !self.instructions.owns(native_id) {
-            return Err(self.unsupported("remove"));
+        if self.instructions.owns(native_id) {
+            return self.instructions.remove(native_id);
         }
-        self.instructions.remove(native_id)
+        self.memory.remove(native_id)
     }
 }
 
@@ -128,14 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn supports_only_global_instructions() {
+    fn supports_global_instructions_and_project_memory() {
         let f = fx();
         assert!(f.a.supports(Kind::Instruction, &Scope::Global));
+        assert!(f.a.supports(Kind::Memory, &Scope::Project("/w".into())));
         assert!(!f
             .a
             .supports(Kind::Instruction, &Scope::Project("/w".into())));
         assert!(!f.a.supports(Kind::Memory, &Scope::Global));
-        assert!(!f.a.supports(Kind::Memory, &Scope::Project("/w".into())));
+        assert!(!f.a.supports(Kind::Session, &Scope::Project("/w".into())));
     }
 
     #[test]
@@ -187,26 +207,61 @@ mod tests {
         assert!(f.state.join("backups/T/pi/AGENTS.md").is_file());
     }
 
-    #[test]
-    fn memory_is_unsupported() {
-        let f = fx();
-        let memory = Item {
+    fn memory(cwd: &str, name: &str) -> Item {
+        Item {
             kind: Kind::Memory,
-            scope: Scope::Project("/w".into()),
-            name: "n".into(),
-            description: "d".into(),
-            category: None,
+            scope: Scope::Project(cwd.into()),
+            name: name.into(),
+            description: format!("about {name}"),
+            category: Some("user".into()),
             body: "b".into(),
-        };
+        }
+    }
+
+    #[test]
+    fn memory_replicas_live_below_the_base_with_a_routing_block() {
+        let f = fx();
+        fs::write(f.dir.join("AGENTS.md"), "# Mine\n\n## Style\nkeep\n").unwrap();
+        let (id, path) =
+            f.a.write_replica(&key("m"), &memory("/w/app", "Alpha"))
+                .unwrap();
+        let (project, file) = id.split_once('/').unwrap();
+        assert_eq!(file, "alpha.md");
+        let dir = f.dir.join("nativemem/memory").join(project);
+        assert_eq!(path, dir.join("alpha.md"));
+        assert!(dir.join("MEMORY.md").is_file() && dir.join("scope.json").is_file());
+        let agents = text(&f);
+        assert!(agents.starts_with("# Mine\n\n## Style\nkeep\n\n<!-- nativemem:begin -->\n"));
+        assert!(agents.contains(&format!("- /w/app → {}\n", dir.join("MEMORY.md").display())));
+
+        let found = f.a.scan().unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[1].replica_of, Some(key("m")));
+        assert_eq!(found[1].item.kind, Kind::Memory);
+
+        f.a.remove(&id).unwrap();
+        assert_eq!(text(&f), "# Mine\n\n## Style\nkeep\n");
+        assert!(!f.dir.join("nativemem").exists());
+        assert!(f.state.join("backups/T/pi/nativemem/memory").is_dir());
+    }
+
+    #[test]
+    fn memory_originals_and_sessions_are_unsupported() {
+        let f = fx();
+        let m = memory("/w", "n");
         assert!(matches!(
-            f.a.write_replica(&key("k"), &memory),
-            Err(Error::Unsupported { .. })
-        ));
-        assert!(matches!(
-            f.a.write_original("/w#x", &memory),
+            f.a.write_original("/w#x", &m),
             Err(Error::Unsupported { .. })
         ));
         assert!(matches!(f.a.remove("/w#x"), Err(Error::Unsupported { .. })));
+        let session = Item {
+            kind: Kind::Session,
+            ..m
+        };
+        assert!(matches!(
+            f.a.write_replica(&key("k"), &session),
+            Err(Error::Unsupported { .. })
+        ));
         assert!(!f.dir.join("AGENTS.md").exists());
     }
 }

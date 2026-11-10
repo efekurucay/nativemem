@@ -153,7 +153,12 @@ Root: `claude_home` (default `~/.claude`).
 
 Root: `codex_home` (default `~/.codex`, honour `CODEX_HOME`).
 
-- Replica store: `memories/extensions/nativemem/resources/<project-key>/`
+- The replica store, the routing block and their rules live in `core::adapters::memory_store`,
+  shared with OpenCode and Pi; an adapter supplies the base directory and the `AGENTS.md` path.
+  Codex: base `<codex_home>/memories/extensions/nativemem/resources`; Pi: `<pi_home>/nativemem/memory`;
+  OpenCode: `<opencode_home>/nativemem/memory`. When the last item of a project goes, its
+  directory and the empty parents below the agent home go with it (Codex keeps `resources`).
+- Replica store: `<base>/<project-key>/`
   - `scope.json`: `{"cwd": "<absolute path>"}`
   - `MEMORY.md`: `# Memory Index` + one line per item, same shape as Claude's
   - `<slug>.md`: first line `<!-- nativemem origin=<agent> id=<native_id> -->`, then
@@ -213,8 +218,8 @@ Error type design, module-internal structure, slug function details, output form
 ## Instruction sections (global scope)
 
 Capabilities: `Adapter::supports(kind, scope)` says what an agent can store (default: everything).
-Claude and Codex store memory in `Project` scope and instructions in `Global` scope; OpenCode and
-Pi store global instructions only. The engine leaves agents that do not support an item out of its
+All four agents store memory in `Project` scope and instructions in `Global` scope. OpenCode and Pi
+never originate memory: they hold replicas only. The engine leaves agents that do not support an item out of its
 replica targets, write-back targets, absent sets and adoption, so they never produce actions,
 skipped notes or counts for it. `Error::Unsupported` remains a runtime fallback.
 
@@ -223,8 +228,8 @@ skipped notes or counts for it. `Error::Unsupported` remains a runtime fallback.
 Codex `<codex_home>/AGENTS.md`, OpenCode `<opencode_home>/AGENTS.md` (default `~/.config/opencode`,
 honour `OPENCODE_CONFIG_DIR`), Pi `<pi_home>/AGENTS.md` (default `~/.pi/agent`, honour
 `PI_CODING_AGENT_DIR`). OpenCode and Pi use one generic adapter (`core::adapters::agents_file`)
-that only handles instruction sections; a missing file means no items and the first replica
-creates it. An agent takes part in a run only when its home directory exists. Scope is always `Global`; project-level instruction files live inside
+that handles instruction sections and project-memory replicas; a missing file means no items and the
+first replica creates it. An agent takes part in a run only when its home directory exists. Scope is always `Global`; project-level instruction files live inside
 repositories and are never read or written.
 
 - Parsing: split at lines starting with `## ` that are outside fenced code blocks (``` or ~~~).
@@ -232,7 +237,7 @@ repositories and are never read or written.
   modified. `description` = heading text, `name` = `slugify(heading)`, `body` = text after the heading
   line with leading and trailing blank lines trimmed, `category` = None. `native_id` =
   `<file name>#<name>`, with `-2`, `-3` for duplicate headings.
-- Managed regions are excluded from original detection: the instruction region below and the Codex
+- Managed regions are excluded from original detection: the instruction region below and the
   routing block (`<!-- nativemem:begin -->` .. `<!-- nativemem:end -->`).
 - Replicas live in one region at the end of the file, between `<!-- nativemem:instructions:begin -->`
   and `<!-- nativemem:instructions:end -->`. Each replica is a marker line

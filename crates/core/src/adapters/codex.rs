@@ -1,8 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
@@ -14,16 +12,19 @@ use crate::slug::slugify;
 use super::codex_imports;
 use super::codex_rollout;
 use super::codex_sessions::CodexSessions;
-use super::sections::{self, block_span, region_span, InstructionFile, BLOCK_BEGIN, BLOCK_END};
+#[cfg(test)]
+use super::memory_store::{parse_replica, render};
+use super::memory_store::{read_opt, MemoryStore};
+use super::sections::InstructionFile;
+#[cfg(test)]
+use super::sections::{BLOCK_BEGIN, BLOCK_END};
 
 const AGENT: &str = "codex";
 const INSTRUCTION_FILE: &str = "AGENTS.md";
-const INDEX_FILE: &str = "MEMORY.md";
-const SCOPE_FILE: &str = "scope.json";
 const TASK_GROUP: &str = "# Task Group:";
 
-/// Replica store paths. The layout follows Codex's memory-extension convention and is
-/// confined to this module so it can change in one place.
+/// Paths inside the Codex home. The replica store layout follows Codex's memory-extension
+/// convention and is confined here so it can change in one place.
 mod layout {
     use super::*;
 
@@ -31,31 +32,16 @@ mod layout {
         home.join("memories/extensions/nativemem/resources")
     }
 
-    pub fn project_key(cwd: &Path) -> String {
-        let path = cwd.to_string_lossy();
-        let last = cwd
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let digest = Sha256::digest(path.as_bytes());
-        let hex: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
-        format!("{}-{hex}", slugify(&last))
+    pub fn originals(home: &Path) -> PathBuf {
+        home.join("memories").join("MEMORY.md")
     }
 
+    #[cfg(test)]
+    pub use super::super::memory_store::project_key;
+
+    #[cfg(test)]
     pub fn project_dir(home: &Path, key: &str) -> PathBuf {
         resources(home).join(key)
-    }
-
-    pub fn index(dir: &Path) -> PathBuf {
-        dir.join(INDEX_FILE)
-    }
-
-    pub fn scope(dir: &Path) -> PathBuf {
-        dir.join(SCOPE_FILE)
-    }
-
-    pub fn originals(home: &Path) -> PathBuf {
-        home.join("memories").join(INDEX_FILE)
     }
 }
 
@@ -64,21 +50,14 @@ pub struct CodexAdapter {
     state_dir: PathBuf,
     backups: BackupSession,
     instructions: InstructionFile,
+    memory: MemoryStore,
     sessions: Option<CodexSessions>,
     claude_home: Option<PathBuf>,
+    session_writes: bool,
 }
 
 /// Bump when the written rollout format changes; unmodified replicas are then rewritten.
 const SESSION_WRITER_REVISION: u32 = 1;
-
-struct Replica {
-    origin: String,
-    id: String,
-    name: String,
-    description: String,
-    category: Option<String>,
-    body: String,
-}
 
 struct OriginalBlock {
     title: String,
@@ -89,211 +68,6 @@ struct OriginalBlock {
 struct Originals {
     blocks: Vec<OriginalBlock>,
     skipped: Vec<(String, String)>,
-}
-
-fn take_line(text: &str) -> Option<(&str, &str)> {
-    if text.is_empty() {
-        return None;
-    }
-    Some(match text.find('\n') {
-        Some(i) => (&text[..i], &text[i + 1..]),
-        None => (text, ""),
-    })
-}
-
-/// `name` and `description` each occupy a single line in the replica format; collapse any
-/// embedded newlines so a multi-line value can never shift the parse anchors.
-fn oneline(s: &str) -> String {
-    s.chars()
-        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-        .collect()
-}
-
-fn render(key: &ItemKey, item: &Item) -> String {
-    let name = oneline(&item.name);
-    let description = oneline(&item.description);
-    let mut s = format!(
-        "{}\n# {name}\n\n{description}\n\n",
-        sections::marker(key.origin.as_str(), &key.native_id),
-    );
-    match &item.category {
-        Some(c) => s.push_str(&format!("Category: {c}\n\n")),
-        // An empty category line keeps a body that starts with `Category:` unambiguous.
-        None if item.body.starts_with("Category:") => s.push_str("Category:\n\n"),
-        None => {}
-    }
-    s.push_str(&item.body);
-    s
-}
-
-fn parse_replica(text: &str) -> Option<Replica> {
-    let (marker, rest) = take_line(text)?;
-    let (origin, id) = sections::parse_marker(marker)?;
-    let (heading, rest) = take_line(rest)?;
-    let name = heading.strip_prefix("# ")?;
-    let (blank, rest) = take_line(rest)?;
-    if !blank.is_empty() {
-        return None;
-    }
-    let (description, rest) = take_line(rest)?;
-    let (blank, mut rest) = take_line(rest)?;
-    if !blank.is_empty() {
-        return None;
-    }
-    let mut category = None;
-    if rest.starts_with("Category:") {
-        let (line, after) = take_line(rest)?;
-        let value = line["Category:".len()..].trim();
-        if !value.is_empty() {
-            category = Some(value.to_string());
-        }
-        let (blank, after) = take_line(after)?;
-        if !blank.is_empty() {
-            return None;
-        }
-        rest = after;
-    }
-    Some(Replica {
-        origin,
-        id,
-        name: name.to_string(),
-        description: description.to_string(),
-        category,
-        body: rest.to_string(),
-    })
-}
-
-fn read_opt(path: &Path) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(s) => Ok(Some(s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(Error::io(path, e)),
-    }
-}
-
-fn write_if_changed(path: &Path, content: &str) -> Result<()> {
-    if read_opt(path)?.as_deref() == Some(content) {
-        return Ok(());
-    }
-    fsx::atomic_write(path, content.as_bytes())
-}
-
-/// Item files of a project dir as `(file name, replica)`, sorted by file name.
-fn project_items(dir: &Path) -> Result<Vec<(String, Replica)>> {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(Error::io(dir, e)),
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(|e| Error::io(dir, e))?.path();
-        let Some(file) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        if file == INDEX_FILE || !file.ends_with(".md") || !path.is_file() {
-            continue;
-        }
-        let text = fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
-        if let Some(r) = parse_replica(&text) {
-            out.push((file, r));
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
-}
-
-fn read_scope_cwd(dir: &Path) -> Result<Option<String>> {
-    let path = layout::scope(dir);
-    let Some(text) = read_opt(&path)? else {
-        return Ok(None);
-    };
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| Error::Parse(format!("{}: {e}", path.display())))?;
-    Ok(value.get("cwd").and_then(|c| c.as_str()).map(String::from))
-}
-
-fn project_dirs(home: &Path) -> Result<Vec<(String, PathBuf)>> {
-    let root = layout::resources(home);
-    let entries = match fs::read_dir(&root) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(Error::io(&root, e)),
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(|e| Error::io(&root, e))?.path();
-        if path.is_dir() {
-            let key = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            out.push((key, path));
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-fn index_text(items: &[(String, Replica)]) -> String {
-    let mut s = String::from("# Memory Index\n\n");
-    for (file, r) in items {
-        s.push_str(&format!("- [{}]({file}) — {}\n", r.name, r.description));
-    }
-    s
-}
-
-fn routing_block(projects: &[(String, PathBuf)]) -> String {
-    let mut s = format!(
-        "{BLOCK_BEGIN}\n## Project memory (managed by nativemem)\n\
-         When your working directory is, or is inside, one of the directories below, read that \
-         project's memory index first and open the item files it lists when they are relevant \
-         to the task.\n"
-    );
-    for (cwd, index) in projects {
-        s.push_str(&format!("- {cwd} → {}\n", index.display()));
-    }
-    s.push_str(BLOCK_END);
-    s
-}
-
-fn splice_block(text: &str, block: Option<&str>) -> Result<String> {
-    Ok(match (block_span(text)?, block, region_span(text)?) {
-        (Some((s, e)), Some(b), _) => format!("{}{b}{}", &text[..s], &text[e..]),
-        // The instruction region stays the last managed region of the file.
-        (None, Some(b), Some((r, _))) => {
-            let (before, rest) = text.split_at(r);
-            let lead = if before.is_empty() || before.ends_with("\n\n") {
-                ""
-            } else if before.ends_with('\n') {
-                "\n"
-            } else {
-                "\n\n"
-            };
-            let gap = if before.is_empty() { "\n" } else { "\n\n" };
-            format!("{before}{lead}{b}{gap}{rest}")
-        }
-        (None, Some(b), None) => {
-            let sep = if text.is_empty() {
-                ""
-            } else if text.ends_with('\n') {
-                "\n"
-            } else {
-                "\n\n"
-            };
-            format!("{text}{sep}{b}\n")
-        }
-        (Some((s, e)), None, _) => {
-            let mut before = &text[..s];
-            if before.ends_with("\n\n") {
-                before = &before[..before.len() - 1];
-            }
-            let after = text[e..].strip_prefix('\n').unwrap_or(&text[e..]);
-            format!("{before}{after}")
-        }
-        (None, None, _) => text.to_string(),
-    })
 }
 
 fn parse_originals(text: &str) -> Originals {
@@ -350,12 +124,29 @@ impl CodexAdapter {
                 backups.clone(),
                 INSTRUCTION_FILE,
             ),
+            memory: MemoryStore::new(
+                Self::agent(),
+                codex_home.clone(),
+                state_dir.clone(),
+                backups.clone(),
+                layout::resources(&codex_home),
+                layout::resources(&codex_home),
+                codex_home.join(INSTRUCTION_FILE),
+            ),
             home: codex_home,
             state_dir,
             backups,
             sessions: None,
             claude_home: None,
+            session_writes: true,
         }
+    }
+
+    /// Codex lists a thread only when its state database has a row for it, so session replicas
+    /// are written only while the caller can also maintain that row.
+    pub fn with_session_writes(mut self, enabled: bool) -> Self {
+        self.session_writes = enabled;
+        self
     }
 
     /// Where Claude Code's transcripts live. Codex's importer ledger records the bytes of the
@@ -450,43 +241,6 @@ impl CodexAdapter {
         let text = read_opt(&layout::originals(&self.home))?.unwrap_or_default();
         Ok(parse_originals(&text))
     }
-
-    fn regenerate_index(&self, dir: &Path) -> Result<()> {
-        let items = project_items(dir)?;
-        write_if_changed(&layout::index(dir), &index_text(&items))
-    }
-
-    fn sync_routing(&self) -> Result<()> {
-        let mut projects = Vec::new();
-        for (_, dir) in project_dirs(&self.home)? {
-            let index = layout::index(&dir);
-            if let (Some(cwd), true) = (read_scope_cwd(&dir)?, index.is_file()) {
-                projects.push((cwd, index));
-            }
-        }
-        projects.sort();
-        let block = (!projects.is_empty()).then(|| routing_block(&projects));
-        let path = self.home.join("AGENTS.md");
-        let existing = read_opt(&path)?;
-        let updated = match (&existing, &block) {
-            (None, None) => return Ok(()),
-            (None, Some(b)) => format!("{b}\n"),
-            (Some(text), b) => splice_block(text, b.as_deref())?,
-        };
-        if existing.as_deref() == Some(updated.as_str()) {
-            return Ok(());
-        }
-        if existing.is_some() {
-            fsx::backup(
-                &self.backups,
-                &self.state_dir,
-                &Self::agent(),
-                &self.home,
-                &path,
-            )?;
-        }
-        fsx::atomic_write(&path, updated.as_bytes())
-    }
 }
 
 impl Adapter for CodexAdapter {
@@ -495,10 +249,11 @@ impl Adapter for CodexAdapter {
     }
 
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
-        matches!(
-            (kind, scope),
-            (Kind::Memory | Kind::Session, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
-        )
+        match (kind, scope) {
+            (Kind::Session, Scope::Project(_)) => self.session_writes,
+            (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global) => true,
+            _ => false,
+        }
     }
 
     fn writer_revision(&self, kind: Kind) -> u32 {
@@ -520,30 +275,7 @@ impl Adapter for CodexAdapter {
 
     fn scan(&self) -> Result<Vec<Observed>> {
         let mut out = Vec::new();
-        for (key, dir) in project_dirs(&self.home)? {
-            let Some(cwd) = read_scope_cwd(&dir)? else {
-                continue;
-            };
-            for (file, r) in project_items(&dir)? {
-                out.push(Observed {
-                    agent: Self::agent(),
-                    native_id: format!("{key}/{file}"),
-                    path: dir.join(&file),
-                    item: Item {
-                        kind: Kind::Memory,
-                        scope: Scope::Project(PathBuf::from(&cwd)),
-                        name: r.name,
-                        description: r.description,
-                        category: r.category,
-                        body: r.body,
-                    },
-                    replica_of: Some(ItemKey {
-                        origin: AgentId::new(r.origin),
-                        native_id: r.id,
-                    }),
-                });
-            }
-        }
+        out.extend(self.memory.scan()?);
         let originals = self.originals()?;
         let path = layout::originals(&self.home);
         let mut seen: Vec<String> = Vec::new();
@@ -584,37 +316,7 @@ impl Adapter for CodexAdapter {
         if item.kind == Kind::Session {
             return self.write_session_replica(key, item);
         }
-        let Scope::Project(cwd) = &item.scope else {
-            return Err(Error::unsupported(AGENT, "write_replica global scope"));
-        };
-        let project = layout::project_key(cwd);
-        let dir = layout::project_dir(&self.home, &project);
-        let items = project_items(&dir)?;
-        let existing = items
-            .iter()
-            .find(|(_, r)| r.origin == key.origin.as_str() && r.id == key.native_id)
-            .map(|(f, _)| f.clone());
-        let file = match existing {
-            Some(f) => f,
-            None => {
-                let slug = slugify(&item.name);
-                let taken = |f: &str| f.eq_ignore_ascii_case(INDEX_FILE) || dir.join(f).exists();
-                let mut file = format!("{slug}.md");
-                let mut n = 2;
-                while taken(&file) {
-                    file = format!("{slug}-{n}.md");
-                    n += 1;
-                }
-                file
-            }
-        };
-        let path = dir.join(&file);
-        write_if_changed(&path, &render(key, item))?;
-        self.regenerate_index(&dir)?;
-        let scope = serde_json::json!({ "cwd": cwd.to_string_lossy() });
-        write_if_changed(&layout::scope(&dir), &scope.to_string())?;
-        self.sync_routing()?;
-        Ok((format!("{project}/{file}"), path))
+        self.memory.write_replica(key, item)
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
@@ -634,37 +336,7 @@ impl Adapter for CodexAdapter {
         if self.instructions.owns(native_id) {
             return self.instructions.remove(native_id);
         }
-        if native_id.contains('#') {
-            return Err(Error::unsupported(AGENT, "remove original"));
-        }
-        let (project, file) = native_id
-            .split_once('/')
-            .filter(|(p, f)| {
-                ![p, f]
-                    .iter()
-                    .any(|s| s.is_empty() || **s == ".." || s.contains('/'))
-            })
-            .ok_or_else(|| Error::Parse(format!("invalid codex replica id {native_id:?}")))?;
-        let dir = layout::project_dir(&self.home, project);
-        fsx::remove_with_backup(
-            &self.backups,
-            &self.state_dir,
-            &Self::agent(),
-            &self.home,
-            &dir.join(file),
-        )?;
-        if project_items(&dir)?.is_empty() {
-            for f in [layout::index(&dir), layout::scope(&dir)] {
-                if f.exists() {
-                    fs::remove_file(&f).map_err(|e| Error::io(&f, e))?;
-                }
-            }
-            // Stays in place when the user keeps other files in it.
-            let _ = fs::remove_dir(&dir);
-        } else {
-            self.regenerate_index(&dir)?;
-        }
-        self.sync_routing()
+        self.memory.remove(native_id)
     }
 }
 

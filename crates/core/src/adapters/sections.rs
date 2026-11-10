@@ -73,7 +73,7 @@ fn span_between(text: &str, begin: &str, end: &str) -> Result<Option<(usize, usi
     Ok(Some((start, start + found + end.len())))
 }
 
-/// Byte span of the Codex routing block, end marker included.
+/// Byte span of the project-memory routing block, end marker included.
 pub fn block_span(text: &str) -> Result<Option<(usize, usize)>> {
     span_between(text, BLOCK_BEGIN, BLOCK_END)
 }

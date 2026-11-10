@@ -220,6 +220,10 @@ struct Agents {
 
 impl Agents {
     fn open(roots: &Roots, backups: &BackupSession, sessions: Option<SessionOptions>) -> Self {
+        // Codex lists threads from its state database, so session writes stay off until the
+        // thread-row writer exists; tests and early adopters switch them on explicitly.
+        let codex_session_writes =
+            std::env::var("NATIVEMEM_CODEX_SESSION_WRITES").is_ok_and(|v| v == "on");
         let state = || roots.state.clone();
         let present = |dir: &Path| dir.is_dir();
         Agents {
@@ -232,7 +236,8 @@ impl Agents {
             }),
             codex: present(&roots.codex).then(|| {
                 let a = CodexAdapter::new(roots.codex.clone(), state(), backups.clone())
-                    .with_claude_home(roots.claude.clone());
+                    .with_claude_home(roots.claude.clone())
+                    .with_session_writes(codex_session_writes);
                 match sessions {
                     Some(o) => a.with_sessions(o),
                     None => a,

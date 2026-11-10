@@ -10,11 +10,6 @@ public func agentDisplayName(_ id: String) -> String {
     }
 }
 
-/// Agents that only keep global instruction sections, never project memory.
-public func agentHoldsMemory(_ id: String) -> Bool {
-    id != "opencode" && id != "pi"
-}
-
 /// A project path, or nil for global items.
 public struct ProjectKey: Hashable, Sendable {
     public var path: String?

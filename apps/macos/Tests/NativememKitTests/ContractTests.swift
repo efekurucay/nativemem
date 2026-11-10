@@ -17,20 +17,20 @@ func fixtureItems() throws -> [Item] {
         #expect(status.ledgerItems == 399)
         #expect(status.agents.count == 2)
         #expect(status.logicalItems == 399)
-        #expect(status.agentsInSync(instructionItems: 0) == 2)
+        #expect(status.agentsInSync == 2)
         #expect(status.agents[0].skipped == [SkippedEntry(label: "-Users-x-old", reason: "no cwd in jsonl ...")])
         #expect(status.agents[1].replicas == 399)
     }
 
-    @Test func fourAgentsCountInSyncByWhatEachCanHold() throws {
+    @Test func fourAgentsCountInSyncByHeldItems() throws {
         var status = try decodeContract(StatusDocument.self, from: fixture("status_four_agents"))
         #expect(status.agents.map(\.id) == ["claude", "codex", "opencode", "pi"])
         #expect(status.logicalItems == 4)
-        #expect(status.agentsInSync(instructionItems: 2) == 4)
+        #expect(status.agentsInSync == 4)
         status.agents[3].replicas = 0
-        #expect(status.agentsInSync(instructionItems: 2) == 3)
+        #expect(status.agentsInSync == 3)
         status.agents[1].replicas = 3
-        #expect(status.agentsInSync(instructionItems: 2) == 2)
+        #expect(status.agentsInSync == 2)
     }
 
     @Test func agentNames() {

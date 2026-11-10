@@ -837,6 +837,7 @@ mod tests {
     use crate::adapters::agents_file::AgentsFileAdapter;
     use crate::adapters::claude::ClaudeAdapter;
     use crate::adapters::codex::CodexAdapter;
+    use crate::adapters::pi::PiAdapter;
     use crate::fsx::BackupSession;
     use crate::testkit::{ClaudeHome, CodexHome, FrontmatterVariant};
 
@@ -1482,19 +1483,21 @@ mod tests {
         claude_root: PathBuf,
         codex_root: PathBuf,
         opencode_root: PathBuf,
+        pi_root: PathBuf,
         ledger: Ledger,
         claude: ClaudeAdapter,
         codex: CodexAdapter,
         opencode: AgentsFileAdapter,
+        pi: PiAdapter,
         app_dir: String,
     }
 
     fn tri() -> Tri {
         let t = tempfile::tempdir().unwrap();
-        let [claude_root, codex_root, opencode_root] =
-            ["claude", "codex", "opencode"].map(|n| t.path().join(n));
+        let [claude_root, codex_root, opencode_root, pi_root] =
+            ["claude", "codex", "opencode", "pi"].map(|n| t.path().join(n));
         let state = t.path().join("state");
-        for d in [&claude_root, &codex_root, &opencode_root] {
+        for d in [&claude_root, &codex_root, &opencode_root, &pi_root] {
             fs::create_dir_all(d).unwrap();
         }
         let session = BackupSession::with_stamp("T");
@@ -1503,19 +1506,56 @@ mod tests {
             claude: ClaudeAdapter::new(claude_root.clone(), state.clone(), session.clone())
                 .with_fs_root(state.join("no-fs-root")),
             codex: CodexAdapter::new(codex_root.clone(), state.clone(), session.clone()),
-            opencode: AgentsFileAdapter::new("opencode", opencode_root.clone(), state, session),
+            opencode: AgentsFileAdapter::new(
+                "opencode",
+                opencode_root.clone(),
+                state.clone(),
+                session.clone(),
+            ),
+            pi: PiAdapter::new(pi_root.clone(), state, session),
             ledger: Ledger::in_memory().unwrap(),
             claude_root,
             codex_root,
             opencode_root,
+            pi_root,
             app_dir,
             _t: t,
         }
     }
 
+    /// Instruction sections only: what an agent without a memory store declares.
+    struct InstructionOnly(AgentsFileAdapter);
+
+    impl Adapter for InstructionOnly {
+        fn id(&self) -> AgentId {
+            self.0.id()
+        }
+        fn supports(&self, kind: Kind, scope: &Scope) -> bool {
+            (kind, scope) == (Kind::Instruction, &Scope::Global)
+        }
+        fn scan(&self) -> Result<Vec<Observed>> {
+            self.0.scan()
+        }
+        fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
+            self.0.write_replica(key, item)
+        }
+        fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+            self.0.write_original(native_id, item)
+        }
+        fn remove(&self, native_id: &str) -> Result<()> {
+            self.0.remove(native_id)
+        }
+    }
+
+    const MEMORY_BASES: [(&str, &str); 3] = [
+        ("codex", "memories/extensions/nativemem/resources"),
+        ("opencode", "nativemem/memory"),
+        ("pi", "nativemem/memory"),
+    ];
+
     impl Tri {
-        fn adapters(&self) -> [&dyn Adapter; 3] {
-            [&self.claude, &self.codex, &self.opencode]
+        fn adapters(&self) -> [&dyn Adapter; 4] {
+            [&self.claude, &self.codex, &self.opencode, &self.pi]
         }
 
         fn plan(&self) -> Plan {
@@ -1534,27 +1574,71 @@ mod tests {
             assert!(p.is_empty(), "plan not empty after apply:\n{p}");
             r
         }
+
+        fn root(&self, agent: &str) -> &Path {
+            match agent {
+                "claude" => &self.claude_root,
+                "codex" => &self.codex_root,
+                "opencode" => &self.opencode_root,
+                _ => &self.pi_root,
+            }
+        }
+
+        fn agents_md(&self, agent: &str) -> String {
+            fs::read_to_string(self.root(agent).join("AGENTS.md")).unwrap_or_default()
+        }
+
+        fn add_memory(&self, body: &str) -> PathBuf {
+            ClaudeHome::new(&self.claude_root).add_memory(
+                &self.app_dir,
+                "a.md",
+                FrontmatterVariant::Nested,
+                "alpha",
+                "about alpha",
+                "user",
+                body,
+            )
+        }
+
+        /// The item files of the one project store of `agent`.
+        fn replica_file(&self, agent: &str) -> PathBuf {
+            let base = MEMORY_BASES.iter().find(|(a, _)| *a == agent).unwrap().1;
+            let projects: Vec<_> = fs::read_dir(self.root(agent).join(base))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(projects.len(), 1, "{projects:?}");
+            projects[0].join("alpha.md")
+        }
+
+        fn files(&self, agent: &str) -> BTreeMap<String, Vec<u8>> {
+            let mut out = BTreeMap::new();
+            walk(self.root(agent), self.root(agent), &mut out);
+            let prefix = format!("{}:", self.root(agent).display());
+            out.into_iter()
+                .map(|(k, v)| (k.strip_prefix(&prefix).unwrap().to_string(), v))
+                .collect()
+        }
     }
 
     #[test]
     fn memory_is_planned_only_for_agents_that_support_it() {
         let f = tri();
-        ClaudeHome::new(&f.claude_root).add_memory(
-            &f.app_dir,
-            "a.md",
-            FrontmatterVariant::Nested,
-            "alpha",
-            "about alpha",
-            "user",
-            "alpha body",
-        );
-        let p = f.plan();
+        let only = InstructionOnly(AgentsFileAdapter::new(
+            "opencode",
+            f.opencode_root.clone(),
+            f._t.path().join("state"),
+            BackupSession::with_stamp("T"),
+        ));
+        f.add_memory("alpha body");
+        let adapters: [&dyn Adapter; 3] = [&f.claude, &f.codex, &only];
+        let p = plan(&adapters, &f.ledger).unwrap();
         assert!(p.notes.is_empty(), "{p}");
         assert_eq!(p.actions.len(), 1, "{p}");
         assert!(
             matches!(&p.actions[0], Action::Write { target, .. } if target.as_str() == "codex")
         );
-        let r = f.sync();
+        let r = apply(p, &adapters, &f.ledger, &ApplyOptions::default()).unwrap();
         assert!(r.notes.is_empty());
         assert_eq!(r.done.len(), 1);
         assert!(!f.opencode_root.join("AGENTS.md").exists());
@@ -1566,11 +1650,11 @@ mod tests {
         fs::write(f.claude_root.join("CLAUDE.md"), RULES).unwrap();
         let p = f.plan();
         assert!(p.notes.is_empty(), "{p}");
-        assert_eq!(p.actions.len(), 6, "{p}");
+        assert_eq!(p.actions.len(), 9, "{p}");
         let r = f.sync();
-        assert_eq!(r.done.len(), 6);
-        for root in [&f.codex_root, &f.opencode_root] {
-            let text = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        assert_eq!(r.done.len(), 9);
+        for agent in ["codex", "opencode", "pi"] {
+            let text = f.agents_md(agent);
             assert_eq!(text.matches("<!-- nativemem origin=claude").count(), 3);
         }
         assert_eq!(f.ledger.list_items().unwrap().len(), 3);
@@ -1591,9 +1675,155 @@ mod tests {
             fs::read_to_string(f.opencode_root.join("AGENTS.md")).unwrap(),
             "## Style\nbe terser\n"
         );
-        assert!(fs::read_to_string(f.codex_root.join("AGENTS.md"))
-            .unwrap()
-            .contains("be terser"));
+        assert!(f.agents_md("codex").contains("be terser"));
+        assert!(f.agents_md("pi").contains("be terser"));
+    }
+
+    #[test]
+    fn memory_reaches_codex_pi_and_opencode_without_touching_other_bytes() {
+        let f = tri();
+        let user = "# Mine\n\nplain intro\n";
+        for agent in ["codex", "opencode", "pi"] {
+            fs::write(f.root(agent).join("AGENTS.md"), user).unwrap();
+        }
+        let claude_before = f.files("claude");
+        f.add_memory("alpha body");
+        let claude_with_memory = f.files("claude");
+        let r = f.sync();
+        assert!(r.notes.is_empty());
+        assert_eq!(f.files("claude"), claude_with_memory, "claude is only read");
+        assert_ne!(claude_before, claude_with_memory);
+        for (agent, base) in MEMORY_BASES {
+            let text = f.agents_md(agent);
+            assert!(
+                text.starts_with(&format!("{user}\n<!-- nativemem:begin -->\n")),
+                "{agent}"
+            );
+            let file = f.replica_file(agent);
+            assert!(file.starts_with(f.root(agent).join(base)));
+            let index = file.with_file_name("MEMORY.md");
+            assert!(
+                text.contains(&format!("- {CWD} → {}\n", index.display())),
+                "{agent}"
+            );
+            let item = fs::read_to_string(&file).unwrap();
+            assert!(
+                item.starts_with("<!-- nativemem origin=claude id="),
+                "{agent}"
+            );
+            assert!(item.trim_end().ends_with("alpha body"), "{agent}");
+            assert!(file.with_file_name("scope.json").is_file());
+        }
+        let before: Vec<_> = ["codex", "opencode", "pi"].map(|a| f.files(a)).into();
+        f.sync();
+        let after: Vec<_> = ["codex", "opencode", "pi"].map(|a| f.files(a)).into();
+        assert_eq!(before, after, "second apply changes nothing");
+    }
+
+    #[test]
+    fn memory_writes_stay_inside_the_declared_paths() {
+        let f = tri();
+        f.add_memory("alpha body");
+        let before: Vec<_> = ["claude", "codex", "opencode", "pi"]
+            .map(|a| f.files(a))
+            .into();
+        f.sync();
+        assert_eq!(f.files("claude"), before[0]);
+        for (agent, base) in MEMORY_BASES {
+            for path in f.files(agent).keys() {
+                assert!(
+                    path == "AGENTS.md" || path.starts_with(&format!("{base}/")),
+                    "{agent} wrote {path}"
+                );
+            }
+        }
+        assert!(!f._t.path().join("state/claude").exists());
+    }
+
+    #[test]
+    fn memory_update_and_delete_propagate_to_all_three_stores() {
+        let f = tri();
+        let user = "# Mine\n";
+        for agent in ["codex", "opencode", "pi"] {
+            fs::write(f.root(agent).join("AGENTS.md"), user).unwrap();
+        }
+        let original = f.add_memory("alpha body");
+        f.sync();
+        replace_in(&original, "alpha body", "alpha edited");
+        f.sync();
+        for (agent, _) in MEMORY_BASES {
+            let item = fs::read_to_string(f.replica_file(agent)).unwrap();
+            assert!(item.trim_end().ends_with("alpha edited"), "{agent}");
+        }
+        fs::remove_file(&original).unwrap();
+        let r = f.sync();
+        assert!(r.notes.is_empty());
+        for (agent, base) in MEMORY_BASES {
+            assert_eq!(f.agents_md(agent), user, "{agent}");
+            let left: Vec<_> = f
+                .files(agent)
+                .into_keys()
+                .filter(|p| p != "AGENTS.md")
+                .collect();
+            assert!(
+                left.iter().all(|p| !p.starts_with(&format!("{base}/"))),
+                "{agent}: {left:?}"
+            );
+        }
+        assert!(!f.pi_root.join("nativemem").exists());
+        assert!(!f.opencode_root.join("nativemem").exists());
+    }
+
+    #[test]
+    fn editing_a_pi_or_opencode_replica_writes_back_to_claude() {
+        for edited in ["pi", "opencode"] {
+            let f = tri();
+            let original = f.add_memory("alpha body");
+            f.sync();
+            replace_in(&f.replica_file(edited), "alpha body", "alpha from replica");
+            f.sync();
+            let text = fs::read_to_string(&original).unwrap();
+            assert!(text.contains("alpha from replica"), "{edited}: {text}");
+            for (agent, _) in MEMORY_BASES {
+                let item = fs::read_to_string(f.replica_file(agent)).unwrap();
+                assert!(
+                    item.trim_end().ends_with("alpha from replica"),
+                    "{edited} -> {agent}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn routing_block_and_instruction_region_coexist_in_pi_and_opencode() {
+        let f = tri();
+        fs::write(f.claude_root.join("CLAUDE.md"), "## Style\nbe terse\n").unwrap();
+        let original = f.add_memory("alpha body");
+        f.sync();
+        for agent in ["opencode", "pi"] {
+            let text = f.agents_md(agent);
+            let block = text.find("<!-- nativemem:begin -->").unwrap();
+            let region = text.find("<!-- nativemem:instructions:begin -->").unwrap();
+            assert!(block < region, "{agent}\n{text}");
+            assert_eq!(text.matches("<!-- nativemem:begin -->").count(), 1);
+            assert!(
+                text.ends_with("<!-- nativemem:instructions:end -->\n"),
+                "{agent}"
+            );
+        }
+        let with_both = f.agents_md("pi");
+        fs::remove_file(&original).unwrap();
+        f.sync();
+        for agent in ["opencode", "pi"] {
+            let text = f.agents_md(agent);
+            assert!(!text.contains("nativemem:begin"), "{agent}");
+            assert!(
+                text.trim_start()
+                    .starts_with("<!-- nativemem:instructions:begin -->"),
+                "{agent}\n{text:?}"
+            );
+            assert!(with_both.ends_with(text.trim_start()));
+        }
     }
 }
 

@@ -20,7 +20,7 @@ struct OverviewView: View {
                         HStack(alignment: .top, spacing: 20) {
                             Figure(value: status.logicalItems, caption: "items")
                             Figure(value: model.index.projects.count, caption: "projects")
-                            Figure(value: status.agentsInSync(instructionItems: model.index.items.filter { $0.primary.isInstruction }.count), caption: "agents in sync")
+                            Figure(value: status.agentsInSync, caption: "agents in sync")
                         }
                         ForEach(status.agents, id: \.id) { agent in
                             VStack(alignment: .leading, spacing: 8) {
