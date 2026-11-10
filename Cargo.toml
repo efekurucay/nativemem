@@ -3,5 +3,10 @@ resolver = "2"
 members = ["crates/core", "crates/cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
+rust-version = "1.89"
+description = "Keeps each coding agent's native memory, instruction sections and chat sessions in sync, without a shared store"
+license = "MIT"
+repository = "https://github.com/efekurucay/nativemem"
+publish = false

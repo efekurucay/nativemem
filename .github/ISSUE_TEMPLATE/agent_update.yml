@@ -1,0 +1,42 @@
+name: Agent update
+description: An agent updated and `nativemem doctor` reports that action is required
+labels: [agent-update]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Strip everything personal from the output below: home directory names, project names and any entry text. Keep agent ids, versions, check ids and the expected and observed descriptors.
+  - type: input
+    id: agent
+    attributes:
+      label: Agent
+      placeholder: claude, codex, opencode or pi
+    validations:
+      required: true
+  - type: input
+    id: agent_version
+    attributes:
+      label: Agent version
+      description: The version `nativemem doctor` shows for the agent
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: nativemem version
+      description: Output of `nativemem --version`
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`nativemem doctor --json` output"
+      description: Paste the output for the affected agent only, with anything personal removed.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: What changed in the agent, if you know.

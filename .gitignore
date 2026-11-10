@@ -11,3 +11,6 @@ apps/macos/build/
 
 # Local review scratch
 gitdex/
+
+# Release artifacts
+dist/

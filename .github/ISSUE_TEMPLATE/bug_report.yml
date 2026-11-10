@@ -1,0 +1,40 @@
+name: Bug report
+description: nativemem does something it should not, or fails
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste memory text, session content, tokens or personal paths. Replace them with placeholders such as `/Users/x/acme`.
+  - type: input
+    id: version
+    attributes:
+      label: nativemem version
+      description: Output of `nativemem --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS, Linux, Windows]
+    validations:
+      required: true
+  - type: input
+    id: agents
+    attributes:
+      label: Agents and versions involved
+      placeholder: "Claude Code 2.x, Codex 0.x"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran, what you expected and what you got.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Output of the command, with anything personal removed. `nativemem status` and `nativemem doctor` never print entry text.
+      render: text

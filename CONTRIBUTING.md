@@ -1,0 +1,46 @@
+# Contributing
+
+Thanks for helping. The rules of this repo are short and strict because the tool writes into other
+programs' files.
+
+## Before you start
+
+- Read `CLAUDE.md` and `wiki/README.md`. The wiki is the canonical description of the behaviour.
+- Hard rules: never run the binary, the tests or the app against real agent homes (`~/.claude`,
+  `~/.codex`, `~/.pi`, `~/.config/opencode`, `~/.hermes`, `~/.nativemem`); use temp directories and
+  explicit roots. Never print secrets or session bodies. Never write inside a git repository. Every
+  delete or overwrite backs up first.
+- `scripts/demo-home.sh <dir> [path-to-nativemem]` builds a synthetic environment to try changes on.
+- No personal data in code, tests, fixtures or docs: use `/Users/x/...` and `acme`.
+- Code and docs describe the current state only; history lives in git.
+
+## Checks
+
+```
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cd apps/macos && swift test      # when the app changed
+```
+
+CI runs the Rust checks on Linux. The macOS app and its tests run only on the maintainer's
+machine (`scripts/release.sh`), so run `swift test` yourself when you change the app.
+
+## Commits and pull requests
+
+Commit subjects follow `type(scope): summary`, for example `fix(codex): skip locked databases`.
+Types: `feat`, `fix`, `docs`, `chore`, `ci`, `test`, `refactor`, `build`; a `!` after the type or a
+`BREAKING CHANGE:` line in the body marks a breaking change. The convention matters because
+`scripts/release.sh` builds the release notes from the commit subjects. Do not add AI attribution
+trailers (`Co-Authored-By`, "Generated with") to commits or pull request text.
+
+Update the wiki in the same pull request; `wiki/WIKI-CREATOR.md` routes each kind of change to
+its page.
+
+## Adding an agent
+
+Follow `wiki/guides/add-an-agent.md`: adapter, probes, test fixtures, wiki page and support table.
+
+## Security
+
+Report vulnerabilities privately, see `SECURITY.md`.
