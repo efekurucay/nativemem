@@ -18,17 +18,21 @@ struct OverviewView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         HStack(alignment: .top, spacing: 20) {
-                            Figure(value: status.ledgerItems, caption: "items")
+                            Figure(value: status.logicalItems, caption: "items")
                             Figure(value: model.index.projects.count, caption: "projects")
-                            Figure(value: model.agentsInSync, caption: "agents in sync")
+                            Figure(value: status.agentsInSync, caption: "agents in sync")
                         }
                         ForEach(status.agents, id: \.id) { agent in
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(agentDisplayName(agent.id)).font(.headline)
                                 GroupBox {
                                     VStack(alignment: .leading, spacing: 8) {
-                                        LabeledContent("Originals", value: agent.originals.formatted())
-                                        LabeledContent("Copies", value: agent.replicas.formatted())
+                                        LabeledContent("Originals") {
+                                            Text(agent.originals, format: .number).monospacedDigit()
+                                        }
+                                        LabeledContent("Copies") {
+                                            Text(agent.replicas, format: .number).monospacedDigit()
+                                        }
                                         if !agent.skipped.isEmpty {
                                             DisclosureGroup("Skipped (\(agent.skipped.count))") {
                                                 ForEach(agent.skipped, id: \.self) { entry in
@@ -43,6 +47,7 @@ struct OverviewView: View {
                                             }
                                         }
                                     }
+                                    .labeledContentStyle(TrailingValueStyle())
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                             }
@@ -80,6 +85,16 @@ private struct Figure: View {
                 .font(.largeTitle.weight(.semibold))
                 .monospacedDigit()
             Text(caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct TrailingValueStyle: LabeledContentStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack {
+            configuration.label
+            Spacer()
+            configuration.content
         }
     }
 }

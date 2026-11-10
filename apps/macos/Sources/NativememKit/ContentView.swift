@@ -72,7 +72,8 @@ public struct ContentView: View {
                 if let item = model.selectedItem {
                     ItemDetailView(model: model, item: item, onDelete: { await model.delete(item) })
                         .id(item.id)
-                        .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+                        .layoutPriority(1)
                 } else {
                     ContentUnavailableView("No memory selected", systemImage: "doc.text")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)

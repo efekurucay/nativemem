@@ -92,22 +92,38 @@ struct ItemDetailView: View {
     // MARK: - Edit form
 
     private var editForm: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Form {
-                TextField("Name", text: nameBinding)
-                TextField("Description", text: descriptionBinding)
-                Picker("Category", selection: categoryBinding) {
-                    Text("None").tag(String?.none)
-                    ForEach(categoryOptions, id: \.self) { category in
-                        Text(category.capitalized).tag(String?.some(category))
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                field("Name") {
+                    TextField("Name", text: nameBinding)
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                }
+                field("Description") {
+                    TextField("Description", text: descriptionBinding, axis: .vertical)
+                        .labelsHidden()
+                        .lineLimit(1...4)
+                        .textFieldStyle(.roundedBorder)
+                }
+                field("Category") {
+                    Picker("Category", selection: categoryBinding) {
+                        Text("None").tag(String?.none)
+                        ForEach(categoryOptions, id: \.self) { category in
+                            Text(category.capitalized).tag(String?.some(category))
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .formStyle(.columns)
 
-            TextEditor(text: bodyBinding)
-                .font(.body.monospaced())
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            field("Body") {
+                TextEditor(text: bodyBinding)
+                    .font(.body.monospaced())
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .frame(maxHeight: .infinity)
 
             if let error = model.editError {
                 Label(error, systemImage: "exclamationmark.triangle")
@@ -131,6 +147,13 @@ struct ItemDetailView: View {
             }
         }
         .padding(20)
+    }
+
+    private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline).foregroundStyle(.secondary)
+            content()
+        }
     }
 
     private var categoryOptions: [String] {

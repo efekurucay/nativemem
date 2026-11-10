@@ -64,6 +64,16 @@ public struct AgentStatus: Codable, Hashable, Sendable {
 public struct StatusDocument: Codable, Sendable {
     public var agents: [AgentStatus]
     public var ledgerItems: Int
+
+    /// Logical items: every original counted once, so it always matches the per-agent numbers.
+    public var logicalItems: Int {
+        agents.reduce(0) { $0 + $1.originals }
+    }
+
+    /// Agents whose copies match their originals: nothing left to write for them.
+    public var agentsInSync: Int {
+        agents.filter { $0.originals + $0.replicas >= logicalItems }.count
+    }
 }
 
 public enum SyncOp: String, Codable, Sendable {

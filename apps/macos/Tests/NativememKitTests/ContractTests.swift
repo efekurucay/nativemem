@@ -16,6 +16,8 @@ func fixtureItems() throws -> [Item] {
         let status = try decodeContract(StatusDocument.self, from: fixture("status"))
         #expect(status.ledgerItems == 399)
         #expect(status.agents.count == 2)
+        #expect(status.logicalItems == 399)
+        #expect(status.agentsInSync == 2)
         #expect(status.agents[0].skipped == [SkippedEntry(label: "-Users-x-old", reason: "no cwd in jsonl ...")])
         #expect(status.agents[1].replicas == 399)
     }

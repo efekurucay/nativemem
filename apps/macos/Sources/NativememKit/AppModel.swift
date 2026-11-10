@@ -100,13 +100,6 @@ public final class AppModel {
         return !name.isEmpty
     }
 
-    /// Agents whose copies match their originals: nothing left to write for them.
-    public var agentsInSync: Int {
-        guard let status else { return 0 }
-        let total = status.ledgerItems
-        return status.agents.filter { $0.originals + $0.replicas >= total }.count
-    }
-
     private var homePath: String {
         FileManager.default.homeDirectoryForCurrentUser.path
     }
