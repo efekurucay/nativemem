@@ -213,6 +213,24 @@ All commands take `--json` and use the error shape and codes of `docs/desktop.md
 Every command except `serve`, `list`, `test`, `login`, `logout`, `status` and a dry-run `import` runs
 under the state lock (`McpArgs::writes` in `crates/cli/src/mcp.rs`); `install` and `uninstall` do.
 
+## Desktop app
+
+The "MCP & Integrations" screen of the app runs these commands with `--json` and holds no MCP logic
+(`apps/macos/Sources/NativememKit/McpModel.swift`; screen described in `docs/desktop.md`).
+
+- State of a server: `disabled` when it is not enabled; `needs sign-in` when `auth_state` is `needs_login`
+  or the test fails with the `Sign in again` message; `error` for any other failed test; `connected`
+  when the test passes (`McpServerState.derive`). The sidebar badge counts `needs sign-in` and `error`.
+  `mcp test` runs in the background for each enabled server, except those with `needs_login`.
+- `mcp list` never returns a secret value or a literal one, so the Edit sheet cannot show plain
+  values: they are typed again, and a secret row with an empty value keeps its `secret:<id>`.
+- A server name or secret id can begin with `-`, so the app passes it after `--`.
+- The app stores secrets with `mcp set-secret <id>` (value on stdin) before `mcp add` / `mcp edit`.
+- `mcp` documents are decoded without the snake-case key strategy, because env and header names are
+  dictionary keys.
+
+Tests: `McpContractTests`, `McpStateTests`, `McpDraftTests` in `apps/macos/Tests/NativememKitTests/`.
+
 ## Import
 
 `mcp import` reads, read-only, the global MCP entries of the four agents at the roots the CLI
@@ -259,6 +277,8 @@ Tests: `crates/hub/tests/import.rs`, `import_previews_then_applies_from_the_four
 - `crates/cli/src/mcp.rs`
 - `crates/cli/tests/mcp.rs`
 - `docs/desktop.md`
+- `apps/macos/Sources/NativememKit/McpModel.swift`
+- `apps/macos/Sources/NativememKit/McpContract.swift`
 
 ## Rules
 

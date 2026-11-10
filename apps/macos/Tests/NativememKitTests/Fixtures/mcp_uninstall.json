@@ -1,0 +1,3 @@
+{ "agents": [
+    { "agent": "claude", "status": "removed", "path": "/Users/x/.claude.json", "warnings": [] },
+    { "agent": "codex", "status": "absent", "path": "/Users/x/.codex/config.toml", "warnings": [] } ] }

@@ -1,0 +1,9 @@
+{ "command": "/Users/x/.cargo/bin/nativemem",
+  "args": ["mcp", "serve", "--state-dir", "/Users/x/state"],
+  "agents": [
+    { "agent": "claude", "status": "installed", "path": "/Users/x/.claude.json", "warnings": [] },
+    { "agent": "codex", "status": "error", "path": "/Users/x/.codex/config.toml", "warnings": [],
+      "code": "parse", "message": "cannot parse /Users/x/.codex/config.toml: expected a table" },
+    { "agent": "opencode", "status": "not_installed", "path": null, "warnings": [] },
+    { "agent": "pi", "status": "unchanged", "path": "/Users/x/.pi/agent/mcp.json",
+      "warnings": ["the Pi extension /Users/x/.pi/agent/extensions/mcp.ts registers /mcp and replaces Pi's built-in MCP support: Pi does not read mcp.json while it is installed"] } ] }

@@ -1,0 +1,10 @@
+{ "applied": false,
+  "servers": [
+    { "name": "shared", "transport": "stdio", "status": "add",
+      "agents": ["claude", "codex", "pi"], "secrets": ["shared-API_KEY"] },
+    { "name": "known", "transport": "http", "status": "present", "agents": ["claude"], "secrets": [] },
+    { "name": "clash", "transport": "stdio", "status": "conflict", "agents": ["claude", "hub"],
+      "secrets": [] } ],
+  "skipped": [ { "agent": "claude", "name": "sse-server", "reason": "sse transport is not supported by the hub" } ],
+  "warnings": ["codex shared: keys not carried over: startup_timeout_sec"],
+  "summary": { "add": 1, "present": 1, "conflicts": 1, "skipped": 1 } }

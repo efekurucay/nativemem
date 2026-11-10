@@ -17,6 +17,9 @@ struct SidebarView: View {
                     .badge(model.skillCount)
                     .tag(SidebarSelection.skills)
             }
+            Label("MCP & Integrations", systemImage: "puzzlepiece.extension")
+                .badge(model.mcp.attentionCount)
+                .tag(SidebarSelection.mcp)
             Section("Projects") {
                 ForEach(model.visibleTree) { node in
                     TreeNodeView(node: node, depth: 0, forceExpanded: model.isFiltering)

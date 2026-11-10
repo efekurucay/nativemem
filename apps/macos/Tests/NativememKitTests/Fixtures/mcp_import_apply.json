@@ -1,0 +1,7 @@
+{ "applied": true,
+  "servers": [
+    { "name": "shared", "transport": "stdio", "status": "add",
+      "agents": ["claude", "codex", "pi"], "secrets": ["shared-API_KEY"] } ],
+  "skipped": [],
+  "warnings": [],
+  "summary": { "add": 1, "present": 0, "conflicts": 0, "skipped": 0 } }

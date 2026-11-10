@@ -1,0 +1,7 @@
+{ "command": "/Users/x/.cargo/bin/nativemem",
+  "args": ["mcp", "serve"],
+  "agents": [
+    { "agent": "claude", "status": "registered", "path": "/Users/x/.claude.json", "warnings": [] },
+    { "agent": "codex", "status": "outdated", "path": "/Users/x/.codex/config.toml", "warnings": [] },
+    { "agent": "opencode", "status": "missing", "path": null, "warnings": [] },
+    { "agent": "pi", "status": "not_installed", "path": null, "warnings": [] } ] }

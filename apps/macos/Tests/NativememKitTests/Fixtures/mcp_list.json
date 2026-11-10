@@ -1,0 +1,13 @@
+{ "servers": [
+    { "name": "github", "transport": "stdio", "enabled": true, "auth": "none",
+      "auth_state": "none", "command": "npx", "args": ["-y", "pkg"], "cwd": "/Users/x/app",
+      "env": { "GITHUB_TOKEN": "secret:github-GITHUB_TOKEN", "LOG": "<literal>" },
+      "headers": {}, "secrets": ["github-GITHUB_TOKEN"] },
+    { "name": "docs", "transport": "http", "enabled": false, "auth": "oauth",
+      "auth_state": "needs_login",
+      "url": "https://mcp.example.com/mcp", "args": [], "env": {},
+      "headers": { "X-Api-Key": "secret:docs-X-Api-Key" },
+      "secrets": ["docs-X-Api-Key"] },
+    { "name": "wiki", "transport": "http", "enabled": true, "auth": "oauth",
+      "auth_state": "signed_in",
+      "url": "https://wiki.example.com/mcp", "args": [], "env": {}, "headers": {}, "secrets": [] } ] }

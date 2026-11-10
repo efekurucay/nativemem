@@ -82,6 +82,8 @@ public struct ContentView: View {
         switch model.sidebar {
         case .overview, nil:
             OverviewView(model: model)
+        case .mcp:
+            McpView(model: model.mcp)
         case .global, .skills, .folder, .folderOnly:
             HSplitView {
                 ItemListView(model: model)

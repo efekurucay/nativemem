@@ -93,6 +93,9 @@ nativemem-sync/
 │   │   ├── SkillTextView.swift   read-only SKILL.md of a skill
 │   │   ├── SessionIndex.swift, SessionDetailView.swift  sessions per project folder, read-only transcript
 │   │   ├── NewEntry.swift, NewEntrySheet.swift  the New sheet: draft and validation, the form
+│   │   ├── McpContract.swift, McpCLI.swift  Codable types of the `mcp` documents, server state and badge count; the `mcp` commands
+│   │   ├── McpModel.swift, McpDraft.swift  the MCP & Integrations screen state and import flow; the Add server / Edit draft
+│   │   ├── McpView.swift, McpServerSheet.swift, McpImportSheet.swift  agents box, server list and detail; the Add / Edit sheet; the import sheet
 │   │   ├── NativememCLI.swift    finds and runs the binary, decodes JSON
 │   │   ├── Contract.swift        Codable types mirroring the CLI JSON contract
 │   │   ├── AppModel.swift        observable state, grouping, copy folding
@@ -101,7 +104,7 @@ nativemem-sync/
 │   │   ├── SyncSession.swift     preview then apply flow
 │   │   ├── BodyText.swift, MarkdownBlocks.swift  body rendering
 │   │   └── SidebarView, ItemListView, ItemDetailView, OverviewView, SyncSheet, ContentView
-│   ├── Tests/NativememKitTests/  contract, doctor, index, session, tree, sectioning, body parser, sync headline, new entry tests
+│   ├── Tests/NativememKitTests/  contract, doctor, index, session, tree, sectioning, body parser, sync headline, new entry, MCP contract, server state and server draft tests
 │   │   └── Fixtures/             one JSON file per CLI document shape
 │   ├── Resources/AppIcon.png
 │   └── scripts/bundle.sh         builds the app bundle into `apps/macos/build/` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`)

@@ -135,13 +135,14 @@ public struct NativememCLI: Sendable {
         return try encoder.encode(document)
     }
 
-    private func run<T: Decodable & Sendable>(
-        _ arguments: [String], stdin: Data? = nil, as type: T.Type = T.self
+    func run<T: Decodable & Sendable>(
+        _ arguments: [String], stdin: Data? = nil, as type: T.Type = T.self,
+        decode: (Data) throws -> T = { try decodeContract(T.self, from: $0) }
     ) async throws -> T {
         let (data, exitCode) = try await execute(arguments, stdin: stdin)
         switch exitCode {
         case 0, 2, 3:
-            return try decodeContract(T.self, from: data)
+            return try decode(data)
         default:
             if let failure = try? decodeContract(ErrorDocument.self, from: data) {
                 throw CLIError.failed(message: failure.error, code: failure.code)

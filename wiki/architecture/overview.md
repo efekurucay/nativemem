@@ -163,7 +163,7 @@ filtered out of the memory views (`MemoryIndex.init` in the same file); `status`
 separately. Selecting a project folder shows a "Memory" / "Sessions (N)" control above the list:
 the Sessions list (`SessionIndex.swift`, from `items --kind session --json`) covers the folder and
 below, sectioned by project, newest first, and the detail pane (`SessionDetailView.swift`) loads the
-read-only transcript through `nativemem session show`. There is no edit and no delete for sessions. The app finds the binary through app settings, `NATIVEMEM_BIN`, a
+read-only transcript through `nativemem session show`. There is no edit and no delete for sessions. The "MCP & Integrations" sidebar row opens the hub screen (`McpView.swift`, `McpModel.swift`): which agents have the hub (`mcp install` / `uninstall` / `status`), the servers with their state from `mcp list` and `mcp test`, sign-in, add, edit, remove and import (`wiki/architecture/hub.md`). The app finds the binary through app settings, `NATIVEMEM_BIN`, a
 file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebrew/bin`
 (`apps/macos/Sources/NativememKit/NativememCLI.swift`). It also runs `doctor --json` and shows the
 compatibility notices on the Overview (`wiki/architecture/compatibility.md`).
