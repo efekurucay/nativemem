@@ -466,6 +466,10 @@ fn plan_key(
                         replica_native_id: o.native_id.clone(),
                         path: o.path.clone(),
                         hash: content_hash(&o.item),
+                        revision: adapters
+                            .iter()
+                            .find(|a| a.id() == o.agent)
+                            .map_or(0, |a| a.writer_revision(o.item.kind)),
                     },
                     name: o.item.name.clone(),
                 });
@@ -587,6 +591,7 @@ fn plan_session(
                     replica_native_id: o.native_id.clone(),
                     path: o.path.clone(),
                     hash: content_hash(&o.item),
+                    revision: adapter.writer_revision(Kind::Session),
                 },
                 name: label.clone(),
             }),
@@ -602,7 +607,8 @@ fn plan_session(
             }
             (Some(_), None) => {}
             (Some(row), Some(o)) => {
-                if grown && content_hash(&o.item) == row.hash {
+                let outdated = row.revision < adapter.writer_revision(Kind::Session);
+                if (grown || outdated) && content_hash(&o.item) == row.hash {
                     plan.actions.push(Action::Write {
                         key: key.clone(),
                         target: agent,
@@ -650,6 +656,7 @@ fn write_replica(adapter: &dyn Adapter, ledger: &Ledger, key: &ItemKey, item: &I
         replica_native_id: native_id,
         path,
         hash,
+        revision: adapter.writer_revision(item.kind),
     })
 }
 
@@ -2099,6 +2106,89 @@ mod session_tests {
             assert_eq!(f.claude.session_report().unwrap().automated, 1);
             assert_eq!(f.codex.session_report().unwrap().automated, 1);
         }
+    }
+
+    fn set_revision(f: &Fx, revision: u32) -> crate::ledger::ReplicaRow {
+        let key = ItemKey {
+            origin: AgentId::new("claude"),
+            native_id: "-w-app/c1.jsonl".into(),
+        };
+        let mut row = f
+            .ledger
+            .get_replica(&key, &AgentId::new("pi"))
+            .unwrap()
+            .unwrap();
+        row.revision = revision;
+        f.ledger.upsert_replica(&row).unwrap();
+        row
+    }
+
+    #[test]
+    fn written_pi_replica_names_no_placeholder_model() {
+        let f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        let text = fs::read_to_string(f.replica_of(&f.pi).path).unwrap();
+        assert!(!text.contains("\"api\":\"nativemem\""), "{text}");
+        assert!(!text.contains("model_change"));
+        assert!(text.contains("\"api\":\"pi-virtual\""));
+        assert_eq!(set_revision(&f, 1).revision, 1);
+    }
+
+    #[test]
+    fn unmodified_replica_with_an_older_writer_revision_is_rewritten_once() {
+        let f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        assert_eq!(set_revision(&f, 0).revision, 0);
+        let path = f.replica_of(&f.pi).path;
+        let old_format = fs::read_to_string(&path)
+            .unwrap()
+            .replace("pi-virtual", "nativemem");
+        fs::write(&path, old_format).unwrap();
+        let p = f.plan();
+        assert_eq!(
+            p.to_string().lines().next().unwrap(),
+            "~ pi  /w/app  session \"Fix login\"  (from claude)"
+        );
+        f.sync();
+        assert_eq!(
+            set_revision(&f, 1).revision,
+            1,
+            "rewritten at the current revision"
+        );
+        assert!(f.root.join("state/backups/T/pi/sessions").is_dir());
+        assert!(fs::read_to_string(&path).unwrap().contains("pi-virtual"));
+        assert_eq!(parsed(&f.replica_of(&f.pi)).turns.len(), 3);
+    }
+
+    #[test]
+    fn modified_replica_with_an_older_writer_revision_is_left_alone() {
+        let f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        let replica = f.replica_of(&f.pi);
+        let mut text = fs::read_to_string(&replica.path).unwrap();
+        let last_id = text
+            .lines()
+            .last()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .unwrap();
+        text.push_str(&format!(
+            "{}\n",
+            serde_json::json!({"type": "message", "id": "zz", "parentId": last_id,
+                "timestamp": "2026-11-10T11:00:00.000Z",
+                "message": {"role": "user", "content": [{"type": "text", "text": "mine"}], "timestamp": 1}})
+        ));
+        fs::write(&replica.path, &text).unwrap();
+        set_revision(&f, 0);
+        assert!(f.plan().is_empty());
+        assert_eq!(fs::read_to_string(&replica.path).unwrap(), text);
     }
 
     #[test]

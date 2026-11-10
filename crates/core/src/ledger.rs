@@ -42,6 +42,9 @@ pub struct ReplicaRow {
     pub replica_native_id: String,
     pub path: PathBuf,
     pub hash: String,
+    /// The adapter's writer revision when the replica was written; rows from before revisions
+    /// existed count as 0.
+    pub revision: u32,
 }
 
 pub struct Ledger {
@@ -94,10 +97,28 @@ fn replica_from_row(r: &Row) -> rusqlite::Result<ReplicaRow> {
         replica_native_id: r.get(3)?,
         path: PathBuf::from(r.get::<_, String>(4)?),
         hash: r.get(5)?,
+        revision: r.get(6)?,
     })
 }
 
-const REPLICA_COLS: &str = "origin, native_id, agent, replica_native_id, path, hash";
+/// Ledgers created before writer revisions lack the column; their rows read as revision 0.
+fn add_revision_column(conn: &Connection) -> Result<()> {
+    let has = conn
+        .prepare("PRAGMA table_info(replicas)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|c| c == "revision");
+    if !has {
+        conn.execute(
+            "ALTER TABLE replicas ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+const REPLICA_COLS: &str = "origin, native_id, agent, replica_native_id, path, hash, revision";
 
 impl Ledger {
     /// Opens (creating if needed) `<state_dir>/ledger.db`.
@@ -106,6 +127,7 @@ impl Ledger {
         let conn = Connection::open(state_dir.join("ledger.db"))?;
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
+        add_revision_column(&conn)?;
         Ok(Ledger { conn })
     }
 
@@ -114,6 +136,7 @@ impl Ledger {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
+        add_revision_column(&conn)?;
         Ok(Ledger { conn })
     }
 
@@ -177,17 +200,18 @@ impl Ledger {
     /// The item row for `row.key` must already exist.
     pub fn upsert_replica(&self, row: &ReplicaRow) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO replicas(origin, native_id, agent, replica_native_id, path, hash)
-             VALUES(?1,?2,?3,?4,?5,?6)
+            "INSERT INTO replicas(origin, native_id, agent, replica_native_id, path, hash, revision)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(origin, native_id, agent)
-             DO UPDATE SET replica_native_id=?4, path=?5, hash=?6",
+             DO UPDATE SET replica_native_id=?4, path=?5, hash=?6, revision=?7",
             params![
                 row.key.origin.as_str(),
                 row.key.native_id,
                 row.agent.as_str(),
                 row.replica_native_id,
                 row.path.to_string_lossy(),
-                row.hash
+                row.hash,
+                row.revision
             ],
         )?;
         Ok(())
@@ -259,6 +283,7 @@ mod tests {
             replica_native_id: format!("{agent}/{n}"),
             path: PathBuf::from(format!("/r/{agent}/{n}.md")),
             hash: "h1".into(),
+            revision: 0,
         }
     }
 
@@ -335,6 +360,44 @@ mod tests {
         assert_eq!(
             Ledger::open(t.path()).unwrap().list_items().unwrap().len(),
             1
+        );
+    }
+
+    #[test]
+    fn ledger_without_revision_column_migrates_and_reads_revision_zero() {
+        let t = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(t.path().join("ledger.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE items(origin TEXT NOT NULL, native_id TEXT NOT NULL, kind TEXT NOT NULL,
+                    scope TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(origin, native_id));
+                 CREATE TABLE replicas(origin TEXT NOT NULL, native_id TEXT NOT NULL, agent TEXT NOT NULL,
+                    replica_native_id TEXT NOT NULL, path TEXT NOT NULL, hash TEXT NOT NULL,
+                    PRIMARY KEY(origin, native_id, agent),
+                    FOREIGN KEY(origin, native_id) REFERENCES items(origin, native_id) ON DELETE CASCADE);
+                 INSERT INTO items VALUES('claude','a','session','project:/w','h');
+                 INSERT INTO replicas VALUES('claude','a','pi','pi/a','/p/a','h');",
+            )
+            .unwrap();
+        }
+        let l = Ledger::open(t.path()).unwrap();
+        let r = l
+            .get_replica(&key("a"), &AgentId::new("pi"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.revision, 0);
+        let mut bumped = r;
+        bumped.revision = 3;
+        l.upsert_replica(&bumped).unwrap();
+        drop(l);
+        let again = Ledger::open(t.path()).unwrap();
+        assert_eq!(
+            again
+                .get_replica(&key("a"), &AgentId::new("pi"))
+                .unwrap()
+                .unwrap()
+                .revision,
+            3
         );
     }
 }

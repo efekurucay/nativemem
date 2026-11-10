@@ -310,7 +310,16 @@ Codex is read only.
   last entry to the root; `message` entries become turns (`toolCall` / `toolResult` flattened,
   thinking dropped); title = last `session_info` name, else the first user text. A replica has the
   header, the marker entry, a `session_info` entry and one linear `message` entry per turn; the file
-  name carries the creation time and a uuid derived from the origin.
+  name carries the creation time and a uuid derived from the origin. Pi restores the model a session
+  recorded from the last `model_change` entry or the last assistant message that is not virtual, and
+  warns when it does not exist. A replica has no `model_change` or thinking-level entry, and its
+  assistant messages carry `api: "pi-virtual"`, which Pi skips when it looks for the recorded model,
+  so the replica opens with Pi's own default model and no warning.
+- Writer revision: each adapter has a revision per kind (`Adapter::writer_revision`, 0 unless the
+  adapter says otherwise; Pi sessions are 1). The ledger records the revision a replica was written
+  with in the `replicas.revision` column, added to older ledgers on open, where existing rows read as
+  0. A session replica written with a lower revision is rewritten (old file backed up) while it is
+  unmodified; a modified one is left alone. Adopted replicas are recorded at the current revision.
 - Replica markers (survive a lost ledger, so a replica is never mistaken for an original):
   - Claude: an extra top-level key `nativemem_origin: "<agent>:<native id>"` on every line the tool
     writes. Claude reads lines by their known keys, so the key is ignored, and the file stays a

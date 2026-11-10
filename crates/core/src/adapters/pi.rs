@@ -23,6 +23,13 @@ const AGENT: &str = "pi";
 /// `customType` of the entry that marks a session as a replica. Pi keeps custom entries out of
 /// the model context.
 pub const MARKER_TYPE: &str = "nativemem-origin";
+/// Bump when the written session format changes; unmodified replicas are then rewritten.
+const SESSION_WRITER_REVISION: u32 = 1;
+/// Assistant messages of a replica carry this `api`. Pi restores the model a session recorded from
+/// the last `model_change` or the last assistant message that is not virtual
+/// (`core/virtual-models.js` `getBranchSelection`), and warns when that model does not exist. A
+/// virtual message never names a restorable model, so the replica opens with Pi's own default.
+const REPLICA_API: &str = "pi-virtual";
 
 pub struct PiAdapter {
     home: PathBuf,
@@ -251,7 +258,7 @@ pub fn render(session: &Session, key: &ItemKey, uuid: &str) -> String {
             Role::Assistant => json!({
                 "role": "assistant",
                 "content": [{ "type": "text", "text": turn.text }],
-                "api": "nativemem",
+                "api": REPLICA_API,
                 "provider": "nativemem",
                 "model": "replica",
                 "usage": {
@@ -415,6 +422,14 @@ impl Adapter for PiAdapter {
             || self.instructions.supports(kind, scope)
     }
 
+    fn writer_revision(&self, kind: Kind) -> u32 {
+        if kind == Kind::Session {
+            SESSION_WRITER_REVISION
+        } else {
+            0
+        }
+    }
+
     fn scan(&self) -> Result<Vec<Observed>> {
         let mut out = self.instructions.scan()?;
         out.extend(self.scan_sessions()?.observed);
@@ -575,5 +590,32 @@ mod tests {
             })
             .collect();
         assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len());
+    }
+
+    #[test]
+    fn replica_names_no_restorable_model_and_has_no_setup_entries() {
+        let session = Session {
+            id: "o".into(),
+            cwd: "/w/app".into(),
+            title: "t".into(),
+            created_ms: 0,
+            updated_ms: 0,
+            turns: vec![
+                Turn::new(Role::User, "q", 0),
+                Turn::new(Role::Assistant, "a", 1),
+            ],
+        };
+        let key = ItemKey {
+            origin: AgentId::new("claude"),
+            native_id: "d/o.jsonl".into(),
+        };
+        let text = render(&session, &key, "u");
+        assert!(!text.contains("model_change") && !text.contains("thinking_level_change"));
+        for l in text.lines() {
+            let v: Value = serde_json::from_str(l).unwrap();
+            if v["message"]["role"] == "assistant" {
+                assert_eq!(v["message"]["api"], "pi-virtual");
+            }
+        }
     }
 }

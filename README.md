@@ -66,6 +66,9 @@ last N days, `--exclude-automated-sessions` leaves out headless runs and sub-age
 200 MB and sessions without a working directory are skipped and listed by `status`, which also
 counts automated sessions per agent (`automated_sessions` in `--json`).
 
+A copy written by an older version of the tool is rewritten once when it is still unmodified.
+Pi copies open with Pi's own default model, without a model-restore warning.
+
 Automated sessions are recognised by structure only: a Claude Code transcript whose first line has
 an `entrypoint` starting with `sdk`; a Codex rollout that is a sub-agent thread (`source` an
 object, `parent_thread_id` or `thread_source: subagent`), a headless `exec` run (`source: exec` or

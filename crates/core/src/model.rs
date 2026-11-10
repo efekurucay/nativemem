@@ -89,6 +89,11 @@ pub trait Adapter {
     fn supports(&self, _kind: Kind, _scope: &Scope) -> bool {
         true
     }
+    /// Version of this adapter's output format for `kind`. A replica written with a lower
+    /// revision is rewritten while it is unmodified; bump it when the written format changes.
+    fn writer_revision(&self, _kind: Kind) -> u32 {
+        0
+    }
     fn scan(&self) -> Result<Vec<Observed>>;
     /// Create or update the replica of `key` in this agent. Returns its native_id and path.
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)>;
