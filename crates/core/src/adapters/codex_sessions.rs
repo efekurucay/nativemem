@@ -12,8 +12,8 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 use crate::model::AgentId;
 use crate::session::{
-    parse_iso_ms, title_from_turns, too_large_reason, tool_call_text, tool_result_text, Role,
-    Session, SessionOptions, SessionScan, Source, Turn,
+    parse_iso_ms, title_from_turns, too_large_reason, Role, Session, SessionOptions, SessionScan,
+    Source, TurnBuilder,
 };
 
 const IMPORT_LEDGER: &str = "external_agent_session_imports.json";
@@ -172,7 +172,7 @@ fn item_text(item: &Value) -> String {
 /// Parses a rollout. `None` for rollouts without `session_meta`.
 pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
     let mut meta: Option<Value> = None;
-    let mut turns: Vec<Turn> = Vec::new();
+    let mut builder = TurnBuilder::default();
     let mut last_ts = mtime_ms;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -189,33 +189,30 @@ pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
             continue;
         };
         let kind = payload.get("type").and_then(Value::as_str);
-        let push = |turns: &mut Vec<Turn>, role: Role, text: String| {
-            let dup = turns
+        let mut text_turn = |role: Role, text: String| {
+            let dup = builder
+                .turns
                 .last()
                 .is_some_and(|t| t.role == role && t.text == text);
-            if !text.is_empty() && !dup {
-                turns.push(Turn::new(role, text, last_ts));
+            if !dup {
+                builder.text(role, text, last_ts);
             }
         };
         match (v.get("type").and_then(Value::as_str), kind) {
             (Some("session_meta"), _) => meta = meta.or_else(|| Some(payload.clone())),
             (Some("event_msg"), Some("user_message")) => {
                 let msg = payload.get("message").and_then(Value::as_str);
-                push(&mut turns, Role::User, msg.unwrap_or_default().to_string());
+                text_turn(Role::User, msg.unwrap_or_default().to_string());
             }
             (Some("event_msg"), Some("agent_message")) => {
                 let msg = payload.get("message").and_then(Value::as_str);
-                push(
-                    &mut turns,
-                    Role::Assistant,
-                    msg.unwrap_or_default().to_string(),
-                );
+                text_turn(Role::Assistant, msg.unwrap_or_default().to_string());
             }
             (Some("event_msg"), Some("item_completed")) => {
                 let item = payload.get("item").unwrap_or(&Value::Null);
                 match item.get("type").and_then(Value::as_str) {
-                    Some("UserMessage") => push(&mut turns, Role::User, item_text(item)),
-                    Some("AgentMessage") => push(&mut turns, Role::Assistant, item_text(item)),
+                    Some("UserMessage") => text_turn(Role::User, item_text(item)),
+                    Some("AgentMessage") => text_turn(Role::Assistant, item_text(item)),
                     _ => {}
                 }
             }
@@ -230,7 +227,8 @@ pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
                     .unwrap_or("");
                 let input = serde_json::from_str::<Value>(raw)
                     .unwrap_or_else(|_| Value::String(raw.to_string()));
-                push(&mut turns, Role::Assistant, tool_call_text(name, &input));
+                let id = payload.get("call_id").and_then(Value::as_str);
+                builder.call(id, name, &input, last_ts);
             }
             (Some("response_item"), Some("custom_tool_call")) => {
                 let name = payload
@@ -238,15 +236,18 @@ pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
                     .and_then(Value::as_str)
                     .unwrap_or("tool");
                 let input = payload.get("input").cloned().unwrap_or(Value::Null);
-                push(&mut turns, Role::Assistant, tool_call_text(name, &input));
+                let id = payload.get("call_id").and_then(Value::as_str);
+                builder.call(id, name, &input, last_ts);
             }
             (Some("response_item"), Some("function_call_output" | "custom_tool_call_output")) => {
                 let out = output_text(payload.get("output").unwrap_or(&Value::Null));
-                push(&mut turns, Role::Assistant, tool_result_text(&out, false));
+                let id = payload.get("call_id").and_then(Value::as_str);
+                builder.result(id, &out, false, last_ts);
             }
             _ => {}
         }
     }
+    let turns = builder.turns;
     let meta = meta?;
     let text_of = |key: &str| meta.get(key).and_then(Value::as_str);
     let automated = meta.get("source").is_some_and(|s| !s.is_string())
@@ -361,24 +362,63 @@ mod tests {
         assert_eq!(texts[1], "looking");
         assert_eq!(
             texts[2],
-            "[external_agent_tool_call: shell]\ncommand: ls\n[/external_agent_tool_call]"
+            "Tool: shell\n```\nls\n```\nResult:\n```\na b\n```"
         );
         assert_eq!(
             texts[3],
-            "[external_agent_tool_result]\na b\n[/external_agent_tool_result]"
+            "Tool: apply_patch\n```\n*** patch\n```\nResult:\n```\nok\n```"
         );
-        assert_eq!(texts[4], "[external_agent_tool_call: apply_patch]\ninput: *** patch\n[/external_agent_tool_call]");
-        assert_eq!(
-            texts[5],
-            "[external_agent_tool_result]\nok\n[/external_agent_tool_result]"
-        );
-        assert_eq!(texts[6], "done");
-        assert_eq!(s.turns.len(), 7);
+        assert_eq!(texts[4], "done");
+        assert_eq!(s.turns.len(), 5);
         assert_eq!(s.turns[0].role, Role::User);
         assert_eq!(
             s.turns[0].ts_ms,
             parse_iso_ms("2026-11-10T09:00:02.000Z").unwrap()
         );
+    }
+
+    #[test]
+    fn js_style_call_and_json_wrapper_are_unwrapped() {
+        let mut t = meta(json!({}));
+        t += &line(
+            "2026-11-10T09:00:02.000Z",
+            "event_msg",
+            json!({"type": "user_message", "message": "show it"}),
+        );
+        t += &line(
+            "2026-11-10T09:00:03.000Z",
+            "response_item",
+            json!({"type": "custom_tool_call", "name": "exec", "call_id": "c1",
+            "input": "text(await tools.exec_command({cmd:\"cat \\\"a b\\\"\\nls\",max_output_tokens:5000}));"}),
+        );
+        t += &line(
+            "2026-11-10T09:00:04.000Z",
+            "response_item",
+            json!({"type": "custom_tool_call_output", "call_id": "c1",
+            "output": "{\"chunk_id\":\"1\",\"wall_time_seconds\":0.1,\"exit_code\":3,\"original_token_count\":9,\"output\":\"missing\\n\"}"}),
+        );
+        t += &line(
+            "2026-11-10T09:00:05.000Z",
+            "response_item",
+            json!({"type": "custom_tool_call", "name": "exec", "call_id": "c2", "input": "x"}),
+        );
+        t += &line(
+            "2026-11-10T09:00:06.000Z",
+            "response_item",
+            json!({"type": "custom_tool_call_output", "call_id": "c2",
+            "output": [{"type": "input_text", "text": "z".repeat(1600)}]}),
+        );
+        let s = parse(&t, "x", 0).unwrap().session;
+        assert_eq!(s.turns.len(), 3);
+        assert_eq!(
+            s.turns[1].text,
+            "Tool: exec\n```\ncat \"a b\"\nls\n```\nResult (exit code 3):\n```\nmissing\n```"
+        );
+        assert!(s.turns[2].text.ends_with("… (100 more characters)"));
+        assert!(!s
+            .turns
+            .iter()
+            .any(|t| t.text.contains("chunk_id") || t.text.contains("external_agent")));
     }
 
     #[test]

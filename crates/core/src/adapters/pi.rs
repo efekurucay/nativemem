@@ -13,8 +13,7 @@ use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 use crate::session::{
     clean_title, derived_uuid, format_iso_ms, is_session_id, join_user_blocks, marker_text,
     parse_iso_ms, parse_marker, result_content_text, set_mtime, title_from_turns, too_large_reason,
-    tool_call_text, tool_result_text, Role, Session, SessionOptions, SessionReport, SessionScan,
-    Source, Turn,
+    Role, Session, SessionOptions, SessionReport, SessionScan, Source, TurnBuilder,
 };
 
 use super::agents_file::AgentsFileAdapter;
@@ -24,7 +23,7 @@ const AGENT: &str = "pi";
 /// the model context.
 pub const MARKER_TYPE: &str = "nativemem-origin";
 /// Bump when the written session format changes; unmodified replicas are then rewritten.
-const SESSION_WRITER_REVISION: u32 = 1;
+const SESSION_WRITER_REVISION: u32 = 2;
 /// Assistant messages of a replica carry this `api`. Pi restores the model a session recorded from
 /// the last `model_change` or the last assistant message that is not virtual
 /// (`core/virtual-models.js` `getBranchSelection`), and warns when that model does not exist. A
@@ -62,55 +61,62 @@ pub fn encode_cwd(cwd: &str) -> String {
     format!("--{enc}--")
 }
 
-fn turns_of_message(msg: &Value, fallback_ts: i64) -> Vec<Turn> {
+fn add_message(b: &mut TurnBuilder, msg: &Value, fallback_ts: i64) {
     let ts = msg
         .get("timestamp")
         .and_then(Value::as_i64)
         .unwrap_or(fallback_ts);
     let content = msg.get("content").unwrap_or(&Value::Null);
     match msg.get("role").and_then(Value::as_str) {
-        Some("user") => {
-            let text = match content {
-                Value::String(s) => s.clone(),
-                Value::Array(blocks) => join_user_blocks(blocks),
-                _ => String::new(),
-            };
-            if text.is_empty() {
-                Vec::new()
-            } else {
-                vec![Turn::new(Role::User, text, ts)]
-            }
-        }
+        Some("user") => match content {
+            Value::String(s) => b.text(Role::User, s.as_str(), ts),
+            Value::Array(blocks) => b.text(Role::User, join_user_blocks(blocks), ts),
+            _ => {}
+        },
         Some("assistant") => match content {
-            Value::Array(blocks) => blocks
-                .iter()
-                .filter_map(|b| match b.get("type").and_then(Value::as_str) {
-                    Some("text") => b
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .filter(|t| !t.is_empty())
-                        .map(|t| Turn::new(Role::Assistant, t, ts)),
-                    Some("toolCall") => {
-                        let name = b.get("name").and_then(Value::as_str).unwrap_or("tool");
-                        let args = b.get("arguments").unwrap_or(&Value::Null);
-                        Some(Turn::new(Role::Assistant, tool_call_text(name, args), ts))
+            Value::String(s) => b.text(Role::Assistant, s.as_str(), ts),
+            Value::Array(blocks) => {
+                for block in blocks {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                            b.text(Role::Assistant, text, ts);
+                        }
+                        Some("toolCall") => {
+                            let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                            let id = block.get("id").and_then(Value::as_str);
+                            b.call(id, name, block.get("arguments").unwrap_or(&Value::Null), ts);
+                        }
+                        _ => {}
                     }
-                    _ => None,
-                })
-                .collect(),
-            Value::String(s) if !s.is_empty() => vec![Turn::new(Role::Assistant, s.as_str(), ts)],
-            _ => Vec::new(),
+                }
+            }
+            _ => {}
         },
         Some("toolResult") => {
             let is_error = msg.get("isError").and_then(Value::as_bool) == Some(true);
-            let text = result_content_text(content);
-            vec![Turn::new(
-                Role::Assistant,
-                tool_result_text(&text, is_error),
-                ts,
-            )]
+            let id = msg.get("toolCallId").and_then(Value::as_str);
+            b.result(id, &result_content_text(content), is_error, ts);
         }
-        _ => Vec::new(),
+        Some("bashExecution") => {
+            if msg.get("excludeFromContext").and_then(Value::as_bool) == Some(true) {
+                return;
+            }
+            let command = msg.get("command").and_then(Value::as_str).unwrap_or("");
+            let output = msg.get("output").and_then(Value::as_str).unwrap_or("");
+            let code = msg
+                .get("exitCode")
+                .and_then(Value::as_i64)
+                .filter(|c| *c != 0);
+            let name = "bash";
+            b.call(None, name, &serde_json::json!({ "command": command }), ts);
+            let shown = match code {
+                Some(c) => serde_json::json!({ "output": output, "exit_code": c }).to_string(),
+                None => output.to_string(),
+            };
+            b.result(None, &shown, false, ts);
+        }
+        _ => {}
     }
 }
 
@@ -180,7 +186,7 @@ pub fn parse(text: &str, mtime_ms: i64) -> Option<Parsed> {
         }
     }
 
-    let mut turns = Vec::new();
+    let mut builder = TurnBuilder::default();
     let mut last_ts = header_ms.unwrap_or(mtime_ms);
     for i in path {
         let e = &entries[i];
@@ -195,9 +201,10 @@ pub fn parse(text: &str, mtime_ms: i64) -> Option<Parsed> {
             last_ts = ms;
         }
         if let Some(m) = e.get("message") {
-            turns.extend(turns_of_message(m, last_ts));
+            add_message(&mut builder, m, last_ts);
         }
     }
+    let turns = builder.turns;
     let title = name.map_or_else(|| title_from_turns(&turns), |n| clean_title(&n));
     Some(Parsed {
         session: Session {
@@ -461,6 +468,7 @@ impl Adapter for PiAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Turn;
 
     fn entry(v: Value) -> String {
         format!("{v}\n")
@@ -533,14 +541,55 @@ mod tests {
         let texts: Vec<&str> = s.turns.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts[0], "q1");
         assert_eq!(texts[1], "answer");
-        assert!(texts[2].starts_with("[external_agent_tool_call: read]\ninput: {\"path\":\"/a\"}"));
+        assert_eq!(
+            texts[2],
+            "Tool: read\n```\n{\"path\":\"/a\"}\n```\nResult (error):\n```\ndata\n```"
+        );
+        assert_eq!(texts[3], "q2");
+        assert_eq!(texts.len(), 4);
+        assert_eq!(s.turns[0].ts_ms, 1000);
+    }
+
+    #[test]
+    fn bash_executions_and_consecutive_tool_calls_render_without_empty_turns() {
+        let mut t = header();
+        t += &msg(
+            "a1",
+            Value::Null,
+            json!({"role": "user", "content": "go", "timestamp": 1}),
+        );
+        t += &msg(
+            "a2",
+            json!("a1"),
+            json!({"role": "assistant", "content": [
+            {"type": "toolCall", "id": "x", "name": "ls", "arguments": {"command": "ls"}},
+            {"type": "toolCall", "id": "y", "name": "pwd", "arguments": {"command": "pwd"}}], "timestamp": 2}),
+        );
+        t += &msg(
+            "a3",
+            json!("a2"),
+            json!({"role": "toolResult", "toolCallId": "y", "content": [{"type": "text", "text": "/w"}], "timestamp": 3}),
+        );
+        t += &msg(
+            "a4",
+            json!("a3"),
+            json!({"role": "toolResult", "toolCallId": "x", "content": [{"type": "text", "text": "f"}], "timestamp": 4}),
+        );
+        t += &msg(
+            "a5",
+            json!("a4"),
+            json!({"role": "bashExecution", "command": "false", "output": "", "exitCode": 1, "timestamp": 5}),
+        );
+        let s = parse(&t, 0).unwrap().session;
+        let texts: Vec<&str> = s.turns.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts[1], "Tool: ls\n```\nls\n```\nResult:\n```\nf\n```");
+        assert_eq!(texts[2], "Tool: pwd\n```\npwd\n```\nResult:\n```\n/w\n```");
         assert_eq!(
             texts[3],
-            "[external_agent_tool_result: error]\ndata\n[/external_agent_tool_result]"
+            "Tool: bash\n```\nfalse\n```\nResult (exit code 1): (no output)"
         );
-        assert_eq!(texts[4], "q2");
-        assert_eq!(texts.len(), 5);
-        assert_eq!(s.turns[0].ts_ms, 1000);
+        assert_eq!(texts.len(), 4);
+        assert!(texts.iter().all(|t| !t.is_empty()));
     }
 
     #[test]

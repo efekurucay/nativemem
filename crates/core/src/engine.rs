@@ -2108,6 +2108,64 @@ mod session_tests {
         }
     }
 
+    #[test]
+    fn codex_tool_activity_reads_the_same_in_claude_and_pi() {
+        let f = fx();
+        let path =
+            CodexHome::new(&f.root.join("codex")).add_rollout(TID, Path::new(CWD), CHAT, false);
+        let mut text = fs::read_to_string(&path).unwrap();
+        for l in [
+            serde_json::json!({"timestamp": "2026-11-10T10:00:01.500Z", "type": "response_item", "payload": {
+                "type": "custom_tool_call", "name": "exec", "call_id": "c1",
+                "input": "text(await tools.exec_command({cmd:\"cat notes.txt\",max_output_tokens:5000}));"}}),
+            serde_json::json!({"timestamp": "2026-11-10T10:00:01.600Z", "type": "response_item", "payload": {
+                "type": "custom_tool_call_output", "call_id": "c1",
+                "output": "{\"chunk_id\":\"1\",\"wall_time_seconds\":0.2,\"exit_code\":1,\"original_token_count\":3,\"output\":\"no such file\"}"}}),
+        ] {
+            text.push_str(&format!("{l}\n"));
+        }
+        fs::write(&path, text).unwrap();
+        f.sync();
+        let want =
+            "Tool: exec\n```\ncat notes.txt\n```\nResult (exit code 1):\n```\nno such file\n```";
+        let original = f.sessions(&f.codex).remove(0);
+        for adapter in [&f.claude as &dyn Adapter, &f.pi] {
+            let replica = f.replica_of(adapter);
+            let s = parsed(&replica);
+            assert_eq!(s.turns.iter().filter(|t| t.text == want).count(), 1);
+            assert!(s
+                .turns
+                .iter()
+                .all(|t| !t.text.is_empty() && !t.text.contains("external_agent")));
+            assert_eq!(
+                content_hash(&replica.item),
+                content_hash(&original.item),
+                "stable across a re-read"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_replicas_are_refreshed_on_a_revision_bump_too() {
+        let f = fx();
+        PiHome::new(&f.root.join("pi")).add_session(Path::new(CWD), "p1", Some("Pi chat"), CHAT);
+        f.sync();
+        let key = ItemKey {
+            origin: AgentId::new("pi"),
+            native_id: "--w-app--/2026-11-10T10-00-00-000Z_p1.jsonl".into(),
+        };
+        let mut row = f
+            .ledger
+            .get_replica(&key, &AgentId::new("claude"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.revision, 1);
+        row.revision = 0;
+        f.ledger.upsert_replica(&row).unwrap();
+        assert!(f.plan().to_string().starts_with("~ claude"));
+        f.sync();
+    }
+
     fn set_revision(f: &Fx, revision: u32) -> crate::ledger::ReplicaRow {
         let key = ItemKey {
             origin: AgentId::new("claude"),
@@ -2132,7 +2190,7 @@ mod session_tests {
         assert!(!text.contains("\"api\":\"nativemem\""), "{text}");
         assert!(!text.contains("model_change"));
         assert!(text.contains("\"api\":\"pi-virtual\""));
-        assert_eq!(set_revision(&f, 1).revision, 1);
+        assert_eq!(set_revision(&f, 2).revision, 2);
     }
 
     #[test]

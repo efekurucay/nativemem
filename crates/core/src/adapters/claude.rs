@@ -18,6 +18,8 @@ const INSTRUCTION_FILE: &str = "CLAUDE.md";
 const INDEX_FILE: &str = "MEMORY.md";
 const ORIGIN_KEY: &str = "nativemem_origin";
 const NEW_INDEX: &str = "# Memory Index\n\n";
+/// Bump when the written session format changes; unmodified replicas are then rewritten.
+const SESSION_WRITER_REVISION: u32 = 1;
 
 pub struct ClaudeAdapter {
     claude_home: PathBuf,
@@ -347,6 +349,14 @@ impl Adapter for ClaudeAdapter {
             (kind, scope),
             (Kind::Memory | Kind::Session, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
         )
+    }
+
+    fn writer_revision(&self, kind: Kind) -> u32 {
+        if kind == Kind::Session {
+            SESSION_WRITER_REVISION
+        } else {
+            0
+        }
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {

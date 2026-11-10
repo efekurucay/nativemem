@@ -50,9 +50,10 @@ Notes:
 
 Sessions travel Claude Code to Pi, Pi to Claude Code, Codex to Claude Code and Codex to Pi. Codex
 only sends: its own importer already brings Claude sessions in. A session is copied once, as a
-resumable transcript in the target agent's own format, with tool calls flattened to text and
-thinking dropped. The copy is refreshed only while you have not touched it and the original grew;
-once you continue it in its own agent it is left alone. A copy you delete is not recreated, edits
+resumable transcript in the target agent's own format, with each tool call and its result shown
+as one readable text block (`Tool: <name>`, the command or input, `Result:` and the output, both
+cut when long) and thinking dropped. The copy is refreshed only while you have not touched it and
+the original grew; once you continue it in its own agent it is left alone. A copy you delete is not recreated, edits
 never flow back, and deleting or pruning an original never removes copies. Copies carry a marker
 (Claude Code: an extra `nativemem_origin` key on the lines the tool writes; Pi: a
 `nativemem-origin` custom entry), so a lost ledger cannot turn a copy into an original. Sessions

@@ -1,6 +1,6 @@
-//! Claude Code transcripts: `projects/<dir>/<session id>.jsonl`. Reading follows Codex's own
-//! importer (user and assistant lines only, thinking and meta lines dropped, tool calls flattened
-//! to text); writing produces the smallest file Claude Code lists and resumes.
+//! Claude Code transcripts: `projects/<dir>/<session id>.jsonl`. Reading takes user and assistant
+//! lines in file order (thinking and meta lines dropped, tool activity merged into text turns);
+//! writing produces the smallest file Claude Code lists and resumes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,8 +11,8 @@ use crate::error::{Error, Result};
 use crate::model::{AgentId, ItemKey};
 use crate::session::{
     clean_title, derived_uuid, format_iso_ms, join_user_blocks, marker_text, parse_iso_ms,
-    parse_marker, result_content_text, title_from_turns, too_large_reason, tool_call_text,
-    tool_result_text, truncate_chars, Role, Session, SessionOptions, SessionScan, Source, Turn,
+    parse_marker, result_content_text, title_from_turns, too_large_reason, truncate_chars, Role,
+    Session, SessionOptions, SessionScan, Source, TurnBuilder,
 };
 
 /// Extra top-level key on every line a replica is written with. Claude Code reads lines by
@@ -112,55 +112,49 @@ fn sorted_entries(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(v)
 }
 
-/// Turns of one `user` line: a tool-result-only line becomes assistant text, any other array
-/// becomes one user turn.
-fn user_turns(content: &Value, ts: i64) -> Vec<Turn> {
+/// A tool-result-only user line adds the results to their calls; any other array becomes one
+/// user turn.
+fn add_user(b: &mut TurnBuilder, content: &Value, ts: i64) {
     match content {
-        Value::String(s) if !s.is_empty() => vec![Turn::new(Role::User, s.as_str(), ts)],
+        Value::String(s) => b.text(Role::User, s.as_str(), ts),
         Value::Array(blocks) => {
             let is_result =
                 |b: &Value| b.get("type").and_then(Value::as_str) == Some("tool_result");
             if !blocks.is_empty() && blocks.iter().all(is_result) {
-                return blocks
-                    .iter()
-                    .map(|b| {
-                        let text = result_content_text(b.get("content").unwrap_or(&Value::Null));
-                        let is_error = b.get("is_error").and_then(Value::as_bool) == Some(true);
-                        Turn::new(Role::Assistant, tool_result_text(&text, is_error), ts)
-                    })
-                    .collect();
-            }
-            let text = join_user_blocks(blocks);
-            if text.is_empty() {
-                Vec::new()
+                for block in blocks {
+                    let text = result_content_text(block.get("content").unwrap_or(&Value::Null));
+                    let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                    let id = block.get("tool_use_id").and_then(Value::as_str);
+                    b.result(id, &text, is_error, ts);
+                }
             } else {
-                vec![Turn::new(Role::User, text, ts)]
+                b.text(Role::User, join_user_blocks(blocks), ts);
             }
         }
-        _ => Vec::new(),
+        _ => {}
     }
 }
 
-fn assistant_turns(content: &Value, ts: i64) -> Vec<Turn> {
+fn add_assistant(b: &mut TurnBuilder, content: &Value, ts: i64) {
     match content {
-        Value::String(s) if !s.is_empty() => vec![Turn::new(Role::Assistant, s.as_str(), ts)],
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|b| match b.get("type").and_then(Value::as_str) {
-                Some("text") => b
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .filter(|t| !t.is_empty())
-                    .map(|t| Turn::new(Role::Assistant, t, ts)),
-                Some("tool_use") => {
-                    let name = b.get("name").and_then(Value::as_str).unwrap_or("tool");
-                    let input = b.get("input").unwrap_or(&Value::Null);
-                    Some(Turn::new(Role::Assistant, tool_call_text(name, input), ts))
+        Value::String(s) => b.text(Role::Assistant, s.as_str(), ts),
+        Value::Array(blocks) => {
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                        b.text(Role::Assistant, text, ts);
+                    }
+                    Some("tool_use") => {
+                        let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        let id = block.get("id").and_then(Value::as_str);
+                        b.call(id, name, block.get("input").unwrap_or(&Value::Null), ts);
+                    }
+                    _ => {}
                 }
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
+            }
+        }
+        _ => {}
     }
 }
 
@@ -169,7 +163,7 @@ pub fn parse(text: &str, stem: &str, mtime_ms: i64) -> Parsed {
     let (mut custom, mut ai, mut last_prompt) = (None, None, None);
     let (mut cwd, mut origin) = (None, None);
     let mut entrypoint: Option<String> = None;
-    let mut turns: Vec<Turn> = Vec::new();
+    let mut builder = TurnBuilder::default();
     let mut last_ts = None;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -205,14 +199,15 @@ pub fn parse(text: &str, stem: &str, mtime_ms: i64) -> Parsed {
                     .and_then(|m| m.get("content"))
                     .unwrap_or(&Value::Null);
                 if kind == "user" {
-                    turns.extend(user_turns(content, ts));
+                    add_user(&mut builder, content, ts);
                 } else {
-                    turns.extend(assistant_turns(content, ts));
+                    add_assistant(&mut builder, content, ts);
                 }
             }
             _ => {}
         }
     }
+    let turns = builder.turns;
     let has_cwd = cwd.is_some();
     let title = [custom, ai, last_prompt]
         .into_iter()
@@ -304,6 +299,7 @@ pub fn render(session: &Session, key: &ItemKey, uuid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Turn;
 
     fn line(v: Value) -> String {
         format!("{v}\n")
@@ -361,26 +357,16 @@ mod tests {
         let roles: Vec<_> = s.turns.iter().map(|t| t.role).collect();
         assert_eq!(
             roles,
-            [
-                Role::User,
-                Role::Assistant,
-                Role::Assistant,
-                Role::Assistant,
-                Role::User
-            ]
+            [Role::User, Role::Assistant, Role::Assistant, Role::User]
         );
         assert_eq!(s.turns[0].text, "question");
         assert_eq!(s.turns[1].text, "answer");
         assert_eq!(
             s.turns[2].text,
-            "[external_agent_tool_call: Bash]\ndescription: list\ncommand: ls\n[/external_agent_tool_call]"
+            "Tool: Bash\n```\nls\n```\nResult:\n```\na\nb\n```"
         );
         assert_eq!(
             s.turns[3].text,
-            "[external_agent_tool_result]\na\nb\n[/external_agent_tool_result]"
-        );
-        assert_eq!(
-            s.turns[4].text,
             "more\n\n[external unsupported block: image]"
         );
         assert_eq!(

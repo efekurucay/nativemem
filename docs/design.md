@@ -255,11 +255,16 @@ Codex is read only.
 
 - Neutral model (`core::session`): id, working directory, title, created and updated times, and an
   ordered list of turns (`user` or `assistant`, text, timestamp). Thinking blocks and provider
-  signatures are dropped. Tool calls and tool results are flattened to assistant text turns the way
-  Codex's own importer does it: `[external_agent_tool_call: <name>]` with `description:`, `command:`
-  and `file:` lines (or `input: <compact JSON>` when none exists), and `[external_agent_tool_result]`
-  (`: error` when the call failed). Results are cut at 4000 characters and call input at 2000, each
-  with a trailing `...` inside the limit. Images become `[external unsupported block: image]`.
+  signatures are dropped. Tool activity becomes one assistant text turn per call, call and result
+  together, so every source renders the same way in every target: a line `Tool: <name>`, a fenced
+  block with the essential input (the command for shell-like tools, compact JSON otherwise; cut at
+  600 characters), then `Result:` (`Result (exit code N):` for a non-zero exit, `Result (error):`
+  for a tool-reported error) with a fenced block of the output cut at 1500 characters. A cut adds a
+  line `… (N more characters)`. Codex's output wrapper (`{"output": ..., "exit_code": ...}`) and
+  JS-style calls such as `text(await tools.exec_command({cmd:"..."}))` are unwrapped to the command
+  and the output. A result is merged into the turn of its call by call id; a result without a call
+  stands alone, and empty text never makes a turn. Pi `bashExecution` messages render the same way.
+  Images become `[external unsupported block: image]`.
 - Engine item: kind `Session`, scope `Project(cwd)`, `name` = the session's own id, `description` =
   title, `body` = deterministic JSON of the neutral model. `native_id` is the path below the agent's
   session root (`<project dir>/<file>.jsonl`, `YYYY/MM/DD/rollout-....jsonl` for Codex). The content
@@ -297,9 +302,9 @@ Codex is read only.
   threads are skipped. Rollouts of sessions Codex imported (thread ids in
   `external_agent_session_imports.json`, or any rollout containing `<EXTERNAL SESSION IMPORTED>`) are
   never originals.
-- Claude Code: `projects/<dir>/<session id>.jsonl`. Reading follows the importer: `user` and
-  `assistant` lines in file order, `isMeta` and `isSidechain` lines dropped, one turn per content
-  block, a tool-result-only user line becomes assistant text. Title = last `custom-title`, else last
+- Claude Code: `projects/<dir>/<session id>.jsonl`. Reading takes `user` and
+  `assistant` lines in file order (the order Codex's importer uses), `isMeta` and `isSidechain` lines
+  dropped, one turn per text block; `tool_use` / `tool_result` blocks are merged as above. Title = last `custom-title`, else last
   `ai-title`, else last `last-prompt`, else the first user text. The cwd is the first `cwd` on any
   line. A replica is written to the project dir whose cwd matches (created with Claude's naming rule
   when absent) as `<uuid>.jsonl`, with the uuid derived from the origin so a refresh rewrites the
@@ -307,8 +312,8 @@ Codex is read only.
   (minimal required fields, `version`, `cwd`, `sessionId`, ISO timestamps), and a `last-prompt` line.
   The file mtime is set to the original's.
 - Pi: `sessions/--<cwd>--/<ISO ts>_<uuid>.jsonl` (header version 3). Reading takes the path from the
-  last entry to the root; `message` entries become turns (`toolCall` / `toolResult` flattened,
-  thinking dropped); title = last `session_info` name, else the first user text. A replica has the
+  last entry to the root; `message` entries become turns (`toolCall` / `toolResult` / `bashExecution`
+  merged as above, thinking dropped); title = last `session_info` name, else the first user text. A replica has the
   header, the marker entry, a `session_info` entry and one linear `message` entry per turn; the file
   name carries the creation time and a uuid derived from the origin. Pi restores the model a session
   recorded from the last `model_change` entry or the last assistant message that is not virtual, and

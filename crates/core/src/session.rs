@@ -13,10 +13,10 @@ use crate::model::{AgentId, Item, ItemKey, Kind, Observed, Scope};
 
 /// Sources larger than this are skipped and reported.
 pub const MAX_SOURCE_BYTES: u64 = 200 * 1024 * 1024;
-/// Tool result text is cut to this many characters (`...` included).
-pub const TOOL_RESULT_LIMIT: usize = 4000;
-/// Compact JSON of a tool call input is cut to this many characters (`...` included).
-pub const TOOL_INPUT_LIMIT: usize = 2000;
+/// Tool output shown in a turn is cut to this many characters.
+pub const TOOL_RESULT_LIMIT: usize = 1500;
+/// Tool input shown in a turn is cut to this many characters.
+pub const TOOL_INPUT_LIMIT: usize = 600;
 const TITLE_LIMIT: usize = 200;
 const UNTITLED: &str = "Untitled session";
 const IMAGE_PLACEHOLDER: &str = "[external unsupported block: image]";
@@ -245,52 +245,212 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     format!("{head}...")
 }
 
-fn non_empty_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
-    input.get(key)?.as_str().filter(|s| !s.is_empty())
+/// Tool activity is shown as one assistant text turn per call, call and result together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Ok,
+    /// Non-zero exit code.
+    Exit(i64),
+    /// The tool reported an error without an exit code.
+    Error,
 }
 
-/// A tool call as an assistant text turn, in the shape Codex's own importer uses.
-pub fn tool_call_text(name: &str, input: &Value) -> String {
-    let mut lines = vec![format!("[external_agent_tool_call: {name}]")];
-    let keyed = [
-        ("description", "description"),
-        ("command", "command"),
-        ("file", "file_path"),
-    ];
-    let mut any = false;
-    for (label, key) in keyed {
-        if let Some(v) = non_empty_str(input, key) {
-            lines.push(format!("{label}: {v}"));
-            any = true;
+/// Backtick fence long enough that `text` cannot close it.
+fn fenced(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for c in text.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}\n{text}\n{fence}")
+}
+
+/// `text` cut to `max` characters, with a one-line notice when something was cut.
+fn cut_block(text: &str, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return fenced(text);
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{}\n… ({} more characters)", fenced(&head), total - max)
+}
+
+/// The merged text of one tool call and, when known, its result.
+pub fn render_tool(name: &str, input: &str, result: Option<(&str, Outcome)>) -> String {
+    let mut out = format!("Tool: {name}");
+    if !input.is_empty() {
+        out.push('\n');
+        out.push_str(&cut_block(input, TOOL_INPUT_LIMIT));
+    }
+    if let Some((text, outcome)) = result {
+        let label = match outcome {
+            Outcome::Ok => "Result:".to_string(),
+            Outcome::Exit(code) => format!("Result (exit code {code}):"),
+            Outcome::Error => "Result (error):".to_string(),
+        };
+        out.push('\n');
+        out.push_str(&label);
+        if text.is_empty() {
+            out.push_str(" (no output)");
+        } else {
+            out.push('\n');
+            out.push_str(&cut_block(text, TOOL_RESULT_LIMIT));
         }
     }
-    if !any {
-        let compact = match input {
-            Value::String(raw) => raw.clone(),
-            other => serde_json::to_string(other).unwrap_or_default(),
-        };
-        lines.push(format!(
-            "input: {}",
-            truncate_chars(&compact, TOOL_INPUT_LIMIT)
-        ));
-    }
-    lines.push("[/external_agent_tool_call]".to_string());
-    lines.join("\n")
+    out
 }
 
-/// A tool result as an assistant text turn; the content line is left out when empty.
-pub fn tool_result_text(content: &str, is_error: bool) -> String {
-    let header = if is_error {
-        "[external_agent_tool_result: error]"
-    } else {
-        "[external_agent_tool_result]"
-    };
-    let mut lines = vec![header.to_string()];
-    if !content.is_empty() {
-        lines.push(truncate_chars(content, TOOL_RESULT_LIMIT));
+/// A JS string literal starting at the opening quote of `s`: its decoded value.
+fn js_string(s: &str) -> Option<String> {
+    let mut chars = s.chars();
+    let quote = chars.next().filter(|c| matches!(c, '"' | '\'' | '`'))?;
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if c == quote {
+            return Some(out);
+        }
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'u' => {
+                let hex: String = chars.by_ref().take(4).collect();
+                out.push(
+                    u32::from_str_radix(&hex, 16)
+                        .ok()
+                        .and_then(char::from_u32)?,
+                );
+            }
+            other => out.push(other),
+        }
     }
-    lines.push("[/external_agent_tool_result]".to_string());
-    lines.join("\n")
+    None
+}
+
+/// The `cmd` string of a JS-style call such as `text(await tools.exec_command({cmd:"ls"}))`.
+fn js_cmd(code: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(at) = code[from..].find("cmd") {
+        let start = from + at;
+        from = start + 3;
+        let rest = code[from..].trim_start_matches(['"', '\'']).trim_start();
+        if let Some(value) = rest.strip_prefix(':') {
+            if let Some(cmd) = js_string(value.trim_start()) {
+                return Some(cmd);
+            }
+        }
+    }
+    None
+}
+
+/// The essential input of a tool call: a shell command, or compact JSON.
+pub fn tool_input_text(input: &Value) -> String {
+    match input {
+        Value::String(raw) => js_cmd(raw).unwrap_or_else(|| raw.trim().to_string()),
+        Value::Null => String::new(),
+        Value::Object(map) => {
+            for key in ["command", "cmd"] {
+                match map.get(key) {
+                    Some(Value::String(c)) if !c.is_empty() => return c.clone(),
+                    Some(Value::Array(parts)) => {
+                        let words: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
+                        if words.len() >= 3 && matches!(words[1], "-c" | "-lc") {
+                            return words[2..].join(" ");
+                        }
+                        if !words.is_empty() {
+                            return words.join(" ");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            serde_json::to_string(input).unwrap_or_default()
+        }
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// A tool output with Codex's JSON wrapper removed: the `output` field and a non-zero exit code.
+pub fn unwrap_output(raw: &str) -> (String, Option<i64>) {
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(raw.trim()) {
+        if let Some(Value::String(output)) = map.get("output") {
+            let code = map
+                .get("exit_code")
+                .or_else(|| map.get("metadata").and_then(|m| m.get("exit_code")))
+                .and_then(Value::as_i64)
+                .filter(|c| *c != 0);
+            return (output.trim().to_string(), code);
+        }
+    }
+    (raw.trim().to_string(), None)
+}
+
+struct Pending {
+    id: Option<String>,
+    name: String,
+    input: String,
+    index: usize,
+}
+
+/// Collects turns and merges each tool result into the turn of its call.
+#[derive(Default)]
+pub struct TurnBuilder {
+    pub turns: Vec<Turn>,
+    pending: Vec<Pending>,
+}
+
+impl TurnBuilder {
+    /// A plain text turn; empty text adds nothing.
+    pub fn text(&mut self, role: Role, text: impl Into<String>, ts_ms: i64) {
+        let text = text.into();
+        if !text.is_empty() {
+            self.turns.push(Turn::new(role, text, ts_ms));
+        }
+    }
+
+    pub fn call(&mut self, id: Option<&str>, name: &str, input: &Value, ts_ms: i64) {
+        let input = tool_input_text(input);
+        self.pending.push(Pending {
+            id: id.map(str::to_string),
+            name: name.to_string(),
+            index: self.turns.len(),
+            input: input.clone(),
+        });
+        self.turns.push(Turn::new(
+            Role::Assistant,
+            render_tool(name, &input, None),
+            ts_ms,
+        ));
+    }
+
+    /// The result of the oldest open call with `id` (calls without an id pair among themselves). Without a
+    /// matching call it becomes a turn of its own.
+    pub fn result(&mut self, id: Option<&str>, raw: &str, is_error: bool, ts_ms: i64) {
+        let (text, code) = unwrap_output(raw);
+        let outcome = match (code, is_error) {
+            (Some(c), _) => Outcome::Exit(c),
+            (None, true) => Outcome::Error,
+            (None, false) => Outcome::Ok,
+        };
+        let at = self.pending.iter().position(|p| p.id.as_deref() == id);
+        match at {
+            Some(i) => {
+                let p = self.pending.remove(i);
+                self.turns[p.index].text = render_tool(&p.name, &p.input, Some((&text, outcome)));
+            }
+            None => self.turns.push(Turn::new(
+                Role::Assistant,
+                render_tool("result", "", Some((&text, outcome))),
+                ts_ms,
+            )),
+        }
+    }
 }
 
 /// Text of a content-block array the way a user turn is read: text blocks joined by a blank
@@ -544,48 +704,80 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_follows_importer_rules() {
-        let bash = json!({"description": "list", "command": "ls", "file_path": "/a", "x": 1});
-        assert_eq!(
-            tool_call_text("Bash", &bash),
-            "[external_agent_tool_call: Bash]\ndescription: list\ncommand: ls\nfile: /a\n[/external_agent_tool_call]"
+    fn merged_tool_turn_reads_like_a_conversation() {
+        let mut b = TurnBuilder::default();
+        b.call(
+            Some("c1"),
+            "exec_command",
+            &json!("text(await tools.exec_command({cmd:\"cat a\\nb\",max_output_tokens:5000}));"),
+            1,
         );
-        let edit = json!({"file_path": "/a", "old_string": "x"});
-        assert_eq!(
-            tool_call_text("Edit", &edit),
-            "[external_agent_tool_call: Edit]\nfile: /a\n[/external_agent_tool_call]"
+        b.text(Role::Assistant, "thinking aloud", 2);
+        b.result(
+            Some("c1"),
+            "{\"chunk_id\":\"x\",\"exit_code\":2,\"original_token_count\":4,\"output\":\"boom\\n\"}",
+            false,
+            3,
         );
-        let other = json!({"q": "é"});
+        assert_eq!(b.turns.len(), 2);
         assert_eq!(
-            tool_call_text("Search", &other),
-            "[external_agent_tool_call: Search]\ninput: {\"q\":\"é\"}\n[/external_agent_tool_call]"
+            b.turns[0].text,
+            "Tool: exec_command\n```\ncat a\nb\n```\nResult (exit code 2):\n```\nboom\n```"
         );
-        let empty_command = json!({"command": "", "q": 1});
-        assert!(tool_call_text("Bash", &empty_command).contains("input: "));
+        assert_eq!(b.turns[0].ts_ms, 1);
+        assert!(!b.turns[0].text.contains("external_agent"));
     }
 
     #[test]
-    fn tool_input_is_cut_at_2000_chars() {
-        let big = json!({ "q": "x".repeat(5000) });
-        let text = tool_call_text("Search", &big);
-        let input_line = text.lines().nth(1).unwrap();
-        let value = input_line.strip_prefix("input: ").unwrap();
-        assert_eq!(value.chars().count(), TOOL_INPUT_LIMIT);
-        assert!(value.ends_with("..."));
+    fn input_forms_reduce_to_the_essential_text() {
+        assert_eq!(
+            tool_input_text(&json!({"command": "ls -l", "description": "d"})),
+            "ls -l"
+        );
+        assert_eq!(
+            tool_input_text(&json!({"command": ["bash", "-lc", "echo hi"]})),
+            "echo hi"
+        );
+        assert_eq!(tool_input_text(&json!({"q": "é"})), "{\"q\":\"é\"}");
+        assert_eq!(tool_input_text(&json!("*** patch\n")), "*** patch");
+        assert_eq!(
+            tool_input_text(&json!("tools.exec({cmd: 'ls \\'x\\''})")),
+            "ls 'x'"
+        );
+        assert_eq!(tool_input_text(&Value::Null), "");
     }
 
     #[test]
-    fn tool_result_is_cut_at_4000_chars_and_flags_errors() {
-        let text = tool_result_text(&"y".repeat(9000), false);
-        let body = text.lines().nth(1).unwrap();
-        assert_eq!(body.chars().count(), TOOL_RESULT_LIMIT);
-        assert!(body.ends_with("..."));
-        let exact = tool_result_text(&"z".repeat(4000), false);
-        assert!(!exact.contains("..."));
-        assert_eq!(
-            tool_result_text("", true),
-            "[external_agent_tool_result: error]\n[/external_agent_tool_result]"
+    fn long_input_and_output_are_cut_with_a_notice() {
+        let t = render_tool(
+            "t",
+            &"i".repeat(700),
+            Some((&"o".repeat(1600), Outcome::Ok)),
         );
+        assert!(t.contains("… (100 more characters)"), "{t}");
+        assert_eq!(t.matches("… (").count(), 2);
+        assert!(t.contains(&"i".repeat(600)) && !t.contains(&"i".repeat(601)));
+        let exact = render_tool("t", "", Some((&"o".repeat(1500), Outcome::Ok)));
+        assert!(!exact.contains('…'));
+    }
+
+    #[test]
+    fn fence_outgrows_backticks_in_the_text() {
+        let t = render_tool("t", "echo ```", None);
+        assert!(t.contains("````\necho ```\n````"), "{t}");
+    }
+
+    #[test]
+    fn results_without_a_call_and_calls_without_a_result_still_render() {
+        let mut b = TurnBuilder::default();
+        b.result(Some("missing"), "plain output", true, 1);
+        b.call(Some("c"), "read", &json!({"path": "/a"}), 2);
+        assert_eq!(
+            b.turns[0].text,
+            "Tool: result\nResult (error):\n```\nplain output\n```"
+        );
+        assert_eq!(b.turns[1].text, "Tool: read\n```\n{\"path\":\"/a\"}\n```");
+        assert!(b.turns.iter().all(|t| !t.text.is_empty()));
     }
 
     #[test]
