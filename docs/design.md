@@ -47,7 +47,7 @@ resource kind later means adding an adapter or a `Kind` variant; the engine does
 ```rust
 pub struct AgentId(pub String);              // "claude", "codex", "opencode", "pi"
 pub enum Scope { Global, Project(PathBuf) }  // Project = absolute working directory
-pub enum Kind { Memory, Instruction }        // more kinds later
+pub enum Kind { Memory, Instruction, Session } // more kinds later
 
 pub struct Item {
     pub kind: Kind,
@@ -180,7 +180,7 @@ Root: `codex_home` (default `~/.codex`, honour `CODEX_HOME`).
   `--allow-mass-delete` lifts the guard.
 - Global flags / env for roots: `--claude-home`, `--codex-home`, `--opencode-home`, `--pi-home`,
   `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`, `NATIVEMEM_OPENCODE_HOME`,
-  `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`).
+  `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`) and `--session-days` (`NATIVEMEM_SESSION_DAYS`), `--exclude-automated-sessions` and `--no-sessions`.
 - Exit code 0 on success, 2 when conflicts or skipped writes remain, 1 on error.
 
 ## Testing rules (hard requirement)
@@ -246,3 +246,77 @@ repositories and are never read or written.
   command changes the body only for instruction items and answers code `invalid` when the submitted
   `name` or `description` differs from the current ones.
 - The `items --json` contract gains a `"kind"` field (`"memory"` or `"instruction"`) on every entry.
+
+## Chat sessions
+
+`Kind::Session`. One item is one chat session. Sessions are logs, not documents, so they follow a
+different policy from memory and instruction items. Claude Code and Pi read and write sessions;
+Codex is read only.
+
+- Neutral model (`core::session`): id, working directory, title, created and updated times, and an
+  ordered list of turns (`user` or `assistant`, text, timestamp). Thinking blocks and provider
+  signatures are dropped. Tool calls and tool results are flattened to assistant text turns the way
+  Codex's own importer does it: `[external_agent_tool_call: <name>]` with `description:`, `command:`
+  and `file:` lines (or `input: <compact JSON>` when none exists), and `[external_agent_tool_result]`
+  (`: error` when the call failed). Results are cut at 4000 characters and call input at 2000, each
+  with a trailing `...` inside the limit. Images become `[external unsupported block: image]`.
+- Engine item: kind `Session`, scope `Project(cwd)`, `name` = the session's own id, `description` =
+  title, `body` = deterministic JSON of the neutral model. `native_id` is the path below the agent's
+  session root (`<project dir>/<file>.jsonl`, `YYYY/MM/DD/rollout-....jsonl` for Codex). The content
+  hash of a session item is SHA-256 over cwd, title and every turn's role and text: ids and
+  timestamps are left out so a replica hashes like its original.
+- Policy (snapshot): a replica is created once per (original, target agent) and refreshed (rewritten,
+  old file backed up) only while it is unmodified (its current hash equals the ledger's) and the
+  original's hash changed. A replica edited or continued in its own agent is left alone from then on,
+  without a conflict note. A replica deleted by the user after it was written gets a tombstone, a
+  replica ledger row with an empty hash (no schema change), and is never recreated; a replica file
+  that exists but was not scanned is not treated as deleted. Edits and deletions never travel back to
+  the original, a missing original never removes replicas (Claude Code prunes old transcripts by
+  itself, which must not erase history elsewhere), and replicas are never originals, so a replica is
+  never replicated again. Ledger rows adopt marked replicas after a lost ledger instead of writing.
+  Session items are left out of the mass-delete total.
+- Scope: every session of every age and kind is synced by default, so all agents list the same
+  sessions in the same order. A session needs at least one user turn. Limits are opt-in:
+  `--session-days <N>` (env `NATIVEMEM_SESSION_DAYS`) keeps only sessions whose file was modified in
+  the last N days, applied to the file's mtime before anything is parsed; `--exclude-automated-sessions`
+  leaves out automated sessions; `--no-sessions` turns session sync off. A replica gets the mtime of
+  its original and the original's title, which keeps the relative order. Sources over 200 MB are
+  skipped and listed by `status`, as are sessions without a resolvable cwd. A scan of about 700
+  sources of 500 KB each takes about 2 s without changes, so there is no scan cache.
+- Automated sessions (structural markers only; a missing or unknown marker counts as interactive):
+  Claude Code when the first `user` / `assistant` line's `entrypoint` starts with `sdk` (`sdk-cli`,
+  `sdk-ts`); Codex when `session_meta.source` is an object (sub-agent), `parent_thread_id` is set,
+  `thread_source` is `subagent`, `source` is `exec`, or `originator` is `codex_exec` or `Claude Code`.
+  Pi files carry no such marker. `status` counts them per agent either way.
+- Codex is a read-only source (`supports(Session)` is false, so it never receives sessions): Codex's
+  own importer already brings Claude sessions into Codex. Originals come from
+  `sessions/YYYY/MM/DD/rollout-*.jsonl`: text turns from the event stream (`item_completed`
+  `UserMessage` / `AgentMessage`, or legacy `user_message` / `agent_message`), which never carries the
+  context Codex injects as user messages, tool calls and results from `function_call`,
+  `custom_tool_call` and their outputs; title = first user text; cwd from `session_meta`; sub-agent
+  threads are skipped. Rollouts of sessions Codex imported (thread ids in
+  `external_agent_session_imports.json`, or any rollout containing `<EXTERNAL SESSION IMPORTED>`) are
+  never originals.
+- Claude Code: `projects/<dir>/<session id>.jsonl`. Reading follows the importer: `user` and
+  `assistant` lines in file order, `isMeta` and `isSidechain` lines dropped, one turn per content
+  block, a tool-result-only user line becomes assistant text. Title = last `custom-title`, else last
+  `ai-title`, else last `last-prompt`, else the first user text. The cwd is the first `cwd` on any
+  line. A replica is written to the project dir whose cwd matches (created with Claude's naming rule
+  when absent) as `<uuid>.jsonl`, with the uuid derived from the origin so a refresh rewrites the
+  same file: a `custom-title` line, one `user` / `assistant` line per turn chained by `parentUuid`
+  (minimal required fields, `version`, `cwd`, `sessionId`, ISO timestamps), and a `last-prompt` line.
+  The file mtime is set to the original's.
+- Pi: `sessions/--<cwd>--/<ISO ts>_<uuid>.jsonl` (header version 3). Reading takes the path from the
+  last entry to the root; `message` entries become turns (`toolCall` / `toolResult` flattened,
+  thinking dropped); title = last `session_info` name, else the first user text. A replica has the
+  header, the marker entry, a `session_info` entry and one linear `message` entry per turn; the file
+  name carries the creation time and a uuid derived from the origin.
+- Replica markers (survive a lost ledger, so a replica is never mistaken for an original):
+  - Claude: an extra top-level key `nativemem_origin: "<agent>:<native id>"` on every line the tool
+    writes. Claude reads lines by their known keys, so the key is ignored, and the file stays a
+    valid transcript; a continued replica keeps it because Claude only appends.
+  - Pi: a `custom` entry with `customType: "nativemem-origin"` and `data.origin`; Pi keeps custom
+    entries out of the model context.
+- `items` leaves sessions out unless `--kind session` is passed and never prints their bodies;
+  `delete` and `edit` answer code `unsupported` for session ids; `status` counts sessions per agent
+  apart from memory and instruction entries (`sessions` in `--json`).

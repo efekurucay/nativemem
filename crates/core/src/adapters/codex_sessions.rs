@@ -1,0 +1,422 @@
+//! Codex rollouts, read only: `sessions/YYYY/MM/DD/rollout-<ts>-<thread id>.jsonl`. Text turns
+//! come from the event stream (it never carries the harness context Codex injects as user
+//! messages), tool calls and results from the `response_item` stream. Sessions that Codex
+//! imported from another agent are not originals and are left out.
+
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+use crate::error::{Error, Result};
+use crate::model::AgentId;
+use crate::session::{
+    parse_iso_ms, title_from_turns, too_large_reason, tool_call_text, tool_result_text, Role,
+    Session, SessionOptions, SessionScan, Source, Turn,
+};
+
+const IMPORT_LEDGER: &str = "external_agent_session_imports.json";
+/// The text Codex's importer appends as the last assistant event of an imported session.
+pub const IMPORT_MARKER: &str = "<EXTERNAL SESSION IMPORTED>";
+const MAX_DEPTH: usize = 4;
+
+pub struct CodexSessions {
+    home: PathBuf,
+    options: SessionOptions,
+}
+
+/// What one rollout holds.
+pub struct Parsed {
+    pub session: Session,
+    pub has_cwd: bool,
+    /// Sub-agent thread, headless `exec` run, or a thread another agent started.
+    pub automated: bool,
+}
+
+impl CodexSessions {
+    pub fn new(home: PathBuf, options: SessionOptions) -> Self {
+        CodexSessions { home, options }
+    }
+
+    /// Thread ids Codex's importer recorded in its ledger.
+    fn imported_ids(&self) -> HashSet<String> {
+        let Ok(text) = fs::read_to_string(self.home.join(IMPORT_LEDGER)) else {
+            return HashSet::new();
+        };
+        let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+            return HashSet::new();
+        };
+        doc.get("records")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.get("imported_thread_id")?.as_str().map(str::to_string))
+            .collect()
+    }
+
+    pub fn scan(&self, agent: &AgentId) -> Result<SessionScan> {
+        let mut out = SessionScan::default();
+        let root = self.home.join("sessions");
+        let mut files = Vec::new();
+        collect_rollouts(&root, 0, &mut files)?;
+        files.sort();
+        let imported = self.imported_ids();
+        for path in files {
+            let native_id = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let mtime_ms = match self.options.window().check(&path)? {
+                Source::Outside => continue,
+                Source::TooLarge(bytes) => {
+                    out.skipped.push((native_id, too_large_reason(bytes)));
+                    continue;
+                }
+                Source::Read { mtime_ms } => mtime_ms,
+            };
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let thread_id = thread_id_of(&stem);
+            if imported.contains(thread_id) {
+                continue;
+            }
+            let bytes = fs::read(&path).map_err(|e| Error::io(&path, e))?;
+            let text = String::from_utf8_lossy(&bytes);
+            if text.contains(IMPORT_MARKER) {
+                continue;
+            }
+            let Some(parsed) = parse(&text, thread_id, mtime_ms) else {
+                continue;
+            };
+            if !parsed.session.has_user_turn() {
+                continue;
+            }
+            if parsed.automated {
+                out.automated += 1;
+                if self.options.exclude_automated {
+                    continue;
+                }
+            }
+            if parsed.has_cwd {
+                out.observed
+                    .push(parsed.session.observed(agent, native_id, path, None));
+            } else {
+                out.skipped
+                    .push((native_id, "no cwd in session_meta".to_string()));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The UUID at the end of `rollout-<ts>-<uuid>`.
+fn thread_id_of(stem: &str) -> &str {
+    stem.get(stem.len().saturating_sub(36)..).unwrap_or(stem)
+}
+
+fn collect_rollouts(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::io(dir, e)),
+    };
+    for entry in entries {
+        let path = entry.map_err(|e| Error::io(dir, e))?.path();
+        if path.is_dir() {
+            if depth < MAX_DEPTH {
+                collect_rollouts(&path, depth + 1, out)?;
+            }
+        } else if path.is_file() {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if name.starts_with("rollout-") && name.ends_with(".jsonl") {
+                out.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Text of an output value: a string, or an array of parts that carry `text`.
+fn output_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn item_text(item: &Value) -> String {
+    item.get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default()
+}
+
+/// Parses a rollout. `None` for rollouts without `session_meta`.
+pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
+    let mut meta: Option<Value> = None;
+    let mut turns: Vec<Turn> = Vec::new();
+    let mut last_ts = mtime_ms;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(ms) = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_iso_ms)
+        {
+            last_ts = ms;
+        }
+        let Some(payload) = v.get("payload") else {
+            continue;
+        };
+        let kind = payload.get("type").and_then(Value::as_str);
+        let push = |turns: &mut Vec<Turn>, role: Role, text: String| {
+            let dup = turns
+                .last()
+                .is_some_and(|t| t.role == role && t.text == text);
+            if !text.is_empty() && !dup {
+                turns.push(Turn::new(role, text, last_ts));
+            }
+        };
+        match (v.get("type").and_then(Value::as_str), kind) {
+            (Some("session_meta"), _) => meta = meta.or_else(|| Some(payload.clone())),
+            (Some("event_msg"), Some("user_message")) => {
+                let msg = payload.get("message").and_then(Value::as_str);
+                push(&mut turns, Role::User, msg.unwrap_or_default().to_string());
+            }
+            (Some("event_msg"), Some("agent_message")) => {
+                let msg = payload.get("message").and_then(Value::as_str);
+                push(
+                    &mut turns,
+                    Role::Assistant,
+                    msg.unwrap_or_default().to_string(),
+                );
+            }
+            (Some("event_msg"), Some("item_completed")) => {
+                let item = payload.get("item").unwrap_or(&Value::Null);
+                match item.get("type").and_then(Value::as_str) {
+                    Some("UserMessage") => push(&mut turns, Role::User, item_text(item)),
+                    Some("AgentMessage") => push(&mut turns, Role::Assistant, item_text(item)),
+                    _ => {}
+                }
+            }
+            (Some("response_item"), Some("function_call")) => {
+                let name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool");
+                let raw = payload
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let input = serde_json::from_str::<Value>(raw)
+                    .unwrap_or_else(|_| Value::String(raw.to_string()));
+                push(&mut turns, Role::Assistant, tool_call_text(name, &input));
+            }
+            (Some("response_item"), Some("custom_tool_call")) => {
+                let name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool");
+                let input = payload.get("input").cloned().unwrap_or(Value::Null);
+                push(&mut turns, Role::Assistant, tool_call_text(name, &input));
+            }
+            (Some("response_item"), Some("function_call_output" | "custom_tool_call_output")) => {
+                let out = output_text(payload.get("output").unwrap_or(&Value::Null));
+                push(&mut turns, Role::Assistant, tool_result_text(&out, false));
+            }
+            _ => {}
+        }
+    }
+    let meta = meta?;
+    let text_of = |key: &str| meta.get(key).and_then(Value::as_str);
+    let automated = meta.get("source").is_some_and(|s| !s.is_string())
+        || meta.get("parent_thread_id").is_some_and(|p| !p.is_null())
+        || text_of("source") == Some("exec")
+        || text_of("thread_source") == Some("subagent")
+        || matches!(text_of("originator"), Some("codex_exec" | "Claude Code"));
+    let cwd = meta
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty());
+    let id = meta
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or(thread_id)
+        .to_string();
+    let created = meta
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_iso_ms)
+        .or_else(|| turns.first().map(|t| t.ts_ms))
+        .unwrap_or(mtime_ms);
+    Some(Parsed {
+        has_cwd: cwd.is_some(),
+        automated,
+        session: Session {
+            id,
+            cwd: PathBuf::from(cwd.unwrap_or_default()),
+            title: title_from_turns(&turns),
+            created_ms: created,
+            updated_ms: mtime_ms,
+            turns,
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn line(ts: &str, kind: &str, payload: Value) -> String {
+        format!(
+            "{}\n",
+            json!({"timestamp": ts, "type": kind, "payload": payload})
+        )
+    }
+
+    fn meta(extra: Value) -> String {
+        let mut p = json!({"id": "tid", "cwd": "/w/app", "timestamp": "2026-11-10T09:00:00.000Z", "source": "cli"});
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        line("2026-11-10T09:00:00.000Z", "session_meta", p)
+    }
+
+    #[test]
+    fn reads_events_and_tool_items_but_not_injected_context() {
+        let mut t = meta(json!({}));
+        t += &line(
+            "2026-11-10T09:00:01.000Z",
+            "response_item",
+            json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>x"}]}),
+        );
+        t += &line(
+            "2026-11-10T09:00:02.000Z",
+            "event_msg",
+            json!({"type": "item_completed", "item": {"type": "UserMessage", "content": [{"type": "text", "text": "fix the bug"}]}}),
+        );
+        t += &line(
+            "2026-11-10T09:00:03.000Z",
+            "event_msg",
+            json!({"type": "item_completed", "item": {"type": "AgentMessage", "content": [{"type": "Text", "text": "looking"}]}}),
+        );
+        t += &line(
+            "2026-11-10T09:00:04.000Z",
+            "response_item",
+            json!({"type": "function_call", "name": "shell", "arguments": "{\"command\":\"ls\"}", "call_id": "c1"}),
+        );
+        t += &line(
+            "2026-11-10T09:00:05.000Z",
+            "response_item",
+            json!({"type": "function_call_output", "call_id": "c1", "output": "a b"}),
+        );
+        t += &line(
+            "2026-11-10T09:00:06.000Z",
+            "response_item",
+            json!({"type": "custom_tool_call", "name": "apply_patch", "input": "*** patch", "call_id": "c2"}),
+        );
+        t += &line(
+            "2026-11-10T09:00:07.000Z",
+            "response_item",
+            json!({"type": "custom_tool_call_output", "call_id": "c2", "output": [{"type": "input_text", "text": "ok"}]}),
+        );
+        t += &line(
+            "2026-11-10T09:00:08.000Z",
+            "event_msg",
+            json!({"type": "agent_message", "message": "done"}),
+        );
+        t += &line(
+            "2026-11-10T09:00:09.000Z",
+            "event_msg",
+            json!({"type": "token_count"}),
+        );
+        let p = parse(&t, "fallback", 5).unwrap();
+        assert!(p.has_cwd);
+        let s = p.session;
+        assert_eq!(s.id, "tid");
+        assert_eq!(s.title, "fix the bug");
+        let texts: Vec<&str> = s.turns.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts[0], "fix the bug");
+        assert_eq!(texts[1], "looking");
+        assert_eq!(
+            texts[2],
+            "[external_agent_tool_call: shell]\ncommand: ls\n[/external_agent_tool_call]"
+        );
+        assert_eq!(
+            texts[3],
+            "[external_agent_tool_result]\na b\n[/external_agent_tool_result]"
+        );
+        assert_eq!(texts[4], "[external_agent_tool_call: apply_patch]\ninput: *** patch\n[/external_agent_tool_call]");
+        assert_eq!(
+            texts[5],
+            "[external_agent_tool_result]\nok\n[/external_agent_tool_result]"
+        );
+        assert_eq!(texts[6], "done");
+        assert_eq!(s.turns.len(), 7);
+        assert_eq!(s.turns[0].role, Role::User);
+        assert_eq!(
+            s.turns[0].ts_ms,
+            parse_iso_ms("2026-11-10T09:00:02.000Z").unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_events_work_and_automated_runs_are_flagged() {
+        let mut t = meta(json!({}));
+        t += &line(
+            "2026-11-10T09:00:02.000Z",
+            "event_msg",
+            json!({"type": "user_message", "message": "hello"}),
+        );
+        t += &line(
+            "2026-11-10T09:00:03.000Z",
+            "event_msg",
+            json!({"type": "agent_message", "message": "hi"}),
+        );
+        assert_eq!(parse(&t, "x", 0).unwrap().session.turns.len(), 2);
+        assert!(!parse(&t, "x", 0).unwrap().automated);
+        let automated = |extra: Value| parse(&meta(extra), "x", 0).unwrap().automated;
+        assert!(automated(json!({"source": {"subagent": {}}})));
+        assert!(automated(json!({"parent_thread_id": "p"})));
+        assert!(automated(json!({"source": "exec"})));
+        assert!(automated(json!({"thread_source": "subagent"})));
+        assert!(automated(json!({"originator": "codex_exec"})));
+        assert!(automated(json!({"originator": "Claude Code"})));
+        assert!(!automated(
+            json!({"originator": "codex-tui", "thread_source": "user"})
+        ));
+        assert!(!automated(
+            json!({"source": "vscode", "originator": "Codex Desktop"})
+        ));
+        assert!(parse("", "x", 0).is_none());
+    }
+
+    #[test]
+    fn thread_id_is_the_trailing_uuid() {
+        assert_eq!(
+            thread_id_of("rollout-2026-11-10T09-00-00-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"),
+            "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+        );
+    }
+}

@@ -7,11 +7,13 @@ use clap::{Parser, Subcommand};
 use nativemem_core::adapters::agents_file::AgentsFileAdapter;
 use nativemem_core::adapters::claude::ClaudeAdapter;
 use nativemem_core::adapters::codex::CodexAdapter;
+use nativemem_core::adapters::pi::PiAdapter;
 use nativemem_core::engine::{self, Action, ApplyOptions, Note};
 use nativemem_core::error::{Error, Result};
 use nativemem_core::fsx::BackupSession;
 use nativemem_core::ledger::Ledger;
 use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Kind, Observed, Scope};
+use nativemem_core::session::{is_session_id, SessionOptions};
 use serde_json::{json, Value};
 
 #[cfg(target_os = "macos")]
@@ -39,6 +41,15 @@ struct Cli {
     /// Ledger and backup directory [default: ~/.nativemem]
     #[arg(long, global = true, env = "NATIVEMEM_STATE_DIR")]
     state_dir: Option<PathBuf>,
+    /// Only sync chat sessions updated in the last N days [default: all]
+    #[arg(long, global = true, env = "NATIVEMEM_SESSION_DAYS")]
+    session_days: Option<u32>,
+    /// Leave headless runs and sub-agent sessions out of session sync
+    #[arg(long, global = true)]
+    exclude_automated_sessions: bool,
+    /// Turn chat session sync off
+    #[arg(long, global = true)]
+    no_sessions: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -64,6 +75,9 @@ enum Command {
     },
     /// List every entry found in the agents' native stores
     Items {
+        /// Only entries of this kind; sessions are listed only when asked for
+        #[arg(long, value_parser = ["memory", "instruction", "session"])]
+        kind: Option<String>,
         /// Print one JSON document
         #[arg(long)]
         json: bool,
@@ -201,23 +215,38 @@ struct Agents {
     claude: Option<ClaudeAdapter>,
     codex: Option<CodexAdapter>,
     opencode: Option<AgentsFileAdapter>,
-    pi: Option<AgentsFileAdapter>,
+    pi: Option<PiAdapter>,
 }
 
 impl Agents {
-    fn open(roots: &Roots, backups: &BackupSession) -> Self {
+    fn open(roots: &Roots, backups: &BackupSession, sessions: Option<SessionOptions>) -> Self {
         let state = || roots.state.clone();
         let present = |dir: &Path| dir.is_dir();
-        let instruction_only = |id: &str, dir: &PathBuf| {
-            present(dir).then(|| AgentsFileAdapter::new(id, dir.clone(), state(), backups.clone()))
-        };
         Agents {
-            claude: present(&roots.claude)
-                .then(|| ClaudeAdapter::new(roots.claude.clone(), state(), backups.clone())),
-            codex: present(&roots.codex)
-                .then(|| CodexAdapter::new(roots.codex.clone(), state(), backups.clone())),
-            opencode: instruction_only("opencode", &roots.opencode),
-            pi: instruction_only("pi", &roots.pi),
+            claude: present(&roots.claude).then(|| {
+                let a = ClaudeAdapter::new(roots.claude.clone(), state(), backups.clone());
+                match sessions {
+                    Some(o) => a.with_sessions(o),
+                    None => a,
+                }
+            }),
+            codex: present(&roots.codex).then(|| {
+                let a = CodexAdapter::new(roots.codex.clone(), state(), backups.clone());
+                match sessions {
+                    Some(o) => a.with_sessions(o),
+                    None => a,
+                }
+            }),
+            opencode: present(&roots.opencode).then(|| {
+                AgentsFileAdapter::new("opencode", roots.opencode.clone(), state(), backups.clone())
+            }),
+            pi: present(&roots.pi).then(|| {
+                let a = PiAdapter::new(roots.pi.clone(), state(), backups.clone());
+                match sessions {
+                    Some(o) => a.with_sessions(o),
+                    None => a,
+                }
+            }),
         }
     }
 
@@ -297,8 +326,13 @@ fn status(roots: &Roots, present: &Agents, json: bool) -> Result<()> {
     let mut agents = Vec::new();
     for a in present.all() {
         let observed = a.scan()?;
-        let replicas = observed.iter().filter(|o| o.replica_of.is_some()).count();
-        let originals = observed.len() - replicas;
+        let sessions = observed
+            .iter()
+            .filter(|o| o.item.kind == Kind::Session)
+            .count();
+        let entries = || observed.iter().filter(|o| o.item.kind != Kind::Session);
+        let replicas = entries().filter(|o| o.replica_of.is_some()).count();
+        let originals = entries().count() - replicas;
         // The prefix is only used by the human output.
         let mut skipped: Vec<(&str, String, String)> = Vec::new();
         if let Some(claude) = present
@@ -326,25 +360,46 @@ fn status(roots: &Roots, present: &Agents, json: bool) -> Result<()> {
         {
             skipped.extend(codex.skipped()?.into_iter().map(|(l, r)| ("", l, r)));
         }
+        let report = match a.id().as_str() {
+            "claude" => present.claude.as_ref().map(|c| c.session_report()),
+            "codex" => present.codex.as_ref().map(|c| c.session_report()),
+            "pi" => present.pi.as_ref().map(|c| c.session_report()),
+            _ => None,
+        };
+        let mut automated = 0;
+        if let Some(report) = report {
+            let report = report?;
+            automated = report.automated;
+            skipped.extend(report.skipped.into_iter().map(|(l, r)| ("session ", l, r)));
+        }
         if json {
             agents.push(json!({
                 "id": a.id().as_str(),
                 "originals": originals,
                 "replicas": replicas,
+                "sessions": sessions,
+                "automated_sessions": automated,
                 "skipped": skipped
                     .iter()
                     .map(|(_, label, reason)| json!({ "label": label, "reason": reason }))
                     .collect::<Vec<_>>(),
             }));
         } else {
-            println!("{}: {originals} originals, {replicas} replicas", a.id());
+            println!(
+                "{}: {originals} originals, {replicas} replicas, {sessions} sessions, {automated} automated",
+                a.id()
+            );
             for (kind, label, reason) in &skipped {
                 println!("  skipped {kind}{label}: {reason}");
             }
         }
     }
     let items = if roots.state.join("ledger.db").is_file() {
-        Ledger::open(&roots.state)?.list_items()?.len()
+        Ledger::open(&roots.state)?
+            .list_items()?
+            .iter()
+            .filter(|r| r.kind != Kind::Session)
+            .count()
     } else {
         0
     };
@@ -356,11 +411,15 @@ fn status(roots: &Roots, present: &Agents, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn items(agents: &Agents, json: bool) -> Result<()> {
+fn items(agents: &Agents, kind: Option<Kind>, json: bool) -> Result<()> {
     let mut observed: Vec<Observed> = Vec::new();
     for a in agents.all() {
         observed.extend(a.scan()?);
     }
+    observed.retain(|o| match kind {
+        Some(k) => o.item.kind == k,
+        None => o.item.kind != Kind::Session,
+    });
     if json {
         let list: Vec<Value> = observed
             .iter()
@@ -374,7 +433,7 @@ fn items(agents: &Agents, json: bool) -> Result<()> {
                     "name": o.item.name,
                     "description": o.item.description,
                     "category": o.item.category,
-                    "body": o.item.body,
+                    "body": if o.item.kind == Kind::Session { "" } else { &o.item.body },
                     "replica_of": o.replica_of.as_ref().map(key_json),
                     "hash": content_hash(&o.item),
                 })
@@ -392,7 +451,11 @@ fn items(agents: &Agents, json: bool) -> Result<()> {
                 o.agent,
                 o.item.kind.as_str(),
                 scope,
-                o.item.name
+                if o.item.kind == Kind::Session {
+                    &o.item.description
+                } else {
+                    &o.item.name
+                }
             );
         }
     }
@@ -411,6 +474,7 @@ fn delete(
         agent: agent.to_string(),
         id: id.to_string(),
     })?;
+    refuse_session(id)?;
     adapter.remove(id)?;
     let backup_dir = roots.state.join("backups").join(backups.stamp());
     if json {
@@ -421,6 +485,17 @@ fn delete(
     } else {
         println!("deleted {agent}  {id}");
         println!("backup: {}", backup_dir.display());
+    }
+    Ok(())
+}
+
+/// Sessions are logs the user manages in their own agent; this tool never edits or deletes them.
+fn refuse_session(id: &str) -> Outcome<()> {
+    if is_session_id(id) {
+        return Err(Failure::Coded {
+            code: "unsupported",
+            message: "chat sessions cannot be deleted or edited from here".into(),
+        });
     }
     Ok(())
 }
@@ -457,6 +532,7 @@ fn edit(
         agent: agent.to_string(),
         id: id.to_string(),
     })?;
+    refuse_session(id)?;
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)
@@ -541,7 +617,7 @@ fn action_json(action: &Action) -> Option<(&'static str, Value)> {
             scope,
             ..
         } => ("remove", agent.as_str(), name, scope, key),
-        Action::Adopt { .. } | Action::Forget { .. } => return None,
+        Action::Adopt { .. } | Action::Forget { .. } | Action::Tombstone { .. } => return None,
     };
     Some((
         op,
@@ -684,7 +760,11 @@ fn run_schedule(_: &Cli, _: &ScheduleArgs, _: &Roots) -> Outcome<()> {
 fn run(cli: &Cli) -> Outcome<bool> {
     let roots = resolve(cli)?;
     let backups = BackupSession::new();
-    let agents = Agents::open(&roots, &backups);
+    let sessions = (!cli.no_sessions).then_some(SessionOptions {
+        days: cli.session_days,
+        exclude_automated: cli.exclude_automated_sessions,
+    });
+    let agents = Agents::open(&roots, &backups, sessions);
     let _lock = match &cli.command {
         Command::Sync { apply: true, .. } | Command::Delete { .. } | Command::Edit { .. } => {
             Some(lock_state(&roots.state)?)
@@ -700,7 +780,11 @@ fn run(cli: &Cli) -> Outcome<bool> {
             allow_mass_delete,
             json,
         } => sync(&roots, &agents, *apply, *allow_mass_delete, *json).map_err(Failure::from),
-        Command::Items { json } => items(&agents, *json).map(|()| false).map_err(Failure::from),
+        Command::Items { kind, json } => {
+            items(&agents, kind.as_deref().and_then(Kind::parse), *json)
+                .map(|()| false)
+                .map_err(Failure::from)
+        }
         Command::Delete { agent, id, json } => {
             delete(&roots, &backups, &agents, agent, id, *json).map(|()| false)
         }
@@ -715,7 +799,7 @@ fn wants_json(command: &Command) -> bool {
     match command {
         Command::Status { json }
         | Command::Sync { json, .. }
-        | Command::Items { json }
+        | Command::Items { json, .. }
         | Command::Delete { json, .. }
         | Command::Edit { json, .. }
         | Command::Schedule(ScheduleArgs {

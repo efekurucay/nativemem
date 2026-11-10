@@ -37,6 +37,12 @@ pub enum Action {
     },
     /// Drop the ledger rows of an item whose entries are gone.
     Forget { key: ItemKey },
+    /// A session replica the user deleted: keep an empty-hash ledger row so it is never recreated.
+    Tombstone {
+        replica: ReplicaRow,
+        scope: Scope,
+        name: String,
+    },
 }
 
 impl Action {
@@ -47,12 +53,13 @@ impl Action {
             | Action::WriteBack { key, .. }
             | Action::Remove { key, .. }
             | Action::Forget { key } => key,
+            Action::Tombstone { replica, .. } => &replica.key,
         }
     }
 
     fn rank(&self) -> u8 {
         match self {
-            Action::Adopt { .. } => 0,
+            Action::Adopt { .. } | Action::Tombstone { .. } => 0,
             Action::Write { .. } | Action::WriteBack { .. } => 1,
             Action::Remove { .. } => 2,
             Action::Forget { .. } => 3,
@@ -61,8 +68,10 @@ impl Action {
 
     fn label(&self) -> String {
         match self {
-            Action::Adopt { name, .. } | Action::Remove { name, .. } => name.clone(),
-            Action::Write { item, .. } | Action::WriteBack { item, .. } => item.name.clone(),
+            Action::Adopt { name, .. }
+            | Action::Remove { name, .. }
+            | Action::Tombstone { name, .. } => name.clone(),
+            Action::Write { item, .. } | Action::WriteBack { item, .. } => item_label(item),
             Action::Forget { key } => key.native_id.clone(),
         }
     }
@@ -72,6 +81,23 @@ fn scope_label(scope: &Scope) -> String {
     match scope {
         Scope::Global => "global".to_string(),
         Scope::Project(p) => p.display().to_string(),
+    }
+}
+
+/// A session is shown by its title, every other item by its name.
+fn item_label(item: &Item) -> String {
+    match item.kind {
+        Kind::Session => format!("session \"{}\"", item.description),
+        _ => item.name.clone(),
+    }
+}
+
+/// Memory entries are listed with three spaces before the origin, sessions with two.
+fn from_gap(kind: Kind) -> &'static str {
+    if kind == Kind::Session {
+        "  "
+    } else {
+        "   "
     }
 }
 
@@ -97,11 +123,12 @@ impl fmt::Display for Action {
                 update,
             } => write!(
                 f,
-                "{} {}  {}  {}   (from {})",
+                "{} {}  {}  {}{}(from {})",
                 if *update { '~' } else { '+' },
                 target,
                 scope_label(&item.scope),
-                item.name,
+                item_label(item),
+                from_gap(item.kind),
                 key.origin
             ),
             Action::WriteBack {
@@ -120,6 +147,17 @@ impl fmt::Display for Action {
             Action::Forget { key } => {
                 write!(f, "- ledger  {}:{}", key.origin, key.native_id)
             }
+            Action::Tombstone {
+                replica,
+                scope,
+                name,
+            } => write!(
+                f,
+                "x {}  {}  {}  (replica deleted; not recreated)",
+                replica.agent,
+                scope_label(scope),
+                name
+            ),
         }
     }
 }
@@ -177,7 +215,7 @@ fn count(actions: &[Action], notes: &[Note]) -> Counts {
             Action::Write { update: false, .. } => c.add += 1,
             Action::Write { update: true, .. } | Action::WriteBack { .. } => c.update += 1,
             Action::Remove { .. } => c.remove += 1,
-            Action::Adopt { .. } | Action::Forget { .. } => {}
+            Action::Adopt { .. } | Action::Forget { .. } | Action::Tombstone { .. } => {}
         }
     }
     for n in notes {
@@ -347,6 +385,9 @@ fn plan_key(
     else {
         return Ok(());
     };
+    if kind == Kind::Session {
+        return plan_session(adapters, originals, replicas, ledger, key, &scope, plan);
+    }
     // Agents that cannot store this item are not part of it at all.
     let ids: Vec<AgentId> = adapters
         .iter()
@@ -474,7 +515,7 @@ fn plan_key(
                         description: orig.item.description.clone(),
                         ..o.item.clone()
                     },
-                    Kind::Memory => o.item.clone(),
+                    Kind::Memory | Kind::Session => o.item.clone(),
                 },
             ),
             targets,
@@ -498,6 +539,79 @@ fn plan_key(
             item: orig.item.clone(),
             update: false,
         });
+    }
+    Ok(())
+}
+
+/// Snapshot policy: a replica is created once per target agent and refreshed only while it is
+/// unmodified and the original has changed. Nothing ever flows back to the original, and a
+/// missing original or a replica the user deleted never causes a removal or a recreation.
+fn plan_session(
+    adapters: &[&dyn Adapter],
+    originals: &BTreeMap<ItemKey, &Observed>,
+    replicas: &Replicas<'_>,
+    ledger: &Ledger,
+    key: &ItemKey,
+    scope: &Scope,
+    plan: &mut Plan,
+) -> Result<()> {
+    let Some(orig) = originals.get(key).copied() else {
+        return Ok(());
+    };
+    let cur = content_hash(&orig.item);
+    let grown = ledger.get_item(key)?.is_some_and(|row| row.hash != cur);
+    let label = item_label(&orig.item);
+    for adapter in adapters {
+        let agent = adapter.id();
+        if agent == key.origin || !adapter.supports(Kind::Session, scope) {
+            continue;
+        }
+        let obs = replicas.get(&(key.clone(), agent.clone())).copied();
+        match (ledger.get_replica(key, &agent)?, obs) {
+            (None, None) => plan.actions.push(Action::Write {
+                key: key.clone(),
+                target: agent,
+                item: orig.item.clone(),
+                update: false,
+            }),
+            (None, Some(o)) => plan.actions.push(Action::Adopt {
+                item: ItemRow {
+                    key: key.clone(),
+                    kind: Kind::Session,
+                    scope: scope.clone(),
+                    hash: cur.clone(),
+                },
+                replica: ReplicaRow {
+                    key: key.clone(),
+                    agent,
+                    replica_native_id: o.native_id.clone(),
+                    path: o.path.clone(),
+                    hash: content_hash(&o.item),
+                },
+                name: label.clone(),
+            }),
+            (Some(row), _) if row.hash.is_empty() => {}
+            // A file that exists but was not scanned (outside the window, too large) is not deleted.
+            (Some(mut row), None) if !row.path.exists() => {
+                row.hash = String::new();
+                plan.actions.push(Action::Tombstone {
+                    replica: row,
+                    scope: scope.clone(),
+                    name: label.clone(),
+                });
+            }
+            (Some(_), None) => {}
+            (Some(row), Some(o)) => {
+                if grown && content_hash(&o.item) == row.hash {
+                    plan.actions.push(Action::Write {
+                        key: key.clone(),
+                        target: agent,
+                        item: orig.item.clone(),
+                        update: true,
+                    });
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -539,23 +653,31 @@ fn write_replica(adapter: &dyn Adapter, ledger: &Ledger, key: &ItemKey, item: &I
     })
 }
 
+/// What a run changed: the items it touched and the session replicas it wrote.
+#[derive(Default)]
+struct Touched {
+    keys: BTreeSet<ItemKey>,
+    written: BTreeSet<(ItemKey, AgentId)>,
+}
+
 fn run(
     action: &Action,
     adapters: &[&dyn Adapter],
     ledger: &Ledger,
-    touched: &mut BTreeSet<ItemKey>,
+    touched: &mut Touched,
 ) -> Result<()> {
     match action {
         Action::Adopt { item, replica, .. } => {
             ledger.upsert_item(item)?;
             ledger.upsert_replica(replica)?;
-            touched.insert(item.key.clone());
+            touched.keys.insert(item.key.clone());
         }
         Action::Write {
             key, target, item, ..
         } => {
             write_replica(adapter_for(adapters, target)?, ledger, key, item)?;
-            touched.insert(key.clone());
+            touched.keys.insert(key.clone());
+            touched.written.insert((key.clone(), target.clone()));
         }
         Action::WriteBack {
             key, item, targets, ..
@@ -567,7 +689,7 @@ fn run(
                 scope: item.scope.clone(),
                 hash: content_hash(item),
             })?;
-            touched.insert(key.clone());
+            touched.keys.insert(key.clone());
             for t in targets {
                 write_replica(adapter_for(adapters, t)?, ledger, key, item)?;
             }
@@ -585,19 +707,20 @@ fn run(
             }
         }
         Action::Forget { key } => ledger.delete_item(key)?,
+        Action::Tombstone { replica, .. } => ledger.upsert_replica(replica)?,
     }
     Ok(())
 }
 
 /// Records what is actually on disk for every item the run touched, so formats that do not
 /// round-trip byte-identically never look like fresh edits.
-fn refresh(adapters: &[&dyn Adapter], ledger: &Ledger, touched: &BTreeSet<ItemKey>) -> Result<()> {
-    if touched.is_empty() {
+fn refresh(adapters: &[&dyn Adapter], ledger: &Ledger, touched: &Touched) -> Result<()> {
+    if touched.keys.is_empty() {
         return Ok(());
     }
     let observed = scan_all(adapters)?;
     let (originals, replicas) = index(&observed);
-    for key in touched {
+    for key in &touched.keys {
         let Some(mut row) = ledger.get_item(key)? else {
             continue;
         };
@@ -606,6 +729,13 @@ fn refresh(adapters: &[&dyn Adapter], ledger: &Ledger, touched: &BTreeSet<ItemKe
             ledger.upsert_item(&row)?;
         }
         for mut r in ledger.list_replicas(key)? {
+            // A session replica the run left alone keeps the hash it was last written with, so
+            // an edit made to it stays visible.
+            if row.kind == Kind::Session
+                && !touched.written.contains(&(key.clone(), r.agent.clone()))
+            {
+                continue;
+            }
             if let Some(o) = replicas.get(&(key.clone(), r.agent.clone())) {
                 r.hash = content_hash(&o.item);
                 r.replica_native_id = o.native_id.clone();
@@ -622,7 +752,7 @@ fn execute(
     adapters: &[&dyn Adapter],
     ledger: &Ledger,
     report: &mut Report,
-    touched: &mut BTreeSet<ItemKey>,
+    touched: &mut Touched,
 ) -> Result<()> {
     // Keys with a skipped operation keep their ledger rows and their remaining removals.
     let mut blocked: BTreeSet<ItemKey> = BTreeSet::new();
@@ -663,7 +793,11 @@ pub fn apply(
         .iter()
         .filter(|a| matches!(a, Action::Remove { .. }))
         .count();
-    let total = ledger.list_items()?.len();
+    let total = ledger
+        .list_items()?
+        .iter()
+        .filter(|r| r.kind != Kind::Session)
+        .count();
     if !opts.allow_mass_delete && exceeds_mass_delete_limit(planned, total) {
         return Err(Error::MassDelete { planned, total });
     }
@@ -674,7 +808,7 @@ pub fn apply(
         done: Vec::new(),
         notes: plan.notes,
     };
-    let mut touched = BTreeSet::new();
+    let mut touched = Touched::default();
     let outcome = execute(&actions, adapters, ledger, &mut report, &mut touched);
     let refreshed = refresh(adapters, ledger, &touched);
     outcome?;
@@ -1448,5 +1582,547 @@ mod tests {
         assert!(fs::read_to_string(f.codex_root.join("AGENTS.md"))
             .unwrap()
             .contains("be terser"));
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::adapters::claude::ClaudeAdapter;
+    use crate::adapters::codex::CodexAdapter;
+    use crate::adapters::pi::PiAdapter;
+    use crate::fsx::BackupSession;
+    use crate::session::{Session, SessionOptions};
+    use crate::testkit::{age_days, ClaudeHome, CodexHome, PiHome};
+
+    const CWD: &str = "/w/app";
+    const TID: &str = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+    const TID2: &str = "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c";
+
+    struct Fx {
+        _t: tempfile::TempDir,
+        root: PathBuf,
+        ledger: Ledger,
+        claude: ClaudeAdapter,
+        codex: CodexAdapter,
+        pi: PiAdapter,
+    }
+
+    fn fx_with(options: Option<SessionOptions>) -> Fx {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().to_path_buf();
+        for d in ["claude", "codex", "pi"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let state = root.join("state");
+        let backups = BackupSession::with_stamp("T");
+        Fx {
+            claude: {
+                let a = ClaudeAdapter::new(root.join("claude"), state.clone(), backups.clone())
+                    .with_fs_root(state.join("no-fs-root"));
+                match options {
+                    Some(o) => a.with_sessions(o),
+                    None => a,
+                }
+            },
+            codex: {
+                let a = CodexAdapter::new(root.join("codex"), state.clone(), backups.clone());
+                match options {
+                    Some(o) => a.with_sessions(o),
+                    None => a,
+                }
+            },
+            pi: {
+                let a = PiAdapter::new(root.join("pi"), state, backups);
+                match options {
+                    Some(o) => a.with_sessions(o),
+                    None => a,
+                }
+            },
+            ledger: Ledger::in_memory().unwrap(),
+            root,
+            _t: t,
+        }
+    }
+
+    fn fx() -> Fx {
+        fx_with(Some(SessionOptions::default()))
+    }
+
+    fn windowed(days: u32) -> Fx {
+        fx_with(Some(SessionOptions {
+            days: Some(days),
+            ..SessionOptions::default()
+        }))
+    }
+
+    const CHAT: &[(&str, &str)] = &[
+        ("user", "how do I fix the login?"),
+        ("assistant", "check the token expiry"),
+        ("user", "thanks"),
+    ];
+
+    impl Fx {
+        fn adapters(&self) -> [&dyn Adapter; 3] {
+            [&self.claude, &self.codex, &self.pi]
+        }
+
+        fn plan(&self) -> Plan {
+            plan(&self.adapters(), &self.ledger).unwrap()
+        }
+
+        fn sync(&self) -> Report {
+            let r = apply(
+                self.plan(),
+                &self.adapters(),
+                &self.ledger,
+                &ApplyOptions::default(),
+            )
+            .unwrap();
+            let p = self.plan();
+            assert!(p.is_empty(), "plan not empty after apply:\n{p}");
+            r
+        }
+
+        fn claude_session(&self, id: &str, title: &str, turns: &[(&str, &str)]) -> PathBuf {
+            ClaudeHome::new(&self.root.join("claude")).add_session(
+                Path::new(CWD),
+                id,
+                Some(title),
+                turns,
+            )
+        }
+
+        fn pi_session(&self, id: &str, title: &str, turns: &[(&str, &str)]) -> PathBuf {
+            PiHome::new(&self.root.join("pi")).add_session(Path::new(CWD), id, Some(title), turns)
+        }
+
+        fn sessions(&self, adapter: &dyn Adapter) -> Vec<Observed> {
+            adapter
+                .scan()
+                .unwrap()
+                .into_iter()
+                .filter(|o| o.item.kind == Kind::Session)
+                .collect()
+        }
+
+        fn replica_of(&self, adapter: &dyn Adapter) -> Observed {
+            let mut v: Vec<_> = self
+                .sessions(adapter)
+                .into_iter()
+                .filter(|o| o.replica_of.is_some())
+                .collect();
+            assert_eq!(v.len(), 1, "expected one replica");
+            v.remove(0)
+        }
+
+        fn files(&self) -> usize {
+            fn count(dir: &Path) -> usize {
+                fs::read_dir(dir).unwrap().flatten().fold(0, |n, e| {
+                    let p = e.path();
+                    n + if p.is_dir() { count(&p) } else { 1 }
+                })
+            }
+            count(&self.root)
+        }
+    }
+
+    fn parsed(o: &Observed) -> Session {
+        Session::from_body(&o.item.body).unwrap()
+    }
+
+    #[test]
+    fn claude_session_reaches_pi_and_round_trips() {
+        let f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        let p = f.plan();
+        assert_eq!(
+            p.to_string().lines().next().unwrap(),
+            "+ pi  /w/app  session \"Fix login\"  (from claude)"
+        );
+        assert_eq!(p.actions.len(), 1, "codex never receives sessions:\n{p}");
+        f.sync();
+
+        let replica = f.replica_of(&f.pi);
+        let s = parsed(&replica);
+        assert_eq!(s.title, "Fix login");
+        assert_eq!(s.cwd, PathBuf::from(CWD));
+        assert_eq!(s.turns.len(), 3);
+        let roles: Vec<_> = s.turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+        assert_eq!(s.turns[1].text, "check the token expiry");
+        assert_eq!(
+            replica.replica_of.as_ref().unwrap().native_id,
+            "-w-app/c1.jsonl"
+        );
+        assert!(replica.native_id.starts_with("--w-app--/"));
+        let original = f
+            .sessions(&f.claude)
+            .into_iter()
+            .find(|o| o.replica_of.is_none())
+            .unwrap();
+        assert_eq!(content_hash(&original.item), content_hash(&replica.item));
+        assert_eq!(f.sessions(&f.codex).len(), 0);
+    }
+
+    #[test]
+    fn pi_session_reaches_claude_and_reparses() {
+        let f = fx();
+        f.pi_session("p1", "Pi chat", CHAT);
+        let r = f.sync();
+        assert_eq!(r.done.len(), 1);
+        let replica = f.replica_of(&f.claude);
+        let s = parsed(&replica);
+        assert_eq!((s.title.as_str(), s.turns.len()), ("Pi chat", 3));
+        assert_eq!(s.cwd, PathBuf::from(CWD));
+        assert_eq!(s.turns[0].text, "how do I fix the login?");
+        assert!(replica.native_id.starts_with("-w-app/"));
+        assert!(replica.path.is_file());
+        assert_eq!(s.id, replica.path.file_stem().unwrap().to_string_lossy());
+        assert_eq!(
+            replica.replica_of.as_ref().unwrap().native_id,
+            "--w-app--/2026-11-10T10-00-00-000Z_p1.jsonl"
+        );
+    }
+
+    #[test]
+    fn replica_of_a_new_cwd_creates_the_project_dir() {
+        let f = fx();
+        PiHome::new(&f.root.join("pi")).add_session(Path::new("/other/proj"), "p9", None, CHAT);
+        f.sync();
+        let dir = f.root.join("claude/projects/-other-proj");
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn codex_rollout_reaches_claude_and_pi() {
+        let f = fx();
+        CodexHome::new(&f.root.join("codex")).add_rollout(TID, Path::new(CWD), CHAT, false);
+        let p = f.plan().to_string();
+        assert!(
+            p.contains("+ claude  /w/app  session \"how do I fix the login?\"  (from codex)"),
+            "{p}"
+        );
+        assert!(
+            p.contains("+ pi  /w/app  session \"how do I fix the login?\"  (from codex)"),
+            "{p}"
+        );
+        f.sync();
+        assert_eq!(parsed(&f.replica_of(&f.claude)).turns.len(), 3);
+        assert_eq!(
+            parsed(&f.replica_of(&f.pi)).turns[1].text,
+            "check the token expiry"
+        );
+        // Injected context never became a turn.
+        assert!(!parsed(&f.replica_of(&f.pi))
+            .turns
+            .iter()
+            .any(|t| t.text.contains("injected")));
+    }
+
+    #[test]
+    fn imported_codex_sessions_are_not_originals() {
+        let f = fx();
+        let x = CodexHome::new(&f.root.join("codex"));
+        x.add_rollout(TID, Path::new(CWD), CHAT, false);
+        x.add_rollout(TID2, Path::new(CWD), CHAT, true);
+        assert_eq!(f.sessions(&f.codex).len(), 1, "marker excludes the second");
+        x.write_import_ledger(&[TID]);
+        assert_eq!(f.sessions(&f.codex).len(), 0, "ledger excludes the first");
+        assert!(f.plan().is_empty());
+    }
+
+    #[test]
+    fn grown_original_refreshes_an_unmodified_replica_with_backup() {
+        let f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        let more: Vec<(&str, &str)> = CHAT
+            .iter()
+            .copied()
+            .chain([("assistant", "glad to help"), ("user", "one more thing")])
+            .collect();
+        f.claude_session("c1", "Fix login", &more);
+        let p = f.plan();
+        assert_eq!(
+            p.to_string().lines().next().unwrap(),
+            "~ pi  /w/app  session \"Fix login\"  (from claude)"
+        );
+        f.sync();
+        assert_eq!(parsed(&f.replica_of(&f.pi)).turns.len(), 5);
+        let backups = f.root.join("state/backups/T/pi/sessions");
+        assert!(backups.is_dir(), "refresh backs the old replica up");
+    }
+
+    #[test]
+    fn modified_replica_is_left_alone_without_a_note() {
+        let f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        let replica = f.replica_of(&f.pi);
+        let mut text = fs::read_to_string(&replica.path).unwrap();
+        let last_id = text
+            .lines()
+            .last()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .unwrap();
+        text.push_str(&format!("{}\n", serde_json::json!({
+            "type": "message", "id": "zz", "parentId": last_id, "timestamp": "2026-11-10T11:00:00.000Z",
+            "message": {"role": "user", "content": [{"type": "text", "text": "continued in pi"}], "timestamp": 1},
+        })));
+        fs::write(&replica.path, &text).unwrap();
+        let more: Vec<(&str, &str)> = CHAT.iter().copied().chain([("user", "grown")]).collect();
+        f.claude_session("c1", "Fix login", &more);
+        let p = f.plan();
+        assert!(p.is_empty(), "{p}");
+        assert_eq!(fs::read_to_string(&replica.path).unwrap(), text);
+        assert_eq!(parsed(&f.replica_of(&f.pi)).turns.len(), 4);
+    }
+
+    #[test]
+    fn deleted_replica_is_tombstoned_and_never_recreated() {
+        let f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        fs::remove_file(f.replica_of(&f.pi).path).unwrap();
+        let p = f.plan();
+        assert_eq!(
+            p.to_string().lines().next().unwrap(),
+            "x pi  /w/app  session \"Fix login\"  (replica deleted; not recreated)"
+        );
+        f.sync();
+        let more: Vec<(&str, &str)> = CHAT.iter().copied().chain([("user", "grown")]).collect();
+        f.claude_session("c1", "Fix login", &more);
+        assert!(f.plan().is_empty());
+        assert_eq!(f.sessions(&f.pi).len(), 0);
+    }
+
+    #[test]
+    fn vanished_original_leaves_replicas_alone() {
+        let f = fx();
+        let orig = f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        fs::remove_file(orig).unwrap();
+        let p = f.plan();
+        assert!(p.is_empty(), "{p}");
+        f.sync();
+        assert_eq!(f.sessions(&f.pi).len(), 1);
+        assert_eq!(f.ledger.list_items().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lost_ledger_adopts_replicas_and_never_loops() {
+        let mut f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        let files = f.files();
+        f.ledger = Ledger::in_memory().unwrap();
+        let p = f.plan();
+        assert!(
+            p.actions.iter().all(|a| matches!(a, Action::Adopt { .. })),
+            "only adoption, no writes:\n{p}"
+        );
+        f.sync();
+        assert_eq!(f.files(), files, "no replica-of-replica, no duplicate");
+        assert_eq!(f.sessions(&f.claude).len(), 1);
+        assert_eq!(f.sessions(&f.pi).len(), 1);
+    }
+
+    #[test]
+    fn lost_ledger_and_pruned_original_report_nothing() {
+        let mut f = fx();
+        let orig = f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        fs::remove_file(orig).unwrap();
+        f.ledger = Ledger::in_memory().unwrap();
+        assert!(f.plan().is_empty());
+    }
+
+    #[test]
+    fn replicas_are_never_originals_for_a_third_agent() {
+        let f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        // Pi holds a replica of a Claude original; nothing may flow from it to anyone.
+        assert_eq!(
+            f.sessions(&f.pi)
+                .iter()
+                .filter(|o| o.replica_of.is_none())
+                .count(),
+            0
+        );
+        assert_eq!(f.ledger.list_items().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn window_is_opt_in_and_limits_which_sessions_are_read() {
+        let unlimited = fx();
+        let ancient = unlimited.claude_session("ancient", "Ancient", CHAT);
+        age_days(&ancient, 900);
+        assert_eq!(unlimited.sessions(&unlimited.claude).len(), 1);
+        unlimited.sync();
+        assert_eq!(unlimited.sessions(&unlimited.pi).len(), 1);
+
+        let f = windowed(14);
+        let old = f.claude_session("old", "Old", CHAT);
+        age_days(&old, 15);
+        let recent = f.claude_session("recent", "Recent", CHAT);
+        age_days(&recent, 13);
+        let seen: Vec<String> = f
+            .sessions(&f.claude)
+            .into_iter()
+            .map(|o| o.native_id)
+            .collect();
+        assert_eq!(seen, ["-w-app/recent.jsonl"]);
+        f.sync();
+        assert_eq!(f.sessions(&f.pi).len(), 1);
+
+        let off = fx_with(None);
+        off.claude_session("c", "x", CHAT);
+        assert_eq!(off.sessions(&off.claude).len(), 0);
+        assert!(off.plan().is_empty());
+    }
+
+    #[test]
+    fn replica_keeps_the_originals_mtime_so_both_age_out_together() {
+        let f = fx();
+        let orig = f.claude_session("c1", "Fix login", CHAT);
+        age_days(&orig, 10);
+        f.sync();
+        let m = |p: &Path| fs::metadata(p).unwrap().modified().unwrap();
+        let replica = f.replica_of(&f.pi);
+        let diff = m(&orig)
+            .duration_since(m(&replica.path))
+            .unwrap_or_else(|e| e.duration());
+        assert!(diff.as_secs() < 2, "{diff:?}");
+    }
+
+    #[test]
+    fn sessions_without_user_turns_or_cwd_are_not_synced() {
+        let f = fx();
+        f.claude_session("assistant-only", "x", &[("assistant", "hello")]);
+        assert!(f.plan().is_empty());
+        let dir = f.root.join("claude/projects/-no-cwd");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("n.jsonl"),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"q\"}}\n",
+        )
+        .unwrap();
+        assert!(f.plan().is_empty());
+        let skipped = f.claude.session_report().unwrap().skipped;
+        assert_eq!(
+            skipped,
+            [(
+                "-no-cwd/n.jsonl".to_string(),
+                "no cwd in any line".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn oversized_sources_are_skipped_and_reported() {
+        assert_eq!(crate::session::MAX_SOURCE_BYTES, 200 * 1024 * 1024);
+        let f = fx();
+        let dir = f.root.join("claude/projects/-big");
+        fs::create_dir_all(&dir).unwrap();
+        let file = fs::File::create(dir.join("b.jsonl")).unwrap();
+        file.set_len(crate::session::MAX_SOURCE_BYTES + 1).unwrap();
+        assert!(f.plan().is_empty());
+        let skipped = f.claude.session_report().unwrap().skipped;
+        assert_eq!(skipped.len(), 1);
+        assert!(
+            skipped[0].1.starts_with("larger than 200 MB"),
+            "{skipped:?}"
+        );
+    }
+
+    fn mark_entrypoint(path: &Path, entrypoint: &str) {
+        let text: String = fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| {
+                let mut v: serde_json::Value = serde_json::from_str(l).unwrap();
+                if v["type"] == "user" || v["type"] == "assistant" {
+                    v["entrypoint"] = serde_json::json!(entrypoint);
+                }
+                format!("{v}\n")
+            })
+            .collect();
+        fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn automated_claude_and_codex_sessions_are_counted_and_optionally_excluded() {
+        for exclude in [false, true] {
+            let f = fx_with(Some(SessionOptions {
+                exclude_automated: exclude,
+                ..SessionOptions::default()
+            }));
+            let sdk = f.claude_session("sdk", "Headless", CHAT);
+            mark_entrypoint(&sdk, "sdk-cli");
+            let cli = f.claude_session("cli", "Interactive", CHAT);
+            mark_entrypoint(&cli, "cli");
+            f.claude_session("none", "Unmarked", CHAT);
+            let x = CodexHome::new(&f.root.join("codex"));
+            x.add_rollout(TID, Path::new(CWD), CHAT, false);
+            let exec = x.add_rollout(TID2, Path::new(CWD), CHAT, false);
+            let text = fs::read_to_string(&exec).unwrap().replacen(
+                "\"source\":\"cli\"",
+                "\"source\":\"exec\"",
+                1,
+            );
+            fs::write(&exec, text).unwrap();
+            let claude_ids: Vec<String> = f
+                .sessions(&f.claude)
+                .into_iter()
+                .map(|o| o.native_id)
+                .collect();
+            assert_eq!(
+                claude_ids.contains(&"-w-app/sdk.jsonl".to_string()),
+                !exclude
+            );
+            assert!(claude_ids.contains(&"-w-app/cli.jsonl".to_string()));
+            assert!(
+                claude_ids.contains(&"-w-app/none.jsonl".to_string()),
+                "unmarked fails open"
+            );
+            assert_eq!(f.sessions(&f.codex).len(), if exclude { 1 } else { 2 });
+            assert_eq!(f.claude.session_report().unwrap().automated, 1);
+            assert_eq!(f.codex.session_report().unwrap().automated, 1);
+        }
+    }
+
+    #[test]
+    fn memory_and_session_items_coexist_in_one_ledger() {
+        let f = fx();
+        f.claude_session("c1", "Fix login", CHAT);
+        f.sync();
+        let kinds: Vec<_> = f
+            .ledger
+            .list_items()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.kind)
+            .collect();
+        assert_eq!(kinds, [Kind::Session]);
+        let r = f
+            .ledger
+            .list_replicas(&ItemKey {
+                origin: AgentId::new("claude"),
+                native_id: "-w-app/c1.jsonl".into(),
+            })
+            .unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].agent, AgentId::new("pi"));
+        assert!(!r[0].hash.is_empty());
     }
 }

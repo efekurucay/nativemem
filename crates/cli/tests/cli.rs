@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use nativemem_core::testkit::{ClaudeHome, CodexHome, FrontmatterVariant};
+use nativemem_core::testkit::{ClaudeHome, CodexHome, FrontmatterVariant, PiHome};
 
 fn run(claude: &Path, codex: &Path, state: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nativemem"))
@@ -101,7 +101,10 @@ fn status_sync_apply_then_nothing_to_do() {
     );
 
     let out = text(&run(&claude, &codex, &state, &["status"]));
-    assert!(out.contains("claude: 1 originals, 1 replicas"), "{out}");
+    assert!(
+        out.contains("claude: 1 originals, 1 replicas, 0 sessions"),
+        "{out}"
+    );
     assert!(out.contains("ledger: 2 items"), "{out}");
 }
 
@@ -168,8 +171,8 @@ fn status_json_shape() {
     assert_eq!(
         doc,
         json!({ "agents": [
-            { "id": "claude", "originals": 1, "replicas": 0, "skipped": [] },
-            { "id": "codex", "originals": 0, "replicas": 0, "skipped": [] } ],
+            { "id": "claude", "originals": 1, "replicas": 0, "sessions": 0, "automated_sessions": 0, "skipped": [] },
+            { "id": "codex", "originals": 0, "replicas": 0, "sessions": 0, "automated_sessions": 0, "skipped": [] } ],
           "ledger_items": 0 })
     );
     assert!(!f.state.exists());
@@ -879,4 +882,177 @@ fn edit_instruction_heading_is_invalid_and_writes_nothing() {
         CLAUDE_MD
     );
     assert!(!f.state.join("backups").exists());
+}
+
+const CHAT: &[(&str, &str)] = &[
+    ("user", "how do I fix the login?"),
+    ("assistant", "check the token expiry"),
+];
+
+fn with_session() -> (Fx, std::path::PathBuf) {
+    let f = Fx::new();
+    fs::create_dir_all(f.state.with_file_name("pi")).unwrap();
+    let file =
+        ClaudeHome::new(&f.claude).add_session(Path::new("/w/app"), "c1", Some("Fix login"), CHAT);
+    (f, file)
+}
+
+#[test]
+fn sessions_sync_to_pi_and_show_in_status_separately() {
+    let (f, _) = with_session();
+    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{doc}");
+    let (_, status) = f.json(&["status", "--json"]);
+    let by_id = |id: &str| -> Value {
+        status["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        (
+            by_id("claude")["sessions"].clone(),
+            by_id("claude")["originals"].clone()
+        ),
+        (json!(1), json!(1))
+    );
+    assert_eq!(by_id("pi")["sessions"], 1);
+    assert_eq!(by_id("pi")["replicas"], 0);
+    assert_eq!(by_id("codex")["sessions"], 0);
+    assert_eq!(status["ledger_items"], 1, "memory items only");
+    let (code, plan) = f.json(&["sync", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(plan["actions"], json!([]));
+}
+
+#[test]
+fn no_sessions_turns_sessions_off() {
+    let (f, _) = with_session();
+    let o = run(&f.claude, &f.codex, &f.state, &["--no-sessions", "sync"]);
+    let out = text(&o);
+    assert!(!out.contains("session"), "{out}");
+    let o = run(
+        &f.claude,
+        &f.codex,
+        &f.state,
+        &["--no-sessions", "status", "--json"],
+    );
+    let doc: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(doc["agents"][0]["sessions"], 0);
+}
+
+#[test]
+fn items_leaves_sessions_out_unless_asked_and_never_prints_bodies() {
+    let (f, _) = with_session();
+    f.json(&["sync", "--apply", "--json"]);
+    let (_, items) = f.json(&["items", "--json"]);
+    assert!(items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|i| i["kind"] != "session"));
+    let (_, items) = f.json(&["items", "--kind", "session", "--json"]);
+    let list = items["items"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    for i in list {
+        assert_eq!(i["kind"], "session");
+        assert_eq!(i["body"], "");
+        assert_eq!(i["scope"], json!({"type": "project", "path": "/w/app"}));
+        assert_eq!(i["description"], "Fix login");
+    }
+    assert_eq!(list.iter().filter(|i| i["replica_of"].is_null()).count(), 1);
+    let pi = list.iter().find(|i| i["agent"] == "pi").unwrap();
+    assert_eq!(pi["replica_of"]["origin"], "claude");
+    let human = text(&run(&f.claude, &f.codex, &f.state, &["items"]));
+    assert!(!human.contains("session"), "{human}");
+}
+
+#[test]
+fn delete_and_edit_refuse_session_ids() {
+    let (f, _) = with_session();
+    let id = "-w-app/c1.jsonl";
+    let (code, doc) = f.json(&["delete", "--agent", "claude", "--id", id, "--json"]);
+    assert_eq!(
+        (code, &doc["code"]),
+        (Some(1), &json!("unsupported")),
+        "{doc}"
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nativemem"))
+        .env("HOME", f.state.with_file_name("home"))
+        .arg("--claude-home")
+        .arg(&f.claude)
+        .arg("--codex-home")
+        .arg(&f.codex)
+        .arg("--state-dir")
+        .arg(&f.state)
+        .args(["edit", "--agent", "claude", "--id", id, "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"name":"n","description":"d","category":null,"body":"b"}"#)
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    let doc: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(doc["code"], "unsupported");
+    assert!(f.claude.join("projects/-w-app/c1.jsonl").is_file());
+}
+
+#[test]
+fn pi_session_reaches_claude_through_the_cli() {
+    let f = Fx::new();
+    let pi = f.state.with_file_name("pi");
+    fs::create_dir_all(&pi).unwrap();
+    PiHome::new(&pi).add_session(Path::new("/w/app"), "p1", Some("Pi chat"), CHAT);
+    let out = text(&run(&f.claude, &f.codex, &f.state, &["sync"]));
+    assert!(
+        out.contains("+ claude  /w/app  session \"Pi chat\"  (from pi)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn automated_sessions_are_counted_and_excluded_on_request() {
+    let (f, file) = with_session();
+    let text_in = fs::read_to_string(&file).unwrap().replace(
+        "\"type\":\"user\"",
+        "\"entrypoint\":\"sdk-cli\",\"type\":\"user\"",
+    );
+    fs::write(&file, text_in).unwrap();
+    let count = |extra: &[&str]| -> (Value, Value) {
+        let mut args = extra.to_vec();
+        args.extend(["status", "--json"]);
+        let o = run(&f.claude, &f.codex, &f.state, &args);
+        let doc: Value = serde_json::from_slice(&o.stdout).unwrap();
+        (
+            doc["agents"][0]["sessions"].clone(),
+            doc["agents"][0]["automated_sessions"].clone(),
+        )
+    };
+    assert_eq!(count(&[]), (json!(1), json!(1)));
+    assert_eq!(
+        count(&["--exclude-automated-sessions"]),
+        (json!(0), json!(1))
+    );
+}
+
+#[test]
+fn session_days_is_an_opt_in_limit() {
+    let (f, file) = with_session();
+    nativemem_core::testkit::age_days(&file, 30);
+    let sessions = |extra: &[&str]| -> Value {
+        let mut args = extra.to_vec();
+        args.extend(["status", "--json"]);
+        let o = run(&f.claude, &f.codex, &f.state, &args);
+        serde_json::from_slice::<Value>(&o.stdout).unwrap()["agents"][0]["sessions"].clone()
+    };
+    assert_eq!(sessions(&[]), 1);
+    assert_eq!(sessions(&["--session-days", "14"]), 0);
 }

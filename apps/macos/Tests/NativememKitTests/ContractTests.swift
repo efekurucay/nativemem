@@ -67,6 +67,22 @@ func fixtureItems() throws -> [Item] {
         #expect(items[1].replicaOf == ItemRef(origin: "claude", nativeId: "CLAUDE.md#style"))
     }
 
+    @Test func statusWithSessionsDecodesAndSessionsStayOutOfTheIndex() throws {
+        let status = try decodeContract(StatusDocument.self, from: fixture("status_sessions"))
+        #expect(status.agents.map(\.sessions) == [3, 0])
+        #expect(status.logicalItems == 1)
+        let earlier = try decodeContract(StatusDocument.self, from: fixture("status"))
+        #expect(earlier.agents.map(\.sessions) == [0, 0])
+
+        let entries = try decodeContract(ItemsDocument.self, from: fixture("session_items")).items
+        #expect(entries.map(\.kind) == ["memory", "session", "session"])
+        #expect(entries[1].body.isEmpty)
+        let index = MemoryIndex(entries: entries)
+        #expect(index.items.count == 1)
+        #expect(index.items[0].primary.kind == "memory")
+        #expect(index.items[0].copies.isEmpty)
+    }
+
     @Test func decodesSyncPlan() throws {
         let plan = try decodeContract(SyncPlan.self, from: fixture("sync"))
         #expect(!plan.applied)

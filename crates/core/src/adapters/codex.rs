@@ -6,8 +6,10 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
+use crate::session::{is_session_id, SessionOptions, SessionReport, SessionScan};
 use crate::slug::slugify;
 
+use super::codex_sessions::CodexSessions;
 use super::sections::{self, block_span, region_span, InstructionFile, BLOCK_BEGIN, BLOCK_END};
 
 const AGENT: &str = "codex";
@@ -58,6 +60,7 @@ pub struct CodexAdapter {
     state_dir: PathBuf,
     backups: BackupSession,
     instructions: InstructionFile,
+    sessions: Option<CodexSessions>,
 }
 
 struct Replica {
@@ -342,7 +345,27 @@ impl CodexAdapter {
             home: codex_home,
             state_dir,
             backups,
+            sessions: None,
         }
+    }
+
+    /// Reads rollouts as session originals; without this call sessions stay out. Codex never
+    /// receives sessions from this tool.
+    pub fn with_sessions(mut self, options: SessionOptions) -> Self {
+        self.sessions = Some(CodexSessions::new(self.home.clone(), options));
+        self
+    }
+
+    fn scan_sessions(&self) -> Result<SessionScan> {
+        match &self.sessions {
+            Some(s) => s.scan(&Self::agent()),
+            None => Ok(SessionScan::default()),
+        }
+    }
+
+    /// Rollouts that cannot be synced and how many are automated.
+    pub fn session_report(&self) -> Result<SessionReport> {
+        Ok(self.scan_sessions()?.report())
     }
 
     /// Codex-generated content that cannot be mirrored: `(label, reason)`.
@@ -464,12 +487,16 @@ impl Adapter for CodexAdapter {
             });
         }
         out.extend(self.instructions.scan()?);
+        out.extend(self.scan_sessions()?.observed);
         Ok(out)
     }
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
         if item.kind == Kind::Instruction {
             return self.instructions.write_replica(key, item);
+        }
+        if item.kind == Kind::Session {
+            return Err(Error::unsupported(AGENT, "write_replica session"));
         }
         let Scope::Project(cwd) = &item.scope else {
             return Err(Error::unsupported(AGENT, "write_replica global scope"));
@@ -505,6 +532,9 @@ impl Adapter for CodexAdapter {
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+        if is_session_id(native_id) {
+            return Err(Error::unsupported(AGENT, "write_original session"));
+        }
         if self.instructions.owns(native_id) {
             return self.instructions.write_original(native_id, item);
         }
@@ -512,6 +542,9 @@ impl Adapter for CodexAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
+        if is_session_id(native_id) {
+            return Err(Error::unsupported(AGENT, "remove session"));
+        }
         if self.instructions.owns(native_id) {
             return self.instructions.remove(native_id);
         }

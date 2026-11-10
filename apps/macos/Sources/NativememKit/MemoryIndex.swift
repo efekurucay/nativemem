@@ -73,7 +73,9 @@ public struct MemoryIndex: Sendable {
 
     public static let empty = MemoryIndex(entries: [])
 
-    public init(entries: [Item]) {
+    /// Chat sessions are not memory; they never reach the UI.
+    public init(entries all: [Item]) {
+        let entries = all.filter { $0.kind != Item.sessionKind }
         var originals: [String: Int] = [:]
         var logical: [LogicalItem] = []
         for entry in entries where entry.replicaOf == nil {

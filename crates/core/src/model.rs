@@ -34,6 +34,7 @@ pub enum Scope {
 pub enum Kind {
     Memory,
     Instruction,
+    Session,
 }
 
 impl Kind {
@@ -41,6 +42,7 @@ impl Kind {
         match self {
             Kind::Memory => "memory",
             Kind::Instruction => "instruction",
+            Kind::Session => "session",
         }
     }
 
@@ -48,6 +50,7 @@ impl Kind {
         match s {
             "memory" => Some(Kind::Memory),
             "instruction" => Some(Kind::Instruction),
+            "session" => Some(Kind::Session),
             _ => None,
         }
     }
@@ -100,8 +103,15 @@ fn normalise(s: &str) -> String {
 }
 
 /// SHA-256 hex over name, description, category, body. Each field is length-prefixed so
-/// different field splits cannot produce the same byte stream.
+/// different field splits cannot produce the same byte stream. A session hashes its content
+/// only (working directory, title, turns), so a replica hashes like its original.
 pub fn content_hash(item: &Item) -> String {
+    if item.kind == Kind::Session {
+        return crate::session::Session::from_body(&item.body).map_or_else(
+            || crate::session::sha_hex(item.body.as_bytes()),
+            |s| s.hash(),
+        );
+    }
     let mut h = Sha256::new();
     let mut field = |s: &str| {
         h.update((s.len() as u64).to_le_bytes());
@@ -137,7 +147,7 @@ mod tests {
 
     #[test]
     fn kind_text_round_trips() {
-        for k in [Kind::Memory, Kind::Instruction] {
+        for k in [Kind::Memory, Kind::Instruction, Kind::Session] {
             assert_eq!(Kind::parse(k.as_str()), Some(k));
         }
         assert_eq!(Kind::parse("other"), None);

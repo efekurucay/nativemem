@@ -5,8 +5,13 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
+use crate::session::{
+    derived_uuid, is_session_id, marker_text, set_mtime, Session, SessionOptions, SessionReport,
+    SessionScan,
+};
 use crate::slug::slugify;
 
+use super::claude_sessions::{self, ClaudeSessions};
 use super::sections::InstructionFile;
 
 const INSTRUCTION_FILE: &str = "CLAUDE.md";
@@ -20,6 +25,7 @@ pub struct ClaudeAdapter {
     backups: BackupSession,
     fs_root: Option<PathBuf>,
     instructions: InstructionFile,
+    sessions: Option<ClaudeSessions>,
 }
 
 /// Directory listings allowed per project name before the name is treated as unresolved.
@@ -51,7 +57,50 @@ impl ClaudeAdapter {
             state_dir,
             backups,
             fs_root: default_fs_root(),
+            sessions: None,
         }
+    }
+
+    /// Takes part in session sync; without this call sessions stay out.
+    pub fn with_sessions(mut self, options: SessionOptions) -> Self {
+        self.sessions = Some(ClaudeSessions::new(self.claude_home.clone(), options));
+        self
+    }
+
+    fn scan_sessions(&self) -> Result<SessionScan> {
+        match &self.sessions {
+            Some(s) => s.scan(&self.id()),
+            None => Ok(SessionScan::default()),
+        }
+    }
+
+    /// Transcripts that cannot be synced and how many are automated.
+    pub fn session_report(&self) -> Result<SessionReport> {
+        Ok(self.scan_sessions()?.report())
+    }
+
+    /// Writes the replica transcript into the project directory of the session's cwd; the file
+    /// name and session id derive from the origin, so a refresh rewrites the same file.
+    fn write_session_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
+        let session = Session::from_body(&item.body)
+            .ok_or_else(|| Error::Parse("session body is not a session".into()))?;
+        let dir = match self
+            .project_cwds()?
+            .into_iter()
+            .find(|(_, c)| c.as_deref().ok() == Some(session.cwd.as_path()))
+        {
+            Some((d, _)) => d,
+            None => encode_name(&session.cwd.to_string_lossy()),
+        };
+        let uuid = derived_uuid(&format!("claude-replica:{}", marker_text(key)));
+        let file = format!("{uuid}.jsonl");
+        let path = self.projects_dir().join(&dir).join(&file);
+        let text = claude_sessions::render(&session, key, &uuid);
+        if read_optional(&path)?.as_deref() != Some(text.as_str()) {
+            self.overwrite(&path, &text)?;
+        }
+        set_mtime(&path, session.updated_ms);
+        Ok((format!("{dir}/{file}"), path))
     }
 
     /// Resolves directory names against `root` instead of `/`; the encoded name then
@@ -296,17 +345,22 @@ impl Adapter for ClaudeAdapter {
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
         matches!(
             (kind, scope),
-            (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
+            (Kind::Memory | Kind::Session, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
         )
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
-        Ok(self.collect()?.items)
+        let mut out = self.collect()?.items;
+        out.extend(self.scan_sessions()?.observed);
+        Ok(out)
     }
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
         if item.kind == Kind::Instruction {
             return self.instructions.write_replica(key, item);
+        }
+        if item.kind == Kind::Session {
+            return self.write_session_replica(key, item);
         }
         let Scope::Project(cwd) = &item.scope else {
             return Err(Error::unsupported("claude", "write_replica global scope"));
@@ -363,6 +417,9 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+        if is_session_id(native_id) {
+            return Err(Error::unsupported("claude", "write_original session"));
+        }
         if self.instructions.owns(native_id) {
             return self.instructions.write_original(native_id, item);
         }
@@ -383,6 +440,9 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
+        if is_session_id(native_id) {
+            return Err(Error::unsupported("claude", "remove session"));
+        }
         if self.instructions.owns(native_id) {
             return self.instructions.remove(native_id);
         }

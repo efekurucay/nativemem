@@ -1,0 +1,5 @@
+{ "agents": [
+    { "id": "claude", "originals": 1, "replicas": 0, "sessions": 3,
+      "skipped": [ { "label": "session -Users-x-big/b.jsonl", "reason": "larger than 20 MB (31 MB)" } ] },
+    { "id": "codex", "originals": 0, "replicas": 1, "sessions": 0, "skipped": [] } ],
+  "ledger_items": 1 }

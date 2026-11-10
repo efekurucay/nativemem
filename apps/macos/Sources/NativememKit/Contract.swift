@@ -18,6 +18,7 @@ public struct ItemRef: Codable, Hashable, Sendable {
 public struct Item: Codable, Hashable, Sendable {
     public static let memoryKind = "memory"
     public static let instructionKind = "instruction"
+    public static let sessionKind = "session"
 
     public var agent: String
     public var nativeId: String
@@ -81,7 +82,18 @@ public struct AgentStatus: Codable, Hashable, Sendable {
     public var id: String
     public var originals: Int
     public var replicas: Int
+    /// Chat sessions, counted apart from memory and instruction entries.
+    public var sessions: Int
     public var skipped: [SkippedEntry]
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        originals = try container.decode(Int.self, forKey: .originals)
+        replicas = try container.decode(Int.self, forKey: .replicas)
+        sessions = try container.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
+        skipped = try container.decode([SkippedEntry].self, forKey: .skipped)
+    }
 }
 
 public struct StatusDocument: Codable, Sendable {
