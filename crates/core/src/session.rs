@@ -565,6 +565,27 @@ pub fn derived_uuid(seed: &str) -> String {
     )
 }
 
+/// A UUIDv7: `ms` (epoch milliseconds) in the leading 48 bits, the rest derived from `seed`, so
+/// the id is stable for one replica and sorts by creation time.
+pub fn uuid_v7(ms: i64, seed: &str) -> String {
+    let d = Sha256::digest(seed.as_bytes());
+    let mut b = [0u8; 16];
+    b[..6].copy_from_slice(&(ms.max(0) as u64).to_be_bytes()[2..]);
+    b[6] = 0x70 | (d[0] & 0x0f);
+    b[7] = d[1];
+    b[8] = 0x80 | (d[2] & 0x3f);
+    b[9..].copy_from_slice(&d[3..10]);
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
+
 fn system_ms(t: SystemTime) -> i64 {
     match t.duration_since(UNIX_EPOCH) {
         Ok(d) => d.as_millis() as i64,
@@ -818,6 +839,18 @@ mod tests {
         assert_ne!(a, derived_uuid("y"));
         assert_eq!(a.len(), 36);
         assert_eq!(a.as_bytes()[14], b'4');
+    }
+
+    #[test]
+    fn uuid_v7_is_valid_stable_and_sorts_by_time() {
+        let a = uuid_v7(1_794_304_800_000, "s");
+        assert_eq!(a, uuid_v7(1_794_304_800_000, "s"));
+        assert_ne!(a, uuid_v7(1_794_304_800_000, "t"));
+        assert_eq!(a.len(), 36);
+        assert_eq!(a.as_bytes()[14], b'7');
+        assert!(matches!(a.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
+        assert!(uuid_v7(1_794_304_800_000, "z") < uuid_v7(1_794_304_800_001, "a"));
+        assert_eq!(&a[..8], format!("{:08x}", 1_794_304_800_000u64 >> 16));
     }
 
     #[test]

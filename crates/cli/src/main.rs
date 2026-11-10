@@ -231,7 +231,8 @@ impl Agents {
                 }
             }),
             codex: present(&roots.codex).then(|| {
-                let a = CodexAdapter::new(roots.codex.clone(), state(), backups.clone());
+                let a = CodexAdapter::new(roots.codex.clone(), state(), backups.clone())
+                    .with_claude_home(roots.claude.clone());
                 match sessions {
                     Some(o) => a.with_sessions(o),
                     None => a,

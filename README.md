@@ -48,8 +48,7 @@ Notes:
 
 ## Chat sessions
 
-Sessions travel Claude Code to Pi, Pi to Claude Code, Codex to Claude Code and Codex to Pi. Codex
-only sends: its own importer already brings Claude sessions in. A session is copied once, as a
+Sessions travel between Claude Code, Codex and Pi in every direction. A session is copied once, as a
 resumable transcript in the target agent's own format, with each tool call and its result shown
 as one readable text block (`Tool: <name>`, the command or input, `Result:` and the output, both
 cut when long) and thinking dropped. The copy is refreshed only while you have not touched it and
@@ -69,6 +68,11 @@ counts automated sessions per agent (`automated_sessions` in `--json`).
 
 A copy written by an older version of the tool is rewritten once when it is still unmodified.
 Pi copies open with Pi's own default model, without a model-restore warning.
+
+Codex copies are rollout files under `sessions/` shaped like what Codex's own importer writes; for a
+Claude session this tool also adds the matching record to Codex's import ledger so Codex does not
+import it again, and a session Codex already imported counts as its copy. Codex's databases are not
+written, so whether Codex lists a copy without a database row is not guaranteed yet.
 
 Automated sessions are recognised by structure only: a Claude Code transcript whose first line has
 an `entrypoint` starting with `sdk`; a Codex rollout that is a sub-agent thread (`source` an

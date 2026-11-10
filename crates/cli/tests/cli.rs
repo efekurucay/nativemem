@@ -921,7 +921,13 @@ fn sessions_sync_to_pi_and_show_in_status_separately() {
     );
     assert_eq!(by_id("pi")["sessions"], 1);
     assert_eq!(by_id("pi")["replicas"], 0);
-    assert_eq!(by_id("codex")["sessions"], 0);
+    assert_eq!(
+        (
+            by_id("codex")["sessions"].clone(),
+            by_id("codex")["replicas"].clone()
+        ),
+        (json!(1), json!(1))
+    );
     assert_eq!(status["ledger_items"], 1, "memory items only");
     let (code, plan) = f.json(&["sync", "--json"]);
     assert_eq!(code, Some(0));
@@ -956,7 +962,7 @@ fn items_leaves_sessions_out_unless_asked_and_never_prints_bodies() {
         .all(|i| i["kind"] != "session"));
     let (_, items) = f.json(&["items", "--kind", "session", "--json"]);
     let list = items["items"].as_array().unwrap();
-    assert_eq!(list.len(), 2);
+    assert_eq!(list.len(), 3);
     for i in list {
         assert_eq!(i["kind"], "session");
         assert_eq!(i["body"], "");

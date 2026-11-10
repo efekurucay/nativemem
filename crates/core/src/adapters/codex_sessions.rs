@@ -1,22 +1,23 @@
-//! Codex rollouts, read only: `sessions/YYYY/MM/DD/rollout-<ts>-<thread id>.jsonl`. Text turns
-//! come from the event stream (it never carries the harness context Codex injects as user
-//! messages), tool calls and results from the `response_item` stream. Sessions that Codex
-//! imported from another agent are not originals and are left out.
+//! Codex rollouts: `sessions/YYYY/MM/DD/rollout-<ts>-<thread id>.jsonl`. Text turns come from the
+//! event stream (it never carries the harness context Codex injects as user messages), tool calls
+//! and results from the `response_item` stream. A rollout is a replica, never an original, when it
+//! carries this tool's `nativemem_origin`, or Codex's import marker or import-ledger record; the
+//! latter map to the Claude session they were imported from.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::codex_imports;
+use super::codex_rollout::{ORIGIN_KEY, TITLE_KEY};
 use crate::error::{Error, Result};
-use crate::model::AgentId;
+use crate::model::{AgentId, ItemKey};
 use crate::session::{
-    parse_iso_ms, title_from_turns, too_large_reason, Role, Session, SessionOptions, SessionScan,
-    Source, TurnBuilder,
+    clean_title, parse_iso_ms, parse_marker, title_from_turns, too_large_reason, Role, Session,
+    SessionOptions, SessionScan, Source, TurnBuilder,
 };
 
-const IMPORT_LEDGER: &str = "external_agent_session_imports.json";
 /// The text Codex's importer appends as the last assistant event of an imported session.
 pub const IMPORT_MARKER: &str = "<EXTERNAL SESSION IMPORTED>";
 const MAX_DEPTH: usize = 4;
@@ -32,27 +33,13 @@ pub struct Parsed {
     pub has_cwd: bool,
     /// Sub-agent thread, headless `exec` run, or a thread another agent started.
     pub automated: bool,
+    /// The original this tool wrote the rollout from.
+    pub origin: Option<ItemKey>,
 }
 
 impl CodexSessions {
     pub fn new(home: PathBuf, options: SessionOptions) -> Self {
         CodexSessions { home, options }
-    }
-
-    /// Thread ids Codex's importer recorded in its ledger.
-    fn imported_ids(&self) -> HashSet<String> {
-        let Ok(text) = fs::read_to_string(self.home.join(IMPORT_LEDGER)) else {
-            return HashSet::new();
-        };
-        let Ok(doc) = serde_json::from_str::<Value>(&text) else {
-            return HashSet::new();
-        };
-        doc.get("records")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|r| r.get("imported_thread_id")?.as_str().map(str::to_string))
-            .collect()
     }
 
     pub fn scan(&self, agent: &AgentId) -> Result<SessionScan> {
@@ -61,7 +48,7 @@ impl CodexSessions {
         let mut files = Vec::new();
         collect_rollouts(&root, 0, &mut files)?;
         files.sort();
-        let imported = self.imported_ids();
+        let imports = codex_imports::read(&self.home);
         for path in files {
             let native_id = path
                 .strip_prefix(&root)
@@ -81,21 +68,26 @@ impl CodexSessions {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let thread_id = thread_id_of(&stem);
-            if imported.contains(thread_id) {
-                continue;
-            }
             let bytes = fs::read(&path).map_err(|e| Error::io(&path, e))?;
             let text = String::from_utf8_lossy(&bytes);
-            if text.contains(IMPORT_MARKER) {
-                continue;
-            }
             let Some(parsed) = parse(&text, thread_id, mtime_ms) else {
                 continue;
+            };
+            let import = imports.iter().find(|r| r.thread_id == thread_id);
+            let replica_of = match parsed.origin.clone() {
+                Some(origin) => Some(origin),
+                None if import.is_some() || text.contains(IMPORT_MARKER) => {
+                    match import.and_then(|r| claude_key(&r.source_path)) {
+                        Some(key) => Some(key),
+                        None => continue,
+                    }
+                }
+                None => None,
             };
             if !parsed.session.has_user_turn() {
                 continue;
             }
-            if parsed.automated {
+            if replica_of.is_none() && parsed.automated {
                 out.automated += 1;
                 if self.options.exclude_automated {
                     continue;
@@ -103,7 +95,7 @@ impl CodexSessions {
             }
             if parsed.has_cwd {
                 out.observed
-                    .push(parsed.session.observed(agent, native_id, path, None));
+                    .push(parsed.session.observed(agent, native_id, path, replica_of));
             } else {
                 out.skipped
                     .push((native_id, "no cwd in session_meta".to_string()));
@@ -111,6 +103,17 @@ impl CodexSessions {
         }
         Ok(out)
     }
+}
+
+/// The Claude session an import-ledger `source_path` names: `<project dir>/<file>`.
+fn claude_key(source_path: &str) -> Option<ItemKey> {
+    let p = Path::new(source_path);
+    let file = p.file_name()?.to_string_lossy();
+    let dir = p.parent()?.file_name()?.to_string_lossy();
+    (file.ends_with(".jsonl") && !dir.is_empty()).then(|| ItemKey {
+        origin: AgentId::new("claude"),
+        native_id: format!("{dir}/{file}"),
+    })
 }
 
 /// The UUID at the end of `rollout-<ts>-<uuid>`.
@@ -194,7 +197,7 @@ pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
                 .turns
                 .last()
                 .is_some_and(|t| t.role == role && t.text == text);
-            if !dup {
+            if !dup && text != IMPORT_MARKER {
                 builder.text(role, text, last_ts);
             }
         };
@@ -273,10 +276,11 @@ pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
     Some(Parsed {
         has_cwd: cwd.is_some(),
         automated,
+        origin: text_of(ORIGIN_KEY).and_then(parse_marker),
         session: Session {
             id,
             cwd: PathBuf::from(cwd.unwrap_or_default()),
-            title: title_from_turns(&turns),
+            title: text_of(TITLE_KEY).map_or_else(|| title_from_turns(&turns), clean_title),
             created_ms: created,
             updated_ms: mtime_ms,
             turns,

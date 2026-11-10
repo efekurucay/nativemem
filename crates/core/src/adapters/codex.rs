@@ -6,9 +6,13 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
-use crate::session::{is_session_id, SessionOptions, SessionReport, SessionScan};
+use crate::session::{
+    is_session_id, set_mtime, Session, SessionOptions, SessionReport, SessionScan,
+};
 use crate::slug::slugify;
 
+use super::codex_imports;
+use super::codex_rollout;
 use super::codex_sessions::CodexSessions;
 use super::sections::{self, block_span, region_span, InstructionFile, BLOCK_BEGIN, BLOCK_END};
 
@@ -61,7 +65,11 @@ pub struct CodexAdapter {
     backups: BackupSession,
     instructions: InstructionFile,
     sessions: Option<CodexSessions>,
+    claude_home: Option<PathBuf>,
 }
+
+/// Bump when the written rollout format changes; unmodified replicas are then rewritten.
+const SESSION_WRITER_REVISION: u32 = 1;
 
 struct Replica {
     origin: String,
@@ -346,7 +354,68 @@ impl CodexAdapter {
             state_dir,
             backups,
             sessions: None,
+            claude_home: None,
         }
+    }
+
+    /// Where Claude Code's transcripts live. Codex's importer ledger records the bytes of the
+    /// transcript a thread came from, so a replica of a Claude session needs to read it.
+    pub fn with_claude_home(mut self, claude_home: PathBuf) -> Self {
+        self.claude_home = Some(claude_home);
+        self
+    }
+
+    /// Writes the replica rollout below `sessions/`, and for a Claude original the matching
+    /// record in Codex's importer ledger so Codex does not import the same session again.
+    fn write_session_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
+        let session = Session::from_body(&item.body)
+            .ok_or_else(|| Error::Parse("session body is not a session".into()))?;
+        let thread = codex_rollout::thread_id(&session, key);
+        let root = self.home.join("sessions");
+        let rel = codex_rollout::relative_path(&session, &thread);
+        let path = root.join(&rel);
+        let suffix = format!("-{thread}.jsonl");
+        let existing = match fs::read_dir(path.parent().unwrap_or(&root)) {
+            Ok(entries) => entries
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.to_string_lossy().ends_with(&suffix)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(Error::io(&root, e)),
+        };
+        let path = existing.unwrap_or(path);
+        if path.exists() {
+            fsx::backup(
+                &self.backups,
+                &self.state_dir,
+                &Self::agent(),
+                &self.home,
+                &path,
+            )?;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let text = codex_rollout::render(&session, key, &thread, now);
+        fsx::atomic_write(&path, text.as_bytes())?;
+        set_mtime(&path, session.updated_ms);
+        if key.origin.as_str() == "claude" {
+            let source = self
+                .claude_home
+                .as_ref()
+                .map(|h| h.join("projects").join(&key.native_id));
+            if let Some(record) =
+                source.and_then(|s| codex_imports::record_for(&s, &thread, &session.title))
+            {
+                codex_imports::upsert(&self.home, &self.state_dir, &self.backups, record)?;
+            }
+        }
+        let native_id = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        Ok((native_id, path))
     }
 
     /// Reads rollouts as session originals; without this call sessions stay out. Codex never
@@ -428,8 +497,25 @@ impl Adapter for CodexAdapter {
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
         matches!(
             (kind, scope),
-            (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
+            (Kind::Memory | Kind::Session, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
         )
+    }
+
+    fn writer_revision(&self, kind: Kind) -> u32 {
+        if kind == Kind::Session {
+            SESSION_WRITER_REVISION
+        } else {
+            0
+        }
+    }
+
+    /// A rollout without this tool's `nativemem_origin` is Codex's own import.
+    fn is_foreign_replica(&self, replica: &Observed) -> bool {
+        replica.item.kind == Kind::Session
+            && fs::read_to_string(&replica.path)
+                .ok()
+                .and_then(|t| t.lines().next().map(str::to_string))
+                .is_some_and(|first| !first.contains(codex_rollout::ORIGIN_KEY))
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
@@ -496,7 +582,7 @@ impl Adapter for CodexAdapter {
             return self.instructions.write_replica(key, item);
         }
         if item.kind == Kind::Session {
-            return Err(Error::unsupported(AGENT, "write_replica session"));
+            return self.write_session_replica(key, item);
         }
         let Scope::Project(cwd) = &item.scope else {
             return Err(Error::unsupported(AGENT, "write_replica global scope"));

@@ -94,6 +94,11 @@ pub trait Adapter {
     fn writer_revision(&self, _kind: Kind) -> u32 {
         0
     }
+    /// Whether `replica` was written by something other than this tool (another program's own
+    /// import). Such a replica is adopted into the ledger as it is and never rewritten.
+    fn is_foreign_replica(&self, _replica: &Observed) -> bool {
+        false
+    }
     fn scan(&self) -> Result<Vec<Observed>>;
     /// Create or update the replica of `key` in this agent. Returns its native_id and path.
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)>;

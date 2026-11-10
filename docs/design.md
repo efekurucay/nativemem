@@ -252,8 +252,8 @@ repositories and are never read or written.
 ## Chat sessions
 
 `Kind::Session`. One item is one chat session. Sessions are logs, not documents, so they follow a
-different policy from memory and instruction items. Claude Code and Pi read and write sessions;
-Codex is read only.
+different policy from memory and instruction items. Claude Code, Codex and Pi read and write
+sessions.
 
 - Neutral model (`core::session`): id, working directory, title, created and updated times, and an
   ordered list of turns (`user` or `assistant`, text, timestamp). Thinking blocks and provider
@@ -295,15 +295,37 @@ Codex is read only.
   `sdk-ts`); Codex when `session_meta.source` is an object (sub-agent), `parent_thread_id` is set,
   `thread_source` is `subagent`, `source` is `exec`, or `originator` is `codex_exec` or `Claude Code`.
   Pi files carry no such marker. `status` counts them per agent either way.
-- Codex is a read-only source (`supports(Session)` is false, so it never receives sessions): Codex's
-  own importer already brings Claude sessions into Codex. Originals come from
-  `sessions/YYYY/MM/DD/rollout-*.jsonl`: text turns from the event stream (`item_completed`
-  `UserMessage` / `AgentMessage`, or legacy `user_message` / `agent_message`), which never carries the
-  context Codex injects as user messages, tool calls and results from `function_call`,
+- Codex: originals come from `sessions/YYYY/MM/DD/rollout-*.jsonl`: text turns from the event stream
+  (`item_completed` `UserMessage` / `AgentMessage`, or `user_message` / `agent_message`), which never
+  carries the context Codex injects as user messages, tool calls and results from `function_call`,
   `custom_tool_call` and their outputs; title = first user text; cwd from `session_meta`; sub-agent
-  threads are skipped. Rollouts of sessions Codex imported (thread ids in
-  `external_agent_session_imports.json`, or any rollout containing `<EXTERNAL SESSION IMPORTED>`) are
-  never originals.
+  threads are skipped as automated. A replica is written as `sessions/YYYY/MM/DD/rollout-<UTC ts of
+  the session's creation>-<thread id>.jsonl` shaped like the output of Codex's own importer for a
+  Claude session (`core::adapters::codex_rollout`): `session_meta` (originator `Codex Desktop` for a
+  Claude origin, the origin agent's display name otherwise; `cli_version`, `source`,
+  `model_provider` as the importer writes them; `history_mode` `legacy`, so no `ordinal` fields),
+  one `external-import-turn-N` turn per user message with event and response-item pairs, the
+  `<EXTERNAL SESSION IMPORTED>` marker event once, a `token_count` and the closing `task_complete`.
+  The thread id is a UUIDv7 of the creation time with the rest derived from the origin, so a refresh
+  rewrites the same file; the file mtime is the original's. `session_meta` also carries
+  `nativemem_origin` and `nativemem_title`, which map a re-read back to the original and keep the
+  title. Only the rollout is written: Codex's `threads` table, `session_index.jsonl`,
+  `history.jsonl` and the other SQLite files are not touched, because their schema belongs to Codex.
+  Whether Codex lists a rollout without a `threads` row (it backfills from rollout files) is observed
+  on real use; a later slice can add the row behind a schema-version check in the same module split.
+- Any rollout containing the `<EXTERNAL SESSION IMPORTED>` marker is a replica, never an original,
+  whichever program wrote it. Replicas written by this tool map to their origin through
+  `nativemem_origin`; rollouts imported by Codex itself map through
+  `external_agent_session_imports.json` (`source_path` names the Claude transcript), and a marked
+  rollout without a record is ignored. Adoption: when a Claude session has a record in that ledger,
+  the engine records the imported thread as the Codex replica (ledger rows, no write) with an empty
+  hash, so it is never rewritten. After this tool writes a replica of a Claude session it adds the
+  equivalent record (`source_path`, `content_sha256` of the transcript bytes, `imported_thread_id`,
+  `imported_at`, `source_modified_at`, `title`) to that file, replacing an earlier record of the same
+  thread, so Codex's importer does not import the session again. The file is parsed and rewritten
+  whole (every other key and record is kept, key order is not), backed up first, created only when
+  the Codex home exists, and left alone when it does not parse. Sessions of other origins have no
+  record.
 - Claude Code: `projects/<dir>/<session id>.jsonl`. Reading takes `user` and
   `assistant` lines in file order (the order Codex's importer uses), `isMeta` and `isSidechain` lines
   dropped, one turn per text block; `tool_use` / `tool_result` blocks are merged as above. Title = last `custom-title`, else last

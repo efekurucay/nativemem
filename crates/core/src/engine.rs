@@ -590,7 +590,12 @@ fn plan_session(
                     agent,
                     replica_native_id: o.native_id.clone(),
                     path: o.path.clone(),
-                    hash: content_hash(&o.item),
+                    // An empty hash freezes a replica another program wrote.
+                    hash: if adapter.is_foreign_replica(o) {
+                        String::new()
+                    } else {
+                        content_hash(&o.item)
+                    },
                     revision: adapter.writer_revision(Kind::Session),
                 },
                 name: label.clone(),
@@ -1636,7 +1641,8 @@ mod session_tests {
                 }
             },
             codex: {
-                let a = CodexAdapter::new(root.join("codex"), state.clone(), backups.clone());
+                let a = CodexAdapter::new(root.join("codex"), state.clone(), backups.clone())
+                    .with_claude_home(root.join("claude"));
                 match options {
                     Some(o) => a.with_sessions(o),
                     None => a,
@@ -1746,11 +1752,10 @@ mod session_tests {
         let f = fx();
         f.claude_session("c1", "Fix login", CHAT);
         let p = f.plan();
-        assert_eq!(
-            p.to_string().lines().next().unwrap(),
-            "+ pi  /w/app  session \"Fix login\"  (from claude)"
-        );
-        assert_eq!(p.actions.len(), 1, "codex never receives sessions:\n{p}");
+        let text = p.to_string();
+        assert!(text.contains("+ pi  /w/app  session \"Fix login\"  (from claude)"));
+        assert!(text.contains("+ codex  /w/app  session \"Fix login\"  (from claude)"));
+        assert_eq!(p.actions.len(), 2, "{p}");
         f.sync();
 
         let replica = f.replica_of(&f.pi);
@@ -1772,7 +1777,12 @@ mod session_tests {
             .find(|o| o.replica_of.is_none())
             .unwrap();
         assert_eq!(content_hash(&original.item), content_hash(&replica.item));
-        assert_eq!(f.sessions(&f.codex).len(), 0);
+        let codex = f.replica_of(&f.codex);
+        assert_eq!(content_hash(&original.item), content_hash(&codex.item));
+        assert_eq!(
+            codex.replica_of.as_ref().unwrap().native_id,
+            "-w-app/c1.jsonl"
+        );
     }
 
     #[test]
@@ -1780,7 +1790,7 @@ mod session_tests {
         let f = fx();
         f.pi_session("p1", "Pi chat", CHAT);
         let r = f.sync();
-        assert_eq!(r.done.len(), 1);
+        assert_eq!(r.done.len(), 2, "claude and codex");
         let replica = f.replica_of(&f.claude);
         let s = parsed(&replica);
         assert_eq!((s.title.as_str(), s.turns.len()), ("Pi chat", 3));
@@ -1836,9 +1846,15 @@ mod session_tests {
         let x = CodexHome::new(&f.root.join("codex"));
         x.add_rollout(TID, Path::new(CWD), CHAT, false);
         x.add_rollout(TID2, Path::new(CWD), CHAT, true);
-        assert_eq!(f.sessions(&f.codex).len(), 1, "marker excludes the second");
+        let originals = |f: &Fx| {
+            f.sessions(&f.codex)
+                .into_iter()
+                .filter(|o| o.replica_of.is_none())
+                .count()
+        };
+        assert_eq!(originals(&f), 1, "marker excludes the second");
         x.write_import_ledger(&[TID]);
-        assert_eq!(f.sessions(&f.codex).len(), 0, "ledger excludes the first");
+        assert_eq!(originals(&f), 0, "ledger excludes the first");
         assert!(f.plan().is_empty());
     }
 
@@ -1854,12 +1870,12 @@ mod session_tests {
             .collect();
         f.claude_session("c1", "Fix login", &more);
         let p = f.plan();
-        assert_eq!(
-            p.to_string().lines().next().unwrap(),
-            "~ pi  /w/app  session \"Fix login\"  (from claude)"
-        );
+        assert!(p
+            .to_string()
+            .contains("~ pi  /w/app  session \"Fix login\"  (from claude)"));
         f.sync();
         assert_eq!(parsed(&f.replica_of(&f.pi)).turns.len(), 5);
+        assert_eq!(parsed(&f.replica_of(&f.codex)).turns.len(), 5);
         let backups = f.root.join("state/backups/T/pi/sessions");
         assert!(backups.is_dir(), "refresh backs the old replica up");
     }
@@ -1888,8 +1904,8 @@ mod session_tests {
         fs::write(&replica.path, &text).unwrap();
         let more: Vec<(&str, &str)> = CHAT.iter().copied().chain([("user", "grown")]).collect();
         f.claude_session("c1", "Fix login", &more);
-        let p = f.plan();
-        assert!(p.is_empty(), "{p}");
+        let p = f.plan().to_string();
+        assert!(!p.contains(" pi "), "{p}");
         assert_eq!(fs::read_to_string(&replica.path).unwrap(), text);
         assert_eq!(parsed(&f.replica_of(&f.pi)).turns.len(), 4);
     }
@@ -1901,14 +1917,14 @@ mod session_tests {
         f.sync();
         fs::remove_file(f.replica_of(&f.pi).path).unwrap();
         let p = f.plan();
-        assert_eq!(
-            p.to_string().lines().next().unwrap(),
-            "x pi  /w/app  session \"Fix login\"  (replica deleted; not recreated)"
-        );
+        assert!(p
+            .to_string()
+            .contains("x pi  /w/app  session \"Fix login\"  (replica deleted; not recreated)"));
         f.sync();
         let more: Vec<(&str, &str)> = CHAT.iter().copied().chain([("user", "grown")]).collect();
         f.claude_session("c1", "Fix login", &more);
-        assert!(f.plan().is_empty());
+        let p = f.plan().to_string();
+        assert!(p.contains("~ codex") && !p.contains(" pi "), "{p}");
         assert_eq!(f.sessions(&f.pi).len(), 0);
     }
 
@@ -2145,6 +2161,172 @@ mod session_tests {
         }
     }
 
+    fn codex_files(f: &Fx) -> std::collections::BTreeSet<PathBuf> {
+        fn walk(dir: &Path, out: &mut std::collections::BTreeSet<PathBuf>) {
+            for e in fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else {
+                    out.insert(p);
+                }
+            }
+        }
+        let mut out = Default::default();
+        walk(&f.root.join("codex"), &mut out);
+        out
+    }
+
+    fn import_records(f: &Fx) -> Vec<serde_json::Value> {
+        let text =
+            fs::read_to_string(f.root.join("codex/external_agent_session_imports.json")).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["records"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn claude_session_becomes_a_codex_rollout_with_an_import_record() {
+        let f = fx();
+        let src = f.claude_session("c1", "Fix login", CHAT);
+        age_days(&src, 3);
+        f.sync();
+        let replica = f.replica_of(&f.codex);
+        assert!(replica
+            .native_id
+            .starts_with("2026/11/10/rollout-2026-11-10T10-00-00-"));
+        let s = parsed(&replica);
+        assert_eq!((s.title.as_str(), s.turns.len()), ("Fix login", 3));
+        assert_eq!(
+            content_hash(&replica.item),
+            content_hash(&f.sessions(&f.claude)[0].item)
+        );
+        let text = fs::read_to_string(&replica.path).unwrap();
+        assert_eq!(text.matches("<EXTERNAL SESSION IMPORTED>").count(), 1);
+        assert!(
+            text.contains("external-import-turn-2") && !text.contains("external-import-turn-3")
+        );
+        let tid = replica
+            .path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .rsplit('-')
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("-");
+        assert_eq!(tid.as_bytes()[14], b'7', "{tid}");
+
+        let records = import_records(&f);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["imported_thread_id"], tid);
+        assert_eq!(records[0]["source_path"], src.to_string_lossy().as_ref());
+        assert_eq!(
+            records[0]["content_sha256"],
+            crate::session::sha_hex(&fs::read(&src).unwrap())
+        );
+        f.sync();
+        assert_eq!(import_records(&f).len(), 1, "idempotent");
+
+        let m = |p: &Path| fs::metadata(p).unwrap().modified().unwrap();
+        let diff = m(&src)
+            .duration_since(m(&replica.path))
+            .unwrap_or_else(|e| e.duration());
+        assert!(diff.as_secs() < 2);
+
+        // Nothing but sessions/ and the import ledger was written.
+        let changed: Vec<String> = codex_files(&f)
+            .iter()
+            .map(|p| {
+                p.strip_prefix(f.root.join("codex"))
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            changed
+                .iter()
+                .all(|p| p.starts_with("sessions/") || p == "external_agent_session_imports.json"),
+            "{changed:?}"
+        );
+    }
+
+    #[test]
+    fn pi_session_becomes_a_codex_rollout_without_an_import_record() {
+        let f = fx();
+        f.pi_session("p1", "Pi chat", CHAT);
+        f.sync();
+        let replica = f.replica_of(&f.codex);
+        assert_eq!(parsed(&replica).turns.len(), 3);
+        let first = fs::read_to_string(&replica.path).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(first.lines().next().unwrap()).unwrap();
+        assert_eq!(meta["payload"]["originator"], "Pi");
+        assert_eq!(meta["payload"]["source"], "vscode");
+        assert!(!f
+            .root
+            .join("codex/external_agent_session_imports.json")
+            .exists());
+    }
+
+    #[test]
+    fn a_session_imported_by_codex_is_adopted_not_written_again() {
+        let f = fx();
+        let src = f.claude_session("c1", "Fix login", CHAT);
+        let x = CodexHome::new(&f.root.join("codex"));
+        x.add_rollout(TID, Path::new(CWD), CHAT, true);
+        fs::write(
+            f.root.join("codex/external_agent_session_imports.json"),
+            serde_json::json!({"records": [{"source_path": src.to_string_lossy(), "content_sha256": "x",
+                "imported_thread_id": TID, "imported_at": 1, "source_modified_at": 2, "connector_names": [], "title": "t"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let before = codex_files(&f);
+        let p = f.plan();
+        let text = p.to_string();
+        assert!(
+            text.contains("= codex  /w/app  session \"Fix login\"   (adopt replica of claude)"),
+            "{text}"
+        );
+        assert!(!text.contains("+ codex"), "{text}");
+        f.sync();
+        assert_eq!(codex_files(&f), before, "no new rollout, ledger untouched");
+        assert_eq!(import_records(&f).len(), 1);
+        let more: Vec<(&str, &str)> = CHAT.iter().copied().chain([("user", "grown")]).collect();
+        f.claude_session("c1", "Fix login", &more);
+        assert!(
+            !f.plan().to_string().contains("codex"),
+            "an adopted import is never rewritten"
+        );
+    }
+
+    #[test]
+    fn tool_activity_renders_identically_in_every_target() {
+        let f = fx();
+        let src = f.claude_session("c1", "Fix login", &[("user", "list files")]);
+        let mut text = fs::read_to_string(&src).unwrap();
+        for l in [
+            serde_json::json!({"type": "assistant", "timestamp": "2026-11-10T10:00:01.000Z", "cwd": CWD, "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls", "description": "d"}}]}}),
+            serde_json::json!({"type": "user", "timestamp": "2026-11-10T10:00:02.000Z", "cwd": CWD, "message": {"role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "a\nb"}]}}),
+        ] {
+            text.push_str(&format!("{l}\n"));
+        }
+        fs::write(&src, text).unwrap();
+        f.sync();
+        let want = "Tool: Bash\n```\nls\n```\nResult:\n```\na\nb\n```";
+        for a in [&f.pi as &dyn Adapter, &f.codex] {
+            let s = parsed(&f.replica_of(a));
+            assert_eq!(s.turns.iter().filter(|t| t.text == want).count(), 1);
+        }
+    }
+
     #[test]
     fn claude_replicas_are_refreshed_on_a_revision_bump_too() {
         let f = fx();
@@ -2269,8 +2451,8 @@ mod session_tests {
                 native_id: "-w-app/c1.jsonl".into(),
             })
             .unwrap();
-        assert_eq!(r.len(), 1);
-        assert_eq!(r[0].agent, AgentId::new("pi"));
-        assert!(!r[0].hash.is_empty());
+        let agents: Vec<_> = r.iter().map(|x| x.agent.as_str()).collect();
+        assert_eq!(agents, ["codex", "pi"]);
+        assert!(r.iter().all(|x| !x.hash.is_empty()));
     }
 }
