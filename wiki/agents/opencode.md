@@ -16,8 +16,8 @@ repo, and `opencode.json` and `service.json` (which hold secrets) are never open
 
 | Kind | Status | Adapter |
 |---|---|---|
-| Project memory | Replicas only (OpenCode has no native memory): store plus routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
-| Instruction sections | Read and write in `AGENTS.md` | `agents_file.rs` through `sections.rs` |
+| Project memory | OpenCode has no native memory: the store holds replicas and originals created through `add`, announced by a routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
+| Instruction sections | Read and write in `AGENTS.md`, including a new section through `add` | `agents_file.rs` through `sections.rs` |
 | Sessions | Always read as originals while `opencode.db` exists; copies written only with `NATIVEMEM_OPENCODE_SESSION_WRITES=on` while the session probes pass | `crates/core/src/adapters/opencode_sessions.rs`, `opencode_project.rs`, `agents_file.rs` |
 | Skills (global) | Read and write in `<opencode home>/skills/` | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
 | MCP servers | Not implemented | |

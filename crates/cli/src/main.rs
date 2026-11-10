@@ -10,6 +10,7 @@ use nativemem_core::adapters::claude::ClaudeAdapter;
 use nativemem_core::adapters::codex::CodexAdapter;
 use nativemem_core::adapters::opencode_sessions::DATABASE;
 use nativemem_core::adapters::pi::PiAdapter;
+use nativemem_core::adapters::sections::section_problem;
 use nativemem_core::adapters::skills::skill_name;
 use nativemem_core::compat::{self, AgentReport, CompatState};
 use nativemem_core::engine::{self, Action, ApplyOptions, Note};
@@ -18,6 +19,7 @@ use nativemem_core::fsx::BackupSession;
 use nativemem_core::ledger::Ledger;
 use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Kind, Observed, Scope};
 use nativemem_core::session::{is_session_id, SessionOptions};
+use nativemem_core::slug::slugify;
 use serde_json::{json, Value};
 
 mod doctor;
@@ -120,6 +122,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Create one new original entry from a JSON document on stdin; does not sync
+    Add {
+        /// claude, codex, opencode or pi
+        #[arg(long)]
+        agent: String,
+        /// memory (needs --project) or instruction (a global section)
+        #[arg(long, value_parser = ["memory", "instruction"])]
+        kind: String,
+        /// Absolute path of the project a memory entry belongs to
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
     /// Rewrite one original entry from a JSON document on stdin; does not sync
     Edit {
         /// claude, codex, opencode or pi
@@ -214,6 +231,7 @@ impl Failure {
             Failure::Replica => "unsupported",
             Failure::Core(Error::MassDelete { .. }) => "mass_delete",
             Failure::Core(Error::Unsupported { .. }) => "unsupported",
+            Failure::Core(Error::Exists(_)) => "exists",
             Failure::Core(Error::Io { .. }) => "io",
             Failure::Core(Error::Parse(_)) => "parse",
             Failure::Core(Error::Ledger(_)) => "ledger",
@@ -747,6 +765,109 @@ fn edit(
     Ok(())
 }
 
+fn invalid(message: impl Into<String>) -> Failure {
+    Failure::Coded {
+        code: "invalid",
+        message: message.into(),
+    }
+}
+
+/// A single non-empty line without surrounding blanks.
+fn one_line(field: &str, value: &str) -> Outcome<String> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(['\n', '\r']) {
+        return Err(invalid(format!("{field} must be one non-empty line")));
+    }
+    Ok(value.to_string())
+}
+
+/// An absolute path without trailing slashes, `.` parts or doubled separators.
+fn project_path(project: &Path) -> Outcome<PathBuf> {
+    if !project.is_absolute() || project.components().any(|c| c.as_os_str() == "..") {
+        return Err(invalid("--project must be an absolute path without `..`"));
+    }
+    Ok(project.components().collect())
+}
+
+fn add(
+    roots: &Roots,
+    backups: &BackupSession,
+    agents: &Agents,
+    (agent, kind, project): (&str, &str, Option<&Path>),
+    json: bool,
+) -> Outcome<()> {
+    let adapter = agents.named(agent)?.ok_or_else(|| Failure::Coded {
+        code: "not_installed",
+        message: format!("{agent} has no home directory"),
+    })?;
+    let (kind, scope) = match (Kind::parse(kind), project) {
+        (Some(Kind::Memory), Some(p)) => (Kind::Memory, Scope::Project(project_path(p)?)),
+        (Some(Kind::Memory), None) => return Err(invalid("a memory entry needs --project")),
+        (Some(Kind::Instruction), None) => (Kind::Instruction, Scope::Global),
+        (Some(Kind::Instruction), Some(_)) => {
+            return Err(invalid(
+                "an instruction section is global and takes no --project",
+            ))
+        }
+        _ => return Err(invalid("--kind must be memory or instruction")),
+    };
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(Error::from)?;
+    let (name, description, category, body) = parse_edit(&input)?;
+    let item = if kind == Kind::Instruction {
+        let heading = one_line("description", &description)?;
+        if let Some(problem) = section_problem(&heading, &body) {
+            return Err(invalid(problem));
+        }
+        Item {
+            kind,
+            scope,
+            name: slugify(&heading),
+            description: heading,
+            category: None,
+            body,
+            source_dir: None,
+        }
+    } else {
+        Item {
+            kind,
+            scope,
+            name: one_line("name", &name)?,
+            description: one_line("description", &description)?,
+            category: category
+                .filter(|c| !c.trim().is_empty())
+                .map(|c| one_line("category", &c))
+                .transpose()?,
+            body,
+            source_dir: None,
+        }
+    };
+    if !adapter.supports(item.kind, &item.scope) {
+        return Err(Error::unsupported(agent, "create").into());
+    }
+    let (id, path) = adapter.create_original(&item)?;
+    let written = find_entry(adapter, &id)?.ok_or_else(|| Failure::NotFound {
+        agent: agent.to_string(),
+        id: id.clone(),
+    })?;
+    let hash = content_hash(&written.item);
+    let backup_dir = roots.state.join("backups").join(backups.stamp());
+    if json {
+        print_json(&json!({
+            "agent": agent,
+            "native_id": id,
+            "path": path.display().to_string(),
+            "hash": hash,
+            "backup_dir": backup_dir.display().to_string(),
+        }));
+    } else {
+        println!("added {agent}  {id}  {}", path.display());
+    }
+    Ok(())
+}
+
 struct Counts {
     add: usize,
     update: usize,
@@ -940,6 +1061,7 @@ fn run(cli: &Cli) -> Outcome<u8> {
     let _lock = match &cli.command {
         Command::Sync { apply: true, .. }
         | Command::Delete { .. }
+        | Command::Add { .. }
         | Command::Edit { .. }
         | Command::Doctor {
             accept: Some(_), ..
@@ -1020,6 +1142,19 @@ fn run(cli: &Cli) -> Outcome<u8> {
         Command::Delete { agent, id, json } => {
             delete(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
+        Command::Add {
+            agent,
+            kind,
+            project,
+            json,
+        } => add(
+            &roots,
+            &backups,
+            &agents,
+            (agent, kind, project.as_deref()),
+            *json,
+        )
+        .map(|()| 0),
         Command::Edit { agent, id, json } => {
             edit(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
@@ -1037,6 +1172,7 @@ fn wants_json(command: &Command) -> bool {
         | Command::Doctor { json, .. }
         | Command::Items { json, .. }
         | Command::Delete { json, .. }
+        | Command::Add { json, .. }
         | Command::Edit { json, .. }
         | Command::Skill(SkillArgs {
             command: SkillCommand::Show { json, .. },

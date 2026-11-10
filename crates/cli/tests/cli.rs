@@ -912,6 +912,236 @@ fn edit_instruction_heading_is_invalid_and_writes_nothing() {
     assert!(!f.state.join("backups").exists());
 }
 
+fn add(
+    f: &Fx,
+    agent: &str,
+    kind: &str,
+    project: Option<&str>,
+    stdin: &str,
+) -> (Option<i32>, Value) {
+    let mut args = vec!["add", "--agent", agent, "--kind", kind, "--json"];
+    if let Some(p) = project {
+        args.extend(["--project", p]);
+    }
+    run_stdin(f, stdin, &args)
+}
+
+const NEW_MEMORY: &str = r#"{"name":"created-note","description":"made by hand","category":"feedback","body":"hand body"}"#;
+const NEW_SECTION: &str =
+    r#"{"name":"x","description":"Fresh Rule","category":"user","body":"do it"}"#;
+
+fn items_of(f: &Fx) -> Vec<Value> {
+    f.json(&["items", "--json"]).1["items"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn add_memory_in_every_agent_then_sync_spreads_it() {
+    for agent in ["claude", "codex", "opencode", "pi"] {
+        let f = four_agents();
+        let (code, doc) = add(&f, agent, "memory", Some("/w/app/"), NEW_MEMORY);
+        assert_eq!(code, Some(0), "{agent}: {doc}");
+        assert_eq!(doc["agent"], agent);
+        assert!(
+            Path::new(doc["path"].as_str().unwrap()).is_file(),
+            "{agent}"
+        );
+        assert!(Path::new(doc["backup_dir"].as_str().unwrap()).starts_with(f.state.join("backups")));
+        let id = doc["native_id"].as_str().unwrap();
+        let created = items_of(&f)
+            .into_iter()
+            .find(|i| i["agent"] == agent && i["native_id"] == id)
+            .unwrap();
+        assert_eq!(
+            created["scope"],
+            json!({ "type": "project", "path": "/w/app" })
+        );
+        assert_eq!(created["category"], "feedback");
+        assert!(created["replica_of"].is_null());
+        assert_eq!(created["hash"], doc["hash"]);
+
+        let (code, sync) = f.json(&["sync", "--apply", "--json"]);
+        assert_eq!(code, Some(0), "{agent}: {sync}");
+        assert_eq!(sync["notes"], json!([]));
+        let copies: Vec<Value> = items_of(&f)
+            .into_iter()
+            .filter(|i| i["name"] == "created-note" && !i["replica_of"].is_null())
+            .collect();
+        assert_eq!(copies.len(), 3, "{agent}");
+        for c in &copies {
+            assert_eq!(c["replica_of"], json!({ "origin": agent, "native_id": id }));
+            assert_eq!(c["hash"], doc["hash"]);
+        }
+        let (_, again) = f.json(&["sync", "--json"]);
+        assert_eq!(again["actions"], json!([]), "{agent}");
+    }
+}
+
+#[test]
+fn add_instruction_in_every_agent_then_sync_spreads_it() {
+    for agent in ["claude", "codex", "opencode", "pi"] {
+        let f = four_agents();
+        let (code, doc) = add(&f, agent, "instruction", None, NEW_SECTION);
+        assert_eq!(code, Some(0), "{agent}: {doc}");
+        let file = if agent == "claude" {
+            "CLAUDE.md"
+        } else {
+            "AGENTS.md"
+        };
+        assert_eq!(doc["native_id"], format!("{file}#fresh-rule"));
+        let created = items_of(&f)
+            .into_iter()
+            .find(|i| i["agent"] == agent && i["native_id"] == doc["native_id"])
+            .unwrap();
+        assert_eq!(created["scope"], json!({ "type": "global" }));
+        assert_eq!(created["name"], "fresh-rule");
+        assert_eq!(created["description"], "Fresh Rule");
+        assert_eq!(created["category"], Value::Null);
+        assert_eq!(created["hash"], doc["hash"]);
+
+        let (code, sync) = f.json(&["sync", "--apply", "--json"]);
+        assert_eq!(code, Some(0), "{agent}: {sync}");
+        let copies: Vec<Value> = items_of(&f)
+            .into_iter()
+            .filter(|i| i["name"] == "fresh-rule" && !i["replica_of"].is_null())
+            .collect();
+        assert_eq!(copies.len(), 3, "{agent}");
+        for c in &copies {
+            assert_eq!(c["body"], "do it");
+            assert_eq!(c["hash"], doc["hash"]);
+        }
+    }
+}
+
+#[test]
+fn add_refuses_a_taken_id_and_leaves_the_file_alone() {
+    let f = four_agents();
+    for (kind, project, input) in [
+        ("memory", Some("/w/app"), NEW_MEMORY),
+        ("instruction", None, NEW_SECTION),
+    ] {
+        let (code, _) = add(&f, "pi", kind, project, input);
+        assert_eq!(code, Some(0));
+        let before = fs::read_to_string(f.state.with_file_name("pi").join("AGENTS.md")).unwrap();
+        let (code, doc) = add(&f, "pi", kind, project, input);
+        assert_eq!(code, Some(1), "{kind}");
+        assert_eq!(doc["code"], "exists", "{kind}");
+        assert_eq!(
+            fs::read_to_string(f.state.with_file_name("pi").join("AGENTS.md")).unwrap(),
+            before
+        );
+    }
+    let (code, doc) = add(
+        &f,
+        "claude",
+        "memory",
+        Some("/w/app"),
+        r#"{"name":"a","description":"d","category":null,"body":"b"}"#,
+    );
+    assert_eq!((code, &doc["code"]), (Some(1), &json!("exists")));
+    assert!(fs::read_to_string(&f.claude_file)
+        .unwrap()
+        .contains("alpha body"));
+}
+
+#[test]
+fn add_reports_invalid_input_and_writes_nothing() {
+    let f = four_agents();
+    let section = |description: &str, body: &str| {
+        json!({ "name": "n", "description": description, "category": null, "body": body })
+            .to_string()
+    };
+    let memory = |name: &str, description: &str, category: Value| {
+        json!({ "name": name, "description": description, "category": category, "body": "b" })
+            .to_string()
+    };
+    let cases: Vec<(&str, Option<&str>, String)> = vec![
+        ("memory", None, NEW_MEMORY.into()),
+        ("memory", Some("w/app"), NEW_MEMORY.into()),
+        ("memory", Some("/w/../app"), NEW_MEMORY.into()),
+        ("memory", Some("/w/app"), memory(" ", "d", Value::Null)),
+        ("memory", Some("/w/app"), memory("n", "", Value::Null)),
+        (
+            "memory",
+            Some("/w/app"),
+            memory("n", "two\nlines", Value::Null),
+        ),
+        ("memory", Some("/w/app"), memory("n", "d", json!("a\nb"))),
+        ("instruction", Some("/w/app"), NEW_SECTION.into()),
+        ("instruction", None, section("", "b")),
+        ("instruction", None, section("two\nlines", "b")),
+        (
+            "instruction",
+            None,
+            section("Fine", "text\n## Another\nmore"),
+        ),
+    ];
+    for (kind, project, input) in &cases {
+        for agent in ["claude", "pi"] {
+            let (code, doc) = add(&f, agent, kind, *project, input);
+            assert_eq!(code, Some(1), "{agent} {kind} {project:?} {input}");
+            assert_eq!(doc["code"], "invalid", "{agent} {kind} {project:?} {input}");
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(f.claude.join("CLAUDE.md")).unwrap(),
+        "# Mine\n\n## Style\nbe terse\n"
+    );
+    assert!(!f.state.with_file_name("pi").join("AGENTS.md").exists());
+    assert!(!f
+        .claude
+        .join("projects/-w-app/memory/created-note.md")
+        .exists());
+}
+
+#[test]
+fn add_trims_the_project_and_treats_an_empty_category_as_none() {
+    let f = four_agents();
+    let input = r#"{"name":"n","description":"d","category":"","body":"b"}"#;
+    let (code, doc) = add(&f, "pi", "memory", Some("/w/app//"), input);
+    assert_eq!(code, Some(0), "{doc}");
+    let created = items_of(&f)
+        .into_iter()
+        .find(|i| i["agent"] == "pi")
+        .unwrap();
+    assert_eq!(created["scope"]["path"], "/w/app");
+    assert_eq!(created["category"], Value::Null);
+}
+
+#[test]
+fn add_error_codes_for_agents_and_stdin() {
+    let f = Fx::new();
+    let (code, doc) = add(&f, "pi", "memory", Some("/w/app"), NEW_MEMORY);
+    assert_eq!((code, &doc["code"]), (Some(1), &json!("not_installed")));
+    assert!(!f.state.with_file_name("pi").exists());
+    let (code, doc) = add(&f, "nobody", "memory", Some("/w/app"), NEW_MEMORY);
+    assert_eq!((code, &doc["code"]), (Some(1), &json!("unknown_agent")));
+    for input in ["", "not json", r#"{"name":"n"}"#] {
+        let (code, doc) = add(&f, "claude", "memory", Some("/w/app"), input);
+        assert_eq!((code, &doc["code"]), (Some(1), &json!("parse")), "{input}");
+    }
+    let o = run(
+        &f.claude,
+        &f.codex,
+        &f.state,
+        &["add", "--agent", "claude", "--kind", "session", "--json"],
+    );
+    assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
+fn add_is_refused_while_the_lock_is_held() {
+    let f = four_agents();
+    fs::create_dir_all(&f.state).unwrap();
+    let held = fs::File::create(f.state.join("sync.lock")).unwrap();
+    held.try_lock().unwrap();
+    let (code, doc) = add(&f, "pi", "memory", Some("/w/app"), NEW_MEMORY);
+    assert_eq!((code, &doc["code"]), (Some(1), &json!("busy")));
+    assert!(!f.state.with_file_name("pi").join("AGENTS.md").exists());
+}
+
 const CHAT: &[(&str, &str)] = &[
     ("user", "how do I fix the login?"),
     ("assistant", "check the token expiry"),

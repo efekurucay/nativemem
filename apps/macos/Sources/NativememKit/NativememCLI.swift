@@ -103,12 +103,26 @@ public struct NativememCLI: Sendable {
 
     /// The new content goes to the process's stdin as one JSON document.
     public func edit(agent: String, nativeId: String, document: EditDocument) async throws -> EditResult {
+        try await run(
+            ["edit", "--agent", agent, "--id=\(nativeId)", "--json"],
+            stdin: try Self.encode(document)
+        )
+    }
+
+    /// Creates an original in the agent's own store; `project` is nil for a global instruction section.
+    /// The content goes to stdin like an edit.
+    public func add(
+        agent: String, kind: String, project: String?, document: EditDocument
+    ) async throws -> AddResult {
+        var arguments = ["add", "--agent", agent, "--kind", kind, "--json"]
+        if let project { arguments.append("--project=\(project)") }
+        return try await run(arguments, stdin: try Self.encode(document))
+    }
+
+    private static func encode(_ document: EditDocument) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        return try await run(
-            ["edit", "--agent", agent, "--id=\(nativeId)", "--json"],
-            stdin: try encoder.encode(document)
-        )
+        return try encoder.encode(document)
     }
 
     private func run<T: Decodable & Sendable>(

@@ -1,7 +1,8 @@
-//! Project-memory replica store shared by the agents that have no native memory format of
-//! their own to write: item files plus a per-project `MEMORY.md` index and `scope.json` below a
-//! base directory, and a routing block in the agent's global `AGENTS.md` that points the agent
-//! at the index of the project it is working in.
+//! Project-memory store shared by the agents that have no native memory format of their own to
+//! write: item files plus a per-project `MEMORY.md` index and `scope.json` below a base
+//! directory, and a routing block in the agent's global `AGENTS.md` that points the agent at the
+//! index of the project it is working in. An item file with a marker line is a replica of another
+//! agent's entry; one without is an original of this agent.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,9 +29,9 @@ pub struct MemoryStore {
     agents_file: PathBuf,
 }
 
-pub struct Replica {
-    pub origin: String,
-    pub id: String,
+/// One item file. `marker` is the `(origin, id)` of the original when the file is a replica.
+pub struct Entry {
+    pub marker: Option<(String, String)>,
     pub name: String,
     pub description: String,
     pub category: Option<String>,
@@ -47,7 +48,7 @@ fn take_line(text: &str) -> Option<(&str, &str)> {
     })
 }
 
-/// `name` and `description` each occupy a single line in the replica format; collapse any
+/// `name` and `description` each occupy a single line in the item file format; collapse any
 /// embedded newlines so a multi-line value can never shift the parse anchors.
 fn oneline(s: &str) -> String {
     s.chars()
@@ -55,13 +56,16 @@ fn oneline(s: &str) -> String {
         .collect()
 }
 
-pub fn render(key: &ItemKey, item: &Item) -> String {
+/// The text of an item file: a replica of `origin`, or an original when `origin` is `None`.
+pub fn render(origin: Option<&ItemKey>, item: &Item) -> String {
     let name = oneline(&item.name);
     let description = oneline(&item.description);
-    let mut s = format!(
-        "{}\n# {name}\n\n{description}\n\n",
-        sections::marker(key.origin.as_str(), &key.native_id),
-    );
+    let mut s = String::new();
+    if let Some(key) = origin {
+        s.push_str(&sections::marker(key.origin.as_str(), &key.native_id));
+        s.push('\n');
+    }
+    s.push_str(&format!("# {name}\n\n{description}\n\n"));
     match &item.category {
         Some(c) => s.push_str(&format!("Category: {c}\n\n")),
         // An empty category line keeps a body that starts with `Category:` unambiguous.
@@ -72,9 +76,12 @@ pub fn render(key: &ItemKey, item: &Item) -> String {
     s
 }
 
-pub fn parse_replica(text: &str) -> Option<Replica> {
-    let (marker, rest) = take_line(text)?;
-    let (origin, id) = sections::parse_marker(marker)?;
+pub fn parse_entry(text: &str) -> Option<Entry> {
+    let (first, after) = take_line(text)?;
+    let (marker, rest) = match sections::parse_marker(first) {
+        Some(m) => (Some(m), after),
+        None => (None, text),
+    };
     let (heading, rest) = take_line(rest)?;
     let name = heading.strip_prefix("# ")?;
     let (blank, rest) = take_line(rest)?;
@@ -99,9 +106,8 @@ pub fn parse_replica(text: &str) -> Option<Replica> {
         }
         rest = after;
     }
-    Some(Replica {
-        origin,
-        id,
+    Some(Entry {
+        marker,
         name: name.to_string(),
         description: description.to_string(),
         category,
@@ -136,8 +142,8 @@ pub fn project_key(cwd: &Path) -> String {
     format!("{}-{hex}", slugify(&last))
 }
 
-/// Item files of a project dir as `(file name, replica)`, sorted by file name.
-fn project_items(dir: &Path) -> Result<Vec<(String, Replica)>> {
+/// Item files of a project dir as `(file name, entry)`, sorted by file name.
+fn project_items(dir: &Path) -> Result<Vec<(String, Entry)>> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -153,7 +159,7 @@ fn project_items(dir: &Path) -> Result<Vec<(String, Replica)>> {
             continue;
         }
         let text = fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
-        if let Some(r) = parse_replica(&text) {
+        if let Some(r) = parse_entry(&text) {
             out.push((file, r));
         }
     }
@@ -179,7 +185,7 @@ fn read_scope_cwd(dir: &Path) -> Result<Option<String>> {
     Ok(value.get("cwd").and_then(|c| c.as_str()).map(String::from))
 }
 
-fn index_text(items: &[(String, Replica)]) -> String {
+fn index_text(items: &[(String, Entry)]) -> String {
     let mut s = String::from("# Memory Index\n\n");
     for (file, r) in items {
         s.push_str(&format!("- [{}]({file}) — {}\n", r.name, r.description));
@@ -290,7 +296,7 @@ impl MemoryStore {
         Ok(out)
     }
 
-    /// Every item file in the store; all of them are replicas.
+    /// Every item file in the store: replicas carry their original's key, the rest are originals.
     pub fn scan(&self) -> Result<Vec<Observed>> {
         let mut out = Vec::new();
         for (key, dir) in self.project_dirs()? {
@@ -311,9 +317,9 @@ impl MemoryStore {
                         body: r.body,
                         source_dir: None,
                     },
-                    replica_of: Some(ItemKey {
-                        origin: AgentId::new(r.origin),
-                        native_id: r.id,
+                    replica_of: r.marker.map(|(origin, native_id)| ItemKey {
+                        origin: AgentId::new(origin),
+                        native_id,
                     }),
                 });
             }
@@ -333,7 +339,11 @@ impl MemoryStore {
         let items = project_items(&dir)?;
         let existing = items
             .iter()
-            .find(|(_, r)| r.origin == key.origin.as_str() && r.id == key.native_id)
+            .find(|(_, r)| {
+                r.marker
+                    .as_ref()
+                    .is_some_and(|(o, id)| o == key.origin.as_str() && *id == key.native_id)
+            })
             .map(|(f, _)| f.clone());
         let file = match existing {
             Some(f) => f,
@@ -350,29 +360,88 @@ impl MemoryStore {
             }
         };
         let path = dir.join(&file);
-        write_if_changed(&path, &render(key, item))?;
-        self.regenerate_index(&dir)?;
-        let scope = serde_json::json!({ "cwd": cwd.to_string_lossy() });
-        write_if_changed(&scope_path(&dir), &scope.to_string())?;
-        self.sync_routing()?;
+        write_if_changed(&path, &render(Some(key), item))?;
+        self.register(&dir, cwd)?;
         Ok((format!("{project}/{file}"), path))
     }
 
-    /// Removes one replica by its native id and tidies what that leaves empty. Ids that name a
-    /// native original (they contain `#`) are not this store's to remove.
-    pub fn remove(&self, native_id: &str) -> Result<()> {
+    /// Creates a new original in the store. Fails with `Error::Exists` when its file is taken.
+    pub fn create_original(&self, item: &Item) -> Result<(String, PathBuf)> {
+        let Scope::Project(cwd) = &item.scope else {
+            return Err(Error::unsupported(
+                self.agent.as_str(),
+                "create global memory",
+            ));
+        };
+        let project = project_key(cwd);
+        let dir = self.project_dir(&project);
+        let file = format!("{}.md", slugify(&item.name));
+        if file.eq_ignore_ascii_case(INDEX_FILE) || dir.join(&file).exists() {
+            return Err(Error::Exists(format!("{project}/{file}")));
+        }
+        let path = dir.join(&file);
+        fsx::atomic_write(&path, render(None, item).as_bytes())?;
+        self.register(&dir, cwd)?;
+        Ok((format!("{project}/{file}"), path))
+    }
+
+    /// Rewrites an original of this store in place, keeping its file name. Ids that name a
+    /// native original (they contain `#`) and replicas are not this store's to write.
+    pub fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
         let agent = self.agent.as_str();
         if native_id.contains('#') {
-            return Err(Error::unsupported(agent, "remove original"));
+            return Err(Error::unsupported(agent, "write_original"));
         }
-        let (project, file) = native_id
+        let (project, file) = self.split_id(native_id)?;
+        let dir = self.project_dir(project);
+        let path = dir.join(file);
+        let text = fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+        if parse_entry(&text).is_none_or(|e| e.marker.is_some()) {
+            return Err(Error::unsupported(agent, "write_original replica"));
+        }
+        fsx::backup(
+            &self.backups,
+            &self.state_dir,
+            &self.agent,
+            &self.home,
+            &path,
+        )?;
+        fsx::atomic_write(&path, render(None, item).as_bytes())?;
+        self.regenerate_index(&dir)
+    }
+
+    /// Brings the index, `scope.json` and the routing block in line with the item files.
+    fn register(&self, dir: &Path, cwd: &Path) -> Result<()> {
+        self.regenerate_index(dir)?;
+        let scope = serde_json::json!({ "cwd": cwd.to_string_lossy() });
+        write_if_changed(&scope_path(dir), &scope.to_string())?;
+        self.sync_routing()
+    }
+
+    fn split_id<'a>(&self, native_id: &'a str) -> Result<(&'a str, &'a str)> {
+        native_id
             .split_once('/')
             .filter(|(p, f)| {
                 ![p, f]
                     .iter()
                     .any(|s| s.is_empty() || **s == ".." || s.contains('/'))
             })
-            .ok_or_else(|| Error::Parse(format!("invalid {agent} replica id {native_id:?}")))?;
+            .ok_or_else(|| {
+                Error::Parse(format!(
+                    "invalid {} memory id {native_id:?}",
+                    self.agent.as_str()
+                ))
+            })
+    }
+
+    /// Removes one item file by its native id and tidies what that leaves empty. Ids that name a
+    /// native original of the agent itself (they contain `#`) are not this store's to remove.
+    pub fn remove(&self, native_id: &str) -> Result<()> {
+        let agent = self.agent.as_str();
+        if native_id.contains('#') {
+            return Err(Error::unsupported(agent, "remove original"));
+        }
+        let (project, file) = self.split_id(native_id)?;
         let dir = self.project_dir(project);
         fsx::remove_with_backup(
             &self.backups,
@@ -410,8 +479,22 @@ impl MemoryStore {
     }
 
     fn regenerate_index(&self, dir: &Path) -> Result<()> {
-        let items = project_items(dir)?;
-        write_if_changed(&index_path(dir), &index_text(&items))
+        let path = index_path(dir);
+        let text = index_text(&project_items(dir)?);
+        match read_opt(&path)? {
+            Some(current) if current == text => Ok(()),
+            Some(_) => {
+                fsx::backup(
+                    &self.backups,
+                    &self.state_dir,
+                    &self.agent,
+                    &self.home,
+                    &path,
+                )?;
+                fsx::atomic_write(&path, text.as_bytes())
+            }
+            None => fsx::atomic_write(&path, text.as_bytes()),
+        }
     }
 
     fn sync_routing(&self) -> Result<()> {

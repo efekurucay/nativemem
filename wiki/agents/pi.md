@@ -15,8 +15,8 @@ Facts gathered read-only on a development machine running Pi 1.5.0 (session file
 
 | Kind | Status | Adapter |
 |---|---|---|
-| Project memory | Replicas only (Pi has no native memory): store plus routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
-| Instruction sections | Read and write in `AGENTS.md` | `agents_file.rs` through `sections.rs` |
+| Project memory | Pi has no native memory: the store holds replicas and originals created through `add`, announced by a routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
+| Instruction sections | Read and write in `AGENTS.md`, including a new section through `add` | `agents_file.rs` through `sections.rs` |
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/pi.rs` |
 | Skills (global) | Read and write in `<pi home>/skills/`; symlinked skills are read through the link and replaced, never written through; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
 | MCP servers | Not implemented | |

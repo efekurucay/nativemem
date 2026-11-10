@@ -389,6 +389,43 @@ impl ClaudeAdapter {
         self.overwrite(&path, &out)
     }
 
+    /// The directory name of the project `cwd` below `projects/`. A project without one gets the
+    /// encoded name and a helper file holding the `cwd`, so the directory resolves later.
+    fn project_dir(&self, cwd: &Path) -> Result<String> {
+        let existing = self
+            .project_cwds()?
+            .into_iter()
+            .find(|(_, c)| c.as_deref().ok() == Some(cwd))
+            .map(|(d, _)| d);
+        if let Some(dir) = existing {
+            return Ok(dir);
+        }
+        let encoded = encode_name(&cwd.to_string_lossy());
+        let cwd_json = serde_json::json!({ "cwd": cwd.to_string_lossy() });
+        let marker_file = self.projects_dir().join(&encoded).join(HELPER_FILE);
+        self.overwrite(&marker_file, &format!("{cwd_json}\n"))?;
+        Ok(encoded)
+    }
+
+    fn create_memory(&self, item: &Item) -> Result<(String, PathBuf)> {
+        let Scope::Project(cwd) = &item.scope else {
+            return Err(Error::unsupported("claude", "create global memory"));
+        };
+        let file = format!("{}.md", slugify(&item.name));
+        if file.eq_ignore_ascii_case(INDEX_FILE) {
+            return Err(Error::Exists(format!("{file} is the memory index")));
+        }
+        let dir = self.project_dir(cwd)?;
+        let mem = self.projects_dir().join(&dir).join("memory");
+        let path = mem.join(&file);
+        if path.exists() {
+            return Err(Error::Exists(format!("{dir}/{file}")));
+        }
+        self.overwrite(&path, &render(&frontmatter(item, None), &item.body))?;
+        self.update_index(&mem, &file, &item.name, &item.description)?;
+        Ok((format!("{dir}/{file}"), path))
+    }
+
     fn find_replica(&self, mem: &Path, marker: &str) -> Result<Option<PathBuf>> {
         for path in memory_files(mem)? {
             let Some(text) = read_optional(&path)? else {
@@ -485,21 +522,7 @@ impl Adapter for ClaudeAdapter {
         let Scope::Project(cwd) = &item.scope else {
             return Err(Error::unsupported("claude", "write_replica global scope"));
         };
-        let existing = self
-            .project_cwds()?
-            .into_iter()
-            .find(|(_, c)| c.as_deref().ok() == Some(cwd.as_path()))
-            .map(|(d, _)| d);
-        let dir = match existing {
-            Some(d) => d,
-            None => {
-                let encoded = encode_name(&cwd.to_string_lossy());
-                let cwd_json = serde_json::json!({ "cwd": cwd.to_string_lossy() });
-                let marker_file = self.projects_dir().join(&encoded).join(HELPER_FILE);
-                self.overwrite(&marker_file, &format!("{cwd_json}\n"))?;
-                encoded
-            }
-        };
+        let dir = self.project_dir(cwd)?;
         let mem = self.projects_dir().join(&dir).join("memory");
         let marker = format!("{}:{}", key.origin, key.native_id);
         let path = match self.find_replica(&mem, &marker)? {
@@ -522,18 +545,18 @@ impl Adapter for ClaudeAdapter {
         };
         let file = file_name(&path);
 
-        let mut fm = format!(
-            "name: {}\ndescription: {}\nmetadata:\n",
-            quote(&item.name),
-            quote(&item.description)
-        );
-        if let Some(c) = &item.category {
-            fm.push_str(&format!("  type: {}\n", quote(c)));
-        }
-        fm.push_str(&format!("  {ORIGIN_KEY}: {}\n", quote(&marker)));
+        let fm = frontmatter(item, Some(&marker));
         self.overwrite(&path, &render(&fm, &item.body))?;
         self.update_index(&mem, &file, &item.name, &item.description)?;
         Ok((format!("{dir}/{file}"), path))
+    }
+
+    fn create_original(&self, item: &Item) -> Result<(String, PathBuf)> {
+        match item.kind {
+            Kind::Instruction => self.instructions.create_original(item),
+            Kind::Memory => self.create_memory(item),
+            _ => Err(Error::unsupported("claude", "create")),
+        }
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
@@ -732,6 +755,25 @@ fn parse_doc(text: &str) -> Option<Doc> {
         fm.push(l.to_string());
     }
     None
+}
+
+/// Nested frontmatter of a memory file; the replica marker is present only on replicas.
+fn frontmatter(item: &Item, marker: Option<&str>) -> String {
+    let mut fm = format!(
+        "name: {}\ndescription: {}\n",
+        quote(&item.name),
+        quote(&item.description)
+    );
+    if item.category.is_some() || marker.is_some() {
+        fm.push_str("metadata:\n");
+    }
+    if let Some(c) = &item.category {
+        fm.push_str(&format!("  type: {}\n", quote(c)));
+    }
+    if let Some(m) = marker {
+        fm.push_str(&format!("  {ORIGIN_KEY}: {}\n", quote(m)));
+    }
+    fm
 }
 
 fn render(fm: &str, body: &str) -> String {
@@ -1425,6 +1467,109 @@ mod tests {
         assert!(backup_of(&f, &format!("projects/{dir}/memory/a.md")).exists());
         assert!(backup_of(&f, &format!("projects/{dir}/memory/MEMORY.md")).exists());
         assert!(f.adapter.remove("../x/a.md").is_err());
+    }
+
+    #[test]
+    fn create_original_in_an_existing_project_has_no_marker_and_an_index_line() {
+        let f = fx();
+        let dir = f.home.add_project(Path::new("/work/a"));
+        f.home.add_memory(
+            &dir,
+            "x.md",
+            FrontmatterVariant::Flat,
+            "x",
+            "xd",
+            "user",
+            "xb",
+        );
+        let it = item(
+            "/work/a",
+            "Fresh Note",
+            "why: it",
+            Some("feedback"),
+            "body\n",
+        );
+        let (id, path) = f.adapter.create_original(&it).unwrap();
+        assert_eq!(id, format!("{dir}/fresh-note.md"));
+        assert_eq!(path, mem(&f, &dir).join("fresh-note.md"));
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(ORIGIN_KEY), "{text}");
+        assert_eq!(
+            text,
+            "---\nname: Fresh Note\ndescription: \"why: it\"\nmetadata:\n  type: feedback\n---\n\nbody\n"
+        );
+        assert_eq!(
+            fs::read_to_string(mem(&f, &dir).join("MEMORY.md")).unwrap(),
+            "# Memory Index\n\n- [x](x.md) — xd\n- [Fresh Note](fresh-note.md) — why: it\n"
+        );
+        let got = f.adapter.scan().unwrap();
+        let created = got.iter().find(|o| o.native_id == id).unwrap();
+        assert!(created.replica_of.is_none());
+        assert_eq!(content_hash(&created.item), content_hash(&it));
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn create_original_in_a_new_project_adds_the_helper_file_and_resolves() {
+        let f = fx();
+        let it = item("/work/My App", "n", "d", None, "b");
+        let (id, _) = f.adapter.create_original(&it).unwrap();
+        assert_eq!(id, "-work-My-App/n.md");
+        assert_eq!(
+            fs::read_to_string(f.root.join("projects/-work-My-App/nativemem.jsonl")).unwrap(),
+            "{\"cwd\":\"/work/My App\"}\n"
+        );
+        let text = fs::read_to_string(mem(&f, "-work-My-App").join("n.md")).unwrap();
+        assert_eq!(text, "---\nname: n\ndescription: d\n---\n\nb\n");
+        let got = f.adapter.scan().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].item.scope, it.scope);
+        assert_eq!(got[0].item.category, None);
+        assert!(got[0].replica_of.is_none());
+        let again = f
+            .adapter
+            .create_original(&item("/work/My App", "n2", "d", None, "b"));
+        assert_eq!(again.unwrap().0, "-work-My-App/n2.md");
+        assert_eq!(fs::read_dir(f.root.join("projects")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn create_original_refuses_a_taken_file_and_the_index_name() {
+        let f = fx();
+        let it = item("/work/a", "Same", "d", None, "first");
+        f.adapter.create_original(&it).unwrap();
+        for name in ["same", "SAME", "memory"] {
+            let err = f
+                .adapter
+                .create_original(&item("/work/a", name, "d", None, "second"));
+            assert!(matches!(err, Err(Error::Exists(_))), "{name}");
+        }
+        let got = f.adapter.scan().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].item.body.trim_end(), "first");
+        assert!(!f.state.join("backups").exists());
+    }
+
+    #[test]
+    fn create_original_instruction_goes_into_claude_md() {
+        let f = fx();
+        fs::write(f.root.join("CLAUDE.md"), "# Mine\n\n## Style\nbe terse\n").unwrap();
+        let (id, path) = f
+            .adapter
+            .create_original(&instruction("Fresh", "rule"))
+            .unwrap();
+        assert_eq!(
+            (id.as_str(), path),
+            ("CLAUDE.md#fresh", f.root.join("CLAUDE.md"))
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("CLAUDE.md")).unwrap(),
+            "# Mine\n\n## Style\nbe terse\n\n## Fresh\n\nrule\n"
+        );
+        assert!(matches!(
+            f.adapter.create_original(&instruction("style", "x")),
+            Err(Error::Exists(_))
+        ));
     }
 
     #[test]

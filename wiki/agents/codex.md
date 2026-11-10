@@ -15,8 +15,8 @@ Claude Code). SQLite files were inspected read-only (`immutable=1`, structure an
 
 | Kind | Status | Adapter |
 |---|---|---|
-| Project memory | Originals read from generated `memories/MEMORY.md` (read-only, never edited or deleted); replicas written to a nativemem-owned store plus a routing block | `crates/core/src/adapters/codex.rs`, `memory_store.rs` |
-| Instruction sections | Read and write in `AGENTS.md` | `codex.rs` through `sections.rs` |
+| Project memory | Originals read from generated `memories/MEMORY.md` (read-only, never edited or deleted); in the nativemem-owned store, replicas and originals created through `add` (editable and deletable), plus a routing block | `crates/core/src/adapters/codex.rs`, `memory_store.rs` |
+| Instruction sections | Read and write in `AGENTS.md`, including a new section through `add` | `codex.rs` through `sections.rs` |
 | Sessions | Originals always read; replicas (with their `threads` row) written only when `NATIVEMEM_CODEX_SESSION_WRITES=on` and the schema probes pass | `codex_sessions.rs`, `codex_rollout.rs`, `codex_imports.rs`, `codex_threads.rs` |
 | Skills (global) | Read and write in `<codex home>/skills/`; `.system` and directories without `SKILL.md` are left alone; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `codex.rs` |
 | MCP servers | Not implemented | |

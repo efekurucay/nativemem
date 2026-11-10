@@ -12,6 +12,8 @@ pub enum Error {
     Parse(String),
     #[error("{agent} does not support {operation}")]
     Unsupported { agent: String, operation: String },
+    #[error("already exists: {0}")]
+    Exists(String),
     #[error("ledger error: {0}")]
     Ledger(#[from] rusqlite::Error),
     #[error("mass delete refused: plan removes {planned} entries ({total} items in ledger)")]

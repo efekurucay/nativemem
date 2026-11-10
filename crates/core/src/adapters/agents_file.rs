@@ -1,6 +1,6 @@
 //! Agents that only read a global `AGENTS.md` (OpenCode, Pi): instruction sections, and project
-//! memory replicas stored below `<dir>/nativemem/memory/` and announced by a routing block in
-//! that file. They never originate memory.
+//! memory stored below `<dir>/nativemem/memory/` and announced by a routing block in that file.
+//! An item file without a marker is an original of the agent.
 
 use std::path::PathBuf;
 
@@ -226,6 +226,14 @@ impl Adapter for AgentsFileAdapter {
         }
     }
 
+    fn create_original(&self, item: &Item) -> Result<(String, PathBuf)> {
+        match item.kind {
+            Kind::Instruction => self.instructions.create_original(item),
+            Kind::Memory => self.memory.create_original(item),
+            _ => Err(self.unsupported("create")),
+        }
+    }
+
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
         if is_session_id(native_id) {
             return Err(self.unsupported("write_original session"));
@@ -233,10 +241,10 @@ impl Adapter for AgentsFileAdapter {
         if skill_name(native_id).is_some() {
             return self.skills.write(item).map(|_| ());
         }
-        if !self.instructions.owns(native_id) {
-            return Err(self.unsupported("write_original"));
+        if self.instructions.owns(native_id) {
+            return self.instructions.write_original(native_id, item);
         }
-        self.instructions.write_original(native_id, item)
+        self.memory.write_original(native_id, item)
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
@@ -407,6 +415,175 @@ mod tests {
         assert_eq!(text(&f), "# Mine\n\n## Style\nkeep\n");
         assert!(!f.dir.join("nativemem").exists());
         assert!(f.state.join("backups/T/pi/nativemem/memory").is_dir());
+    }
+
+    #[test]
+    fn created_instruction_goes_before_the_region_and_a_taken_id_is_refused() {
+        let f = fx();
+        let user = "# Mine\n\n## Style\nkeep\n";
+        fs::write(f.dir.join("AGENTS.md"), user).unwrap();
+        f.a.write_replica(&key("CLAUDE.md#a"), &instruction("A", "a body"))
+            .unwrap();
+        let before = text(&f);
+        let (id, path) =
+            f.a.create_original(&instruction("Fresh Rule", "do it"))
+                .unwrap();
+        assert_eq!(
+            (id.as_str(), path),
+            ("AGENTS.md#fresh-rule", f.dir.join("AGENTS.md"))
+        );
+        let at = before
+            .find("<!-- nativemem:instructions:begin -->")
+            .unwrap();
+        assert_eq!(
+            text(&f),
+            format!(
+                "{}## Fresh Rule\n\ndo it\n\n{}",
+                &before[..at],
+                &before[at..]
+            )
+        );
+        assert!(f.state.join("backups/T/pi/AGENTS.md").is_file());
+        let created = f.a.scan().unwrap();
+        let found = created.iter().find(|o| o.native_id == id).unwrap();
+        assert!(found.replica_of.is_none());
+        assert_eq!(found.item.body, "do it");
+        let after = text(&f);
+        assert!(matches!(
+            f.a.create_original(&instruction("fresh rule", "other")),
+            Err(Error::Exists(_))
+        ));
+        assert_eq!(text(&f), after);
+    }
+
+    #[test]
+    fn created_instruction_in_a_missing_file_creates_it() {
+        let f = fx();
+        f.a.create_original(&instruction("Only", "x")).unwrap();
+        assert_eq!(text(&f), "## Only\n\nx\n");
+        assert!(!f.state.join("backups").exists());
+    }
+
+    fn store_dir(f: &Fx, id: &str) -> PathBuf {
+        f.dir
+            .join("nativemem/memory")
+            .join(id.split_once('/').unwrap().0)
+    }
+
+    #[test]
+    fn created_memory_is_an_original_with_index_scope_and_routing() {
+        let f = fx();
+        fs::write(f.dir.join("AGENTS.md"), "# Mine\n").unwrap();
+        let mut it = memory("/w/app", "Alpha Note");
+        it.body = "Category: not a category\nmore".into();
+        it.category = None;
+        let (id, path) = f.a.create_original(&it).unwrap();
+        let dir = store_dir(&f, &id);
+        assert!(id.ends_with("/alpha-note.md"));
+        assert_eq!(path, dir.join("alpha-note.md"));
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("# Alpha Note\n\nabout Alpha Note\n\nCategory:\n\n"));
+        assert_eq!(
+            fs::read_to_string(dir.join("MEMORY.md")).unwrap(),
+            "# Memory Index\n\n- [Alpha Note](alpha-note.md) — about Alpha Note\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("scope.json")).unwrap(),
+            "{\"cwd\":\"/w/app\"}"
+        );
+        assert!(text(&f).contains(&format!("- /w/app → {}\n", dir.join("MEMORY.md").display())));
+
+        let found: Vec<_> = f.a.scan().unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].replica_of.is_none());
+        assert_eq!(found[0].native_id, id);
+        assert_eq!(found[0].item.scope, it.scope);
+        assert_eq!(found[0].item.body, it.body);
+        assert_eq!(found[0].item.category, None);
+        assert_eq!(
+            crate::model::content_hash(&found[0].item),
+            crate::model::content_hash(&it)
+        );
+    }
+
+    #[test]
+    fn created_memory_refuses_taken_and_reserved_names() {
+        let f = fx();
+        f.a.create_original(&memory("/w/app", "alpha")).unwrap();
+        f.a.write_replica(&key("m"), &memory("/w/app", "beta"))
+            .unwrap();
+        for name in ["Alpha", "beta", "memory"] {
+            assert!(
+                matches!(
+                    f.a.create_original(&memory("/w/app", name)),
+                    Err(Error::Exists(_))
+                ),
+                "{name}"
+            );
+        }
+        assert_eq!(f.a.scan().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn store_original_is_rewritten_in_place_with_a_backup_and_replicas_are_not() {
+        let f = fx();
+        let (id, path) = f.a.create_original(&memory("/w/app", "alpha")).unwrap();
+        let (replica, _) =
+            f.a.write_replica(&key("m"), &memory("/w/app", "beta"))
+                .unwrap();
+        let mut edited = memory("/w/app", "alpha renamed");
+        edited.category = Some("feedback".into());
+        edited.body = "new body".into();
+        f.a.write_original(&id, &edited).unwrap();
+        let found = f.a.scan().unwrap();
+        let original = found.iter().find(|o| o.native_id == id).unwrap();
+        assert_eq!(original.path, path);
+        assert_eq!(original.item.name, "alpha renamed");
+        assert_eq!(original.item.category.as_deref(), Some("feedback"));
+        assert_eq!(original.item.body, "new body");
+        assert!(fs::read_to_string(path.with_file_name("MEMORY.md"))
+            .unwrap()
+            .contains("- [alpha renamed](alpha.md)"));
+        let (project, file) = id.split_once('/').unwrap();
+        assert!(f
+            .state
+            .join("backups/T/pi/nativemem/memory")
+            .join(project)
+            .join(file)
+            .is_file());
+        assert!(f
+            .state
+            .join("backups/T/pi/nativemem/memory")
+            .join(project)
+            .join("MEMORY.md")
+            .is_file());
+        assert!(matches!(
+            f.a.write_original(&replica, &edited),
+            Err(Error::Unsupported { .. })
+        ));
+        assert!(matches!(
+            f.a.write_original("/w/app#generated", &edited),
+            Err(Error::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn store_original_is_removed_with_backup_and_its_routing() {
+        let f = fx();
+        fs::write(f.dir.join("AGENTS.md"), "# Mine\n").unwrap();
+        let (id, path) = f.a.create_original(&memory("/w/app", "alpha")).unwrap();
+        f.a.remove(&id).unwrap();
+        assert!(!path.exists());
+        assert_eq!(text(&f), "# Mine\n");
+        assert!(!f.dir.join("nativemem").exists());
+        let (project, file) = id.split_once('/').unwrap();
+        assert!(f
+            .state
+            .join("backups/T/pi/nativemem/memory")
+            .join(project)
+            .join(file)
+            .is_file());
     }
 
     #[test]

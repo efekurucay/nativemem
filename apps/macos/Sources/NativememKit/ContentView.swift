@@ -3,6 +3,7 @@ import SwiftUI
 public struct ContentView: View {
     @Bindable var model: AppModel
     @State private var syncSession: SyncSession?
+    @State private var showNewEntry = false
 
     public init(model: AppModel) {
         self.model = model
@@ -17,6 +18,14 @@ public struct ContentView: View {
         .frame(minWidth: 900, minHeight: 560)
         .navigationTitle("nativemem")
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("New", systemImage: "plus") {
+                    showNewEntry = true
+                }
+                .labelStyle(.iconOnly)
+                .help("New memory")
+                .disabled(model.cli == nil || model.status == nil || model.isEditing)
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     syncSession = model.makeSyncSession()
@@ -38,6 +47,9 @@ public struct ContentView: View {
         }
         .sheet(item: $syncSession) { session in
             SyncSheet(session: session)
+        }
+        .sheet(isPresented: $showNewEntry) {
+            NewEntrySheet(model: model)
         }
         .alert(
             "Something went wrong",

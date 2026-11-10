@@ -64,12 +64,12 @@ nativemem-sync/
 │   │           ├── pi.rs         Pi: AGENTS.md through agents_file, session reader and writer
 │   │           ├── agents_file.rs      generic adapter for agents that only read a global AGENTS.md (OpenCode, Pi)
 │   │           ├── skills.rs     skill directories: manifest hash, atomic tree copy, visible roots, layout probe
-│   │           ├── memory_store.rs     replica store plus routing block, shared by Codex, OpenCode, Pi
+│   │           ├── memory_store.rs     item-file store (originals and replicas) plus routing block, shared by Codex, OpenCode, Pi
 │   │           └── sections.rs   instruction-section parser, managed regions, byte-preserving edits, markers
 │   │   └── tests/                probes.rs (probes, drift, blocked kinds), opencode_sessions.rs (OpenCode reader, writer, database safety, probes, engine flow), skills.rs (skill mirroring over four temp homes)
 │   └── cli/                      binary `nativemem`
 │       ├── src/
-│       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/edit, JSON output
+│       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/add/edit, JSON output
 │       │   ├── doctor.rs         `doctor`, compatibility reports, warnings, notification delivery
 │       │   └── schedule.rs       launchd scheduling (macOS only)
 │       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications), opencode_sessions.rs (switch, notice, drift, data-home resolution)
@@ -78,6 +78,7 @@ nativemem-sync/
 │   ├── Sources/Nativemem/        app entry point (`NativememApp.swift`)
 │   ├── Sources/NativememKit/     app logic and views
 │   │   ├── SkillTextView.swift   read-only SKILL.md of a skill
+│   │   ├── NewEntry.swift, NewEntrySheet.swift  the New sheet: draft and validation, the form
 │   │   ├── NativememCLI.swift    finds and runs the binary, decodes JSON
 │   │   ├── Contract.swift        Codable types mirroring the CLI JSON contract
 │   │   ├── AppModel.swift        observable state, grouping, copy folding
@@ -86,7 +87,7 @@ nativemem-sync/
 │   │   ├── SyncSession.swift     preview then apply flow
 │   │   ├── BodyText.swift, MarkdownBlocks.swift  body rendering
 │   │   └── SidebarView, ItemListView, ItemDetailView, OverviewView, SyncSheet, ContentView
-│   ├── Tests/NativememKitTests/  contract, doctor, index, tree, sectioning, body parser, sync headline tests
+│   ├── Tests/NativememKitTests/  contract, doctor, index, tree, sectioning, body parser, sync headline, new entry tests
 │   │   └── Fixtures/             one JSON file per CLI document shape
 │   ├── Resources/AppIcon.png
 │   └── scripts/bundle.sh         builds the app bundle into `apps/macos/build/` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`)

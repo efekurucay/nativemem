@@ -110,6 +110,14 @@ public struct StatusDocument: Codable, Sendable {
         agents.reduce(0) { $0 + $1.originals }
     }
 
+    /// The agent that holds the most originals, the first one on a tie; nil without agents.
+    public var agentWithMostOriginals: String? {
+        agents.reduce(nil as AgentStatus?) { best, agent in
+            guard let best else { return agent }
+            return agent.originals > best.originals ? agent : best
+        }?.id
+    }
+
     /// Agents that hold every logical item: nothing left to write for them.
     public var agentsInSync: Int {
         agents.filter { $0.originals + $0.replicas >= logicalItems }.count
@@ -199,6 +207,14 @@ public struct EditDocument: Encodable, Equatable, Sendable {
 
 public struct EditResult: Codable, Sendable {
     public var edited: EntryRef
+    public var hash: String
+    public var backupDir: String
+}
+
+public struct AddResult: Codable, Sendable {
+    public var agent: String
+    public var nativeId: String
+    public var path: String
     public var hash: String
     public var backupDir: String
 }

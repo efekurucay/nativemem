@@ -356,6 +356,62 @@ pub fn rewrite_body(text: &str, file: &str, native_id: &str, body: &str) -> Resu
     }))
 }
 
+/// Why `heading` and `body` cannot be stored as exactly one new section, or `None`. A heading is
+/// one non-empty line; a body must not start another section or hold a managed marker, because a
+/// scan would then read back something other than what was written.
+pub fn section_problem(heading: &str, body: &str) -> Option<&'static str> {
+    if heading.trim().is_empty() || heading.contains(['\n', '\r']) {
+        return Some("the heading must be one non-empty line");
+    }
+    if body.contains("<!-- nativemem") {
+        return Some("the body must not contain a nativemem marker");
+    }
+    let text = render_section(heading.trim(), body);
+    let sections = raw_sections(&text, &[]);
+    let one = sections.len() == 1
+        && sections[0].heading == heading.trim()
+        && section_body(&text, &sections[0]) == trim_body(body);
+    (!one).then_some("the body must not start another `## ` section")
+}
+
+fn render_section(heading: &str, body: &str) -> String {
+    let body = trim_body(body);
+    if body.is_empty() {
+        format!("{HEADING_PREFIX}{heading}\n")
+    } else {
+        format!("{HEADING_PREFIX}{heading}\n\n{body}\n")
+    }
+}
+
+/// Adds a new original section before the first managed region (at the end of the file when
+/// there is none), separated by one blank line from what precedes and follows it. Every other
+/// byte stays. `None` when a section with `native_id` exists.
+pub fn insert_section(
+    text: &str,
+    file: &str,
+    native_id: &str,
+    heading: &str,
+    body: &str,
+) -> Result<Option<String>> {
+    if located(text, file)?.iter().any(|(id, _)| id == native_id) {
+        return Ok(None);
+    }
+    let section = render_section(heading.trim(), body);
+    let at = managed_spans(text)?.first().map(|&(s, _)| s);
+    let before = &text[..at.unwrap_or(text.len())];
+    let sep = if before.is_empty() || before.ends_with("\n\n") {
+        ""
+    } else if before.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    Ok(Some(match at {
+        Some(s) => format!("{before}{sep}{section}\n{}", &text[s..]),
+        None => format!("{before}{sep}{section}"),
+    }))
+}
+
 /// Deletes an original section including the blank lines after it. `None` when the section
 /// does not exist.
 pub fn remove_section(text: &str, file: &str, native_id: &str) -> Result<Option<String>> {
@@ -526,6 +582,27 @@ impl InstructionFile {
             replica_native_id(self.file, key.origin.as_str(), &key.native_id),
             self.path(),
         ))
+    }
+
+    /// Appends `item` as a new user section; see `insert_section`. Fails with `Error::Exists`
+    /// when a section with the same id is there.
+    pub fn create_original(&self, item: &Item) -> Result<(String, PathBuf)> {
+        self.require_global(item, "create")?;
+        if let Some(problem) = section_problem(&item.description, &item.body) {
+            return Err(Error::Parse(problem.to_string()));
+        }
+        let native_id = format!("{}#{}", self.file, slugify(item.description.trim()));
+        let current = read_text(&self.path())?;
+        let updated = insert_section(
+            current.as_deref().unwrap_or_default(),
+            self.file,
+            &native_id,
+            &item.description,
+            &item.body,
+        )?
+        .ok_or_else(|| Error::Exists(native_id.clone()))?;
+        self.store(current.as_deref(), &updated)?;
+        Ok((native_id, self.path()))
     }
 
     fn missing(&self, native_id: &str) -> Error {
@@ -753,6 +830,70 @@ mod tests {
     fn replica_ids_with_odd_characters_round_trip() {
         let text = upsert_replica("", rep("codex", "AGENTS.md#a b:c%", "H", "b")).unwrap();
         assert_eq!(parse_region(&text).unwrap()[0].id, "AGENTS.md#a b:c%");
+    }
+
+    #[test]
+    fn insert_section_goes_before_the_first_managed_region_and_keeps_every_other_byte() {
+        let user = "# Mine\n\n## Style\nbe terse\n";
+        let region = upsert_replica(user, rep("codex", "AGENTS.md#z", "Z", "zed")).unwrap();
+        let out = insert_section(&region, FILE, "CLAUDE.md#new", "New", "fresh body\n")
+            .unwrap()
+            .unwrap();
+        let at = region.find(REGION_BEGIN).unwrap();
+        let (before, after) = region.split_at(at);
+        assert_eq!(out, format!("{before}## New\n\nfresh body\n\n{after}"));
+        assert_eq!(ids(&out), ["CLAUDE.md#style", "CLAUDE.md#new"]);
+
+        let with_block =
+            format!("{user}\n{BLOCK_BEGIN}\n- x\n{BLOCK_END}\n\n{REGION_BEGIN}\n{REGION_END}\n");
+        let out = insert_section(&with_block, FILE, "CLAUDE.md#new", "New", "n")
+            .unwrap()
+            .unwrap();
+        assert!(out.starts_with(&format!("{user}\n## New\n\nn\n\n{BLOCK_BEGIN}\n")));
+        assert!(out.ends_with(&with_block[user.len() + 1..]));
+    }
+
+    #[test]
+    fn insert_section_without_a_region_appends_with_one_blank_line() {
+        let cases = [
+            ("", "## New\n\nb\n"),
+            ("# T\n", "# T\n\n## New\n\nb\n"),
+            ("# T\n\n", "# T\n\n## New\n\nb\n"),
+            ("# T", "# T\n\n## New\n\nb\n"),
+        ];
+        for (text, expected) in cases {
+            let out = insert_section(text, FILE, "CLAUDE.md#new", "New", "b")
+                .unwrap()
+                .unwrap();
+            assert_eq!(out, expected, "{text:?}");
+        }
+        let empty_body = insert_section("# T\n", FILE, "CLAUDE.md#new", "New", "")
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty_body, "# T\n\n## New\n");
+    }
+
+    #[test]
+    fn insert_section_refuses_an_id_that_is_taken() {
+        let text = "## Style\nx\n\n## Style!\ny\n";
+        assert!(insert_section(text, FILE, "CLAUDE.md#style", "Style", "z")
+            .unwrap()
+            .is_none());
+        assert!(
+            insert_section(text, FILE, "CLAUDE.md#style-2", "Style 2", "z")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn section_problem_rejects_what_would_not_read_back() {
+        assert_eq!(section_problem("Style", "- a\n\n### Sub\nb"), None);
+        assert_eq!(section_problem("Style", "```\n## in a fence\n```"), None);
+        assert!(section_problem("  ", "b").is_some());
+        assert!(section_problem("two\nlines", "b").is_some());
+        assert!(section_problem("Style", "a\n## Other\nb").is_some());
+        assert!(section_problem("Style", &format!("a\n{REGION_BEGIN}")).is_some());
     }
 
     #[test]

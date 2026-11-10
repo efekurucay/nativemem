@@ -11,7 +11,9 @@ command and shows the result. The app holds no logic of its own about agents or 
 1. See every memory item, grouped by project, and read it.
 2. See where each item lives (Claude Code, Codex).
 3. Delete an item that is stale or wrong. The next sync removes it from the other agent too.
-4. Press Sync: see the plan in plain words, then apply it.
+4. Create a memory entry or a global instruction section in any agent. The next sync copies it to
+   the other agents.
+5. Press Sync: see the plan in plain words, then apply it.
 
 ## Look and feel
 
@@ -100,6 +102,19 @@ hand-drawn borders, dividers or backgrounds.
 **Toolbar**
 - Every toolbar button has a tooltip. "Sync" shows its title next to its icon; "Reload" is
   icon-only with the tooltip "Reload".
+- "New" button (plus icon, tooltip "New memory"). Opens a sheet; disabled while an item is being
+  edited. Fields:
+  - "Where": Global, or Project. Project shows a picker of the known project paths plus "Choose
+    folder…", which opens an `NSOpenPanel` for a directory. The sheet starts on the project of the
+    selected sidebar folder, else on Global.
+  - "Agent": the installed agents (those in `status`); the default is the agent with the most
+    originals, the first on a tie.
+  - Project: name, description, a category picker (none, user, feedback, project, reference) and a
+    monospaced body editor. Create runs `add --kind memory`.
+  - Global: a heading field and a monospaced body editor. Create runs `add --kind instruction`.
+  - Footer: "It reaches the other agents at the next sync." Buttons "Cancel" and "Create" (disabled
+    until the required fields are filled). Create reloads and selects the new item; a CLI error is
+    shown inline in the sheet and nothing is closed.
 - "Sync" button. Runs the preview command and opens a sheet:
   - headline: "12 to add, 3 to update, 1 to remove" or "Everything is in sync."
   - list of changes grouped by project; each line: sign (add / update / remove), item name,
@@ -222,6 +237,28 @@ mass-delete guard: `mass_delete`.
 ```
 Removes that one entry (with backup). It does not sync; the next sync propagates the removal.
 
+`nativemem add --agent <id> --kind memory|instruction [--project <abs path>] --json`, with the
+content as one JSON document on stdin (the same document `edit` reads):
+```json
+{ "name": "feedback-tests", "description": "Run the fast suite first",
+  "category": "feedback", "body": "…markdown…" }
+```
+Output:
+```json
+{ "agent": "pi", "native_id": "app-1a2b3c4d/feedback-tests.md",
+  "path": "/Users/x/.pi/agent/nativemem/memory/app-1a2b3c4d/feedback-tests.md",
+  "hash": "ef56…", "backup_dir": "/Users/x/.nativemem/backups/20261110T062319Z" }
+```
+Creates a new original in that agent's own store; it does not sync, and the next sync copies it to
+the other agents. `--kind memory` needs `--project`, an absolute path without `..` (a trailing slash
+is dropped); `name`, `description` and `category` (an empty one means none) must be single lines
+and `name`, `description` non-empty. `--kind instruction` takes no `--project`: `description` is the
+heading of a new `## ` section in the agent's global instruction file, `name` is derived from it and
+`category` is ignored; a body that would start another `## ` section outside a code fence fails.
+Failures: `invalid` for bad input, `exists` when the entry's file or section id is already there,
+`not_installed` when the agent has no home directory, `unsupported` when the agent cannot hold the
+kind, `unknown_agent`, `parse` for a bad stdin document.
+
 `nativemem edit --agent <id> --id <native_id> --json`, with the new content as one JSON
 document on stdin:
 ```json
@@ -248,8 +285,11 @@ Swift package at `apps/macos` (SwiftUI app, macOS 14+, Swift 6, no third-party d
 - `AppModel` (`@Observable`): loaded items, status, selection, loading and error state.
   Groups items by project, folds copies into originals.
 - `DoctorDocument` (decoded from `doctor --json`) feeds the Overview notices and the sidebar badge.
-- Views: `SidebarView`, `ItemListView`, `ItemDetailView`, `OverviewView`, `SyncSheet`.
+- `NewEntryDraft` (what the New sheet collects: validation and the `add` document) and
+  `AppModel.add`, which runs `add`, reloads and selects the new item.
+- Views: `SidebarView`, `ItemListView`, `ItemDetailView`, `OverviewView`, `SyncSheet`, `NewEntrySheet`.
 - `scripts/bundle.sh`: builds release and assembles `build/nativemem.app` (Info.plist, the
   executable, and the `nativemem` CLI binary copied next to it when
   `../../target/release/nativemem` exists).
-- Tests: decoding of each contract document from fixture JSON; grouping and folding logic.
+- Tests: decoding of each contract document from fixture JSON; grouping and folding logic; the New
+  entry draft.

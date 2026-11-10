@@ -15,8 +15,8 @@ by versions 2.1.247 to 2.1.322; 376 top-level session files across 63 project di
 
 | Kind | Status | Adapter |
 |---|---|---|
-| Project memory | Read (originals) and write (replicas, edits, deletes) | `crates/core/src/adapters/claude.rs` |
-| Instruction sections | Read and write in `CLAUDE.md` | `claude.rs` through `sections.rs` |
+| Project memory | Read (originals) and write (new originals through `add`, replicas, edits, deletes) | `crates/core/src/adapters/claude.rs` |
+| Instruction sections | Read and write in `CLAUDE.md`, including a new section through `add` | `claude.rs` through `sections.rs` |
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/claude_sessions.rs` |
 | Global-scope memory | Not supported (`supports` is false) | |
 | Skills (global) | Read (originals) and write (replicas, edits, deletes) | `crates/core/src/adapters/skills.rs`, `claude.rs` |

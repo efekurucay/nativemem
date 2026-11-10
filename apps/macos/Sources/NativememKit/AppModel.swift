@@ -148,6 +148,39 @@ public final class AppModel {
         await reload()
     }
 
+    // MARK: - Creating
+
+    public var installedAgents: [String] { status?.agents.map(\.id) ?? [] }
+
+    /// The project paths that already hold entries, for the New sheet's picker.
+    public var knownProjectPaths: [String] {
+        index.projects.compactMap(\.key.path).sorted()
+    }
+
+    /// A draft that starts in the folder selected in the sidebar, for the agent that holds the most originals.
+    public func makeNewEntryDraft() -> NewEntryDraft {
+        let agent = status?.agentWithMostOriginals ?? ""
+        switch sidebar {
+        case .folder(let path), .folderOnly(let path):
+            return NewEntryDraft(agent: agent, isGlobal: false, projectPath: path)
+        default:
+            return NewEntryDraft(agent: agent)
+        }
+    }
+
+    /// Creates the entry, reloads and selects it. A CLI error is thrown for the sheet to show.
+    public func add(_ draft: NewEntryDraft) async throws {
+        guard let cli else { throw CLIError.notFound }
+        let result = try await cli.add(
+            agent: draft.agent, kind: draft.kind, project: draft.project, document: draft.document
+        )
+        editDraft = nil
+        editError = nil
+        await reload()
+        sidebar = draft.project.map { .folder(path: $0) } ?? .global
+        selectedItemID = "\(result.agent)|\(result.nativeId)"
+    }
+
     public func skillText(of item: LogicalItem) async throws -> String {
         guard let cli else { throw CLIError.notFound }
         return try await cli.skillShow(agent: item.primary.agent, name: item.primary.name).text

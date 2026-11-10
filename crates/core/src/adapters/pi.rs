@@ -498,6 +498,10 @@ impl Adapter for PiAdapter {
         self.instructions.write_replica(key, item)
     }
 
+    fn create_original(&self, item: &Item) -> Result<(String, PathBuf)> {
+        self.instructions.create_original(item)
+    }
+
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
         if skill_name(native_id).is_some() {
             return self.instructions.write_original(native_id, item);
