@@ -191,7 +191,7 @@ fn codex_gets_a_table_and_every_other_byte_stays() {
 
     assert_eq!(only(fx.install("one", Some("codex"))).status, "installed");
     let expected = format!(
-        "{CODEX_FILE}\n[mcp_servers.nativemem]\ncommand = \"/opt/nativemem/bin/nativemem\"\nargs = [\"mcp\", \"serve\"]\ntool_timeout_sec = 1800\n"
+        "{CODEX_FILE}\n[mcp_servers.nativemem]\ncommand = \"/opt/nativemem/bin/nativemem\"\nargs = [\"mcp\", \"serve\"]\ntool_timeout_sec = 1800\nstartup_timeout_sec = 60\n"
     );
     assert_eq!(fx.read("codex/config.toml"), expected);
     assert_eq!(
@@ -233,7 +233,7 @@ fn codex_creates_a_missing_config() {
     assert_eq!(only(fx.install("one", Some("codex"))).status, "installed");
     assert_eq!(
         fx.read("codex/config.toml"),
-        "[mcp_servers.nativemem]\ncommand = \"/opt/nativemem/bin/nativemem\"\nargs = [\"mcp\", \"serve\"]\ntool_timeout_sec = 1800\n"
+        "[mcp_servers.nativemem]\ncommand = \"/opt/nativemem/bin/nativemem\"\nargs = [\"mcp\", \"serve\"]\ntool_timeout_sec = 1800\nstartup_timeout_sec = 60\n"
     );
     assert!(!fx.backed_up("one"), "there was nothing to back up");
 }

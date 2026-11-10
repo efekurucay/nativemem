@@ -24,6 +24,9 @@ const ATTEMPTS: usize = 3;
 
 /// Codex cuts a tool call after `tool_timeout_sec`; subagent runs behind the hub take long.
 const CODEX_TOOL_TIMEOUT_SEC: i64 = 1800;
+/// Codex gives up on a server that does not start within `startup_timeout_sec`; the hub connects
+/// its upstreams (up to 20 s each, concurrently) before it answers.
+const CODEX_STARTUP_TIMEOUT_SEC: i64 = 60;
 
 /// What gets registered: the command and its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,12 +300,16 @@ impl Format for CodexToml {
                 if !table.contains_key("tool_timeout_sec") {
                     table.insert("tool_timeout_sec", value(CODEX_TOOL_TIMEOUT_SEC));
                 }
+                if !table.contains_key("startup_timeout_sec") {
+                    table.insert("startup_timeout_sec", value(CODEX_STARTUP_TIMEOUT_SEC));
+                }
             }
             None => {
                 let mut table = Table::new();
                 table.insert("command", value(entry.command.as_str()));
                 table.insert("args", Item::Value(Self::args_value(entry)));
                 table.insert("tool_timeout_sec", value(CODEX_TOOL_TIMEOUT_SEC));
+                table.insert("startup_timeout_sec", value(CODEX_STARTUP_TIMEOUT_SEC));
                 servers.insert(HUB_NAME, Item::Table(table));
             }
         }

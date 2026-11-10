@@ -165,13 +165,13 @@ reports it (`crates/hub/src/register.rs`). The decision and its trade-off are in
 | Agent | File | Entry |
 |---|---|---|
 | Claude Code | `claude_config_path` of the Claude home: `.claude.json` next to a home named `.claude`, else inside the home (a custom `CLAUDE_CONFIG_DIR` is the Claude home) | `mcpServers.nativemem` = `{type: "stdio", command, args, env: {}}` |
-| Codex | `<codex home>/config.toml` | `[mcp_servers.nativemem]` with `command`, `args` and `tool_timeout_sec = 1800`, so long subagent runs are not cut |
+| Codex | `<codex home>/config.toml` | `[mcp_servers.nativemem]` with `command`, `args`, `tool_timeout_sec = 1800` (long subagent runs are not cut) and `startup_timeout_sec = 60` (the hub connects its upstreams before it answers) |
 | OpenCode | `<opencode home>/opencode.json`; `opencode.jsonc` when that is the file present (the file that already holds the entry wins) | `mcp.nativemem` = `{type: "local", command: [binary, "mcp", "serve", ...], enabled: true}`; `mcp.servers.nativemem` when the file keeps its servers under `mcp.servers` |
 | Pi | `<pi home>/mcp.json` | `mcpServers.nativemem` = `{command, args}` |
 
 - Edits keep every other byte: Codex with `toml_edit`, OpenCode with the `jsonc-parser` concrete syntax
   tree (comments and formatting stay), Claude and Pi with `serde_json` in file order and the file's
-  indentation and trailing newline. A key of the entry the user added stays; `tool_timeout_sec` is set
+  indentation and trailing newline. A key of the entry the user added stays; `tool_timeout_sec` and `startup_timeout_sec` are set
   only when absent. Tests: `crates/hub/tests/register.rs`.
 - Every file is read, transformed and written only when it is unchanged since the read; otherwise it is
   read again, up to 3 times, then the agent fails with code `busy` and nothing is written (Claude and
