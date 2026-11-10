@@ -1,5 +1,6 @@
+use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -11,6 +12,9 @@ use nativemem_core::fsx::BackupSession;
 use nativemem_core::ledger::Ledger;
 use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Observed, Scope};
 use serde_json::{json, Value};
+
+#[cfg(target_os = "macos")]
+mod schedule;
 
 #[derive(Parser)]
 #[command(
@@ -81,9 +85,43 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run `sync --apply` on a timer through a launchd agent (macOS)
+    Schedule(ScheduleArgs),
+}
+
+#[derive(clap::Args)]
+struct ScheduleArgs {
+    /// Where the launchd plist is written [default: ~/Library/LaunchAgents]
+    #[arg(long, global = true, env = "NATIVEMEM_LAUNCH_AGENTS_DIR")]
+    launch_agents_dir: Option<PathBuf>,
+    /// Skip every launchctl call
+    #[arg(long, global = true, hide = true)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    no_launchctl: bool,
+    #[command(subcommand)]
+    command: ScheduleCommand,
+}
+
+#[derive(Subcommand)]
+enum ScheduleCommand {
+    /// Install or update the scheduled job
+    Install {
+        /// Minutes between runs
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(5..))]
+        every: u32,
+    },
+    /// Remove the scheduled job; the state directory is left alone
+    Uninstall,
+    /// Show whether the job is installed and loaded
+    Status {
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 enum Failure {
+    Coded { code: &'static str, message: String },
     Core(Error),
     UnknownAgent(String),
     NotFound { agent: String, id: String },
@@ -99,6 +137,7 @@ impl From<Error> for Failure {
 impl Failure {
     fn code(&self) -> &'static str {
         match self {
+            Failure::Coded { code, .. } => code,
             Failure::UnknownAgent(_) => "unknown_agent",
             Failure::NotFound { .. } => "not_found",
             Failure::Replica => "unsupported",
@@ -112,6 +151,7 @@ impl Failure {
 
     fn message(&self) -> String {
         match self {
+            Failure::Coded { message, .. } => message.clone(),
             Failure::UnknownAgent(a) => format!("unknown agent {a:?} (expected claude or codex)"),
             Failure::NotFound { agent, id } => format!("no {agent} entry with id {id:?}"),
             Failure::Replica => {
@@ -170,6 +210,24 @@ fn resolve(cli: &Cli) -> Result<Roots> {
         codex: pick(&cli.codex_home, Some("CODEX_HOME"), ".codex")?,
         state: pick(&cli.state_dir, None, ".nativemem")?,
     })
+}
+
+/// Held for the whole write run so the scheduled job and the desktop app never interleave.
+fn lock_state(state: &Path) -> Outcome<File> {
+    std::fs::create_dir_all(state).map_err(Error::from)?;
+    let file = File::options()
+        .create(true)
+        .append(true)
+        .open(state.join("sync.lock"))
+        .map_err(Error::from)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Failure::Coded {
+            code: "busy",
+            message: "another nativemem run is in progress".into(),
+        }),
+        Err(std::fs::TryLockError::Error(e)) => Err(Error::from(e).into()),
+    }
 }
 
 fn status(roots: &Roots, claude: &ClaudeAdapter, codex: &CodexAdapter, json: bool) -> Result<()> {
@@ -510,11 +568,38 @@ fn sync(
     Ok(plan.needs_attention())
 }
 
+#[cfg(target_os = "macos")]
+fn run_schedule(cli: &Cli, args: &ScheduleArgs, roots: &Roots) -> Outcome<()> {
+    let explicit = schedule::ExplicitRoots {
+        claude: cli
+            .claude_home
+            .clone()
+            .or_else(|| env_path("CLAUDE_CONFIG_DIR")),
+        codex: cli.codex_home.clone().or_else(|| env_path("CODEX_HOME")),
+        state: cli.state_dir.clone(),
+    };
+    schedule::run(args, roots, &explicit)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_schedule(_: &Cli, _: &ScheduleArgs, _: &Roots) -> Outcome<()> {
+    Err(Failure::Coded {
+        code: "unsupported_platform",
+        message: "scheduled sync is only available on macOS".into(),
+    })
+}
+
 fn run(cli: &Cli) -> Outcome<bool> {
     let roots = resolve(cli)?;
     let backups = BackupSession::new();
     let claude = ClaudeAdapter::new(roots.claude.clone(), roots.state.clone(), backups.clone());
     let codex = CodexAdapter::new(roots.codex.clone(), roots.state.clone(), backups.clone());
+    let _lock = match &cli.command {
+        Command::Sync { apply: true, .. } | Command::Delete { .. } | Command::Edit { .. } => {
+            Some(lock_state(&roots.state)?)
+        }
+        _ => None,
+    };
     match &cli.command {
         Command::Status { json } => status(&roots, &claude, &codex, *json)
             .map(|()| false)
@@ -535,6 +620,7 @@ fn run(cli: &Cli) -> Outcome<bool> {
         Command::Edit { agent, id, json } => {
             edit(&roots, &backups, &claude, &codex, agent, id, *json).map(|()| false)
         }
+        Command::Schedule(args) => run_schedule(cli, args, &roots).map(|()| false),
     }
 }
 
@@ -544,7 +630,12 @@ fn wants_json(command: &Command) -> bool {
         | Command::Sync { json, .. }
         | Command::Items { json }
         | Command::Delete { json, .. }
-        | Command::Edit { json, .. } => *json,
+        | Command::Edit { json, .. }
+        | Command::Schedule(ScheduleArgs {
+            command: ScheduleCommand::Status { json },
+            ..
+        }) => *json,
+        Command::Schedule(_) => false,
     }
 }
 

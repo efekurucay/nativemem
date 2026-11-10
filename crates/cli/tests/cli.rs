@@ -457,3 +457,215 @@ fn edit_bad_stdin_is_parse_error() {
     }
     assert_eq!(fs::read_to_string(&f.claude_file).unwrap(), before);
 }
+
+#[test]
+fn concurrent_run_is_refused_while_lock_is_held() {
+    let t = tempfile::tempdir().unwrap();
+    let (claude, codex, state) = (
+        t.path().join("claude"),
+        t.path().join("codex"),
+        t.path().join("state"),
+    );
+    fs::create_dir_all(&state).unwrap();
+    let held = fs::File::create(state.join("sync.lock")).unwrap();
+    held.try_lock().unwrap();
+
+    let o = run(&claude, &codex, &state, &["sync", "--apply", "--json"]);
+    assert_eq!(o.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_str(&text(&o)).unwrap();
+    assert_eq!(doc["code"], "busy");
+    assert_eq!(doc["error"], "another nativemem run is in progress");
+    assert!(!state.join("ledger.db").exists());
+
+    let o = run(&claude, &codex, &state, &["sync", "--json"]);
+    assert_eq!(o.status.code(), Some(0));
+    drop(held);
+    let o = run(&claude, &codex, &state, &["sync", "--apply"]);
+    assert_eq!(o.status.code(), Some(0));
+}
+
+#[cfg(target_os = "macos")]
+mod schedule {
+    use super::*;
+
+    struct Env {
+        _t: tempfile::TempDir,
+        agents: std::path::PathBuf,
+        state: std::path::PathBuf,
+    }
+
+    fn env() -> Env {
+        let t = tempfile::tempdir().unwrap();
+        let agents = t.path().join("LaunchAgents");
+        let state = t.path().join("state & <co>");
+        Env {
+            _t: t,
+            agents,
+            state,
+        }
+    }
+
+    fn sched(e: &Env, extra: &[&str], args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_nativemem"))
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .env_remove("NATIVEMEM_CLAUDE_HOME")
+            .env_remove("NATIVEMEM_CODEX_HOME")
+            .env_remove("NATIVEMEM_LAUNCH_AGENTS_DIR")
+            .arg("--state-dir")
+            .arg(&e.state)
+            .args(extra)
+            .arg("schedule")
+            .arg("--no-launchctl")
+            .arg("--launch-agents-dir")
+            .arg(&e.agents)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn plist_path(e: &Env) -> std::path::PathBuf {
+        e.agents.join("dev.nativemem.sync.plist")
+    }
+
+    fn lint(path: &Path) {
+        let o = Command::new("plutil")
+            .arg("-lint")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", text(&o));
+    }
+
+    #[test]
+    fn install_writes_plist_and_copies_binary() {
+        let e = env();
+        let o = sched(&e, &[], &["install", "--every", "15"]);
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let plist = fs::read_to_string(plist_path(&e)).unwrap();
+        let bin = e.state.join("bin").join("nativemem");
+        assert!(plist.contains("<integer>900</integer>"), "{plist}");
+        assert!(
+            plist.contains("<key>RunAtLoad</key>\n    <false/>"),
+            "{plist}"
+        );
+        assert!(
+            plist.contains("<key>LowPriorityIO</key>\n    <true/>"),
+            "{plist}"
+        );
+        assert!(plist.contains("<string>Background</string>"), "{plist}");
+        assert!(
+            plist.contains("state &amp; &lt;co&gt;/bin/nativemem"),
+            "{plist}"
+        );
+        assert!(plist.contains("<string>sync</string>\n        <string>--apply</string>"));
+        assert!(plist.contains("state &amp; &lt;co&gt;/sync.log"), "{plist}");
+        assert!(bin.is_file());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&bin).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        lint(&plist_path(&e));
+
+        let o = sched(&e, &[], &["install"]);
+        assert_eq!(o.status.code(), Some(0));
+        let again = fs::read_to_string(plist_path(&e)).unwrap();
+        assert!(again.contains("<integer>3600</integer>"), "{again}");
+        assert_eq!(again.matches("<key>Label</key>").count(), 1);
+        assert_eq!(fs::read_dir(e.state.join("bin")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn install_passes_explicit_roots_through() {
+        let e = env();
+        let o = sched(
+            &e,
+            &["--claude-home", "/x/claude", "--codex-home", "/x/codex"],
+            &["install"],
+        );
+        assert_eq!(o.status.code(), Some(0));
+        let plist = fs::read_to_string(plist_path(&e)).unwrap();
+        for needle in [
+            "<string>--claude-home</string>\n        <string>/x/claude</string>",
+            "<string>--codex-home</string>\n        <string>/x/codex</string>",
+            "<string>--state-dir</string>",
+        ] {
+            assert!(plist.contains(needle), "{needle}\n{plist}");
+        }
+        lint(&plist_path(&e));
+    }
+
+    #[test]
+    fn defaults_are_not_baked_in() {
+        let e = env();
+        let o = Command::new(env!("CARGO_BIN_EXE_nativemem"))
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .env_remove("NATIVEMEM_CLAUDE_HOME")
+            .env_remove("NATIVEMEM_CODEX_HOME")
+            .env_remove("NATIVEMEM_STATE_DIR")
+            .env("HOME", e.state.parent().unwrap())
+            .args(["schedule", "--no-launchctl", "--launch-agents-dir"])
+            .arg(&e.agents)
+            .arg("install")
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(0));
+        let plist = fs::read_to_string(plist_path(&e)).unwrap();
+        assert!(!plist.contains("--claude-home"), "{plist}");
+        assert!(!plist.contains("--state-dir"), "{plist}");
+        assert!(e
+            .state
+            .parent()
+            .unwrap()
+            .join(".nativemem/bin/nativemem")
+            .is_file());
+    }
+
+    #[test]
+    fn interval_below_five_is_rejected() {
+        let e = env();
+        let o = sched(&e, &[], &["install", "--every", "4"]);
+        assert!(!o.status.success());
+        assert!(!plist_path(&e).exists());
+    }
+
+    #[test]
+    fn uninstall_removes_plist_and_is_idempotent() {
+        let e = env();
+        sched(&e, &[], &["install"]);
+        let o = sched(&e, &[], &["uninstall"]);
+        assert_eq!(o.status.code(), Some(0));
+        assert!(!plist_path(&e).exists());
+        assert!(e.state.join("bin").join("nativemem").is_file());
+        let o = sched(&e, &[], &["uninstall"]);
+        assert_eq!(o.status.code(), Some(0));
+    }
+
+    #[test]
+    fn status_reflects_installed_state() {
+        let e = env();
+        let doc = |e: &Env| -> serde_json::Value {
+            serde_json::from_str(&text(&sched(e, &[], &["status", "--json"]))).unwrap()
+        };
+        let d = doc(&e);
+        assert_eq!(d["installed"], false);
+        assert_eq!(d["loaded"], false);
+        assert!(d["interval_minutes"].is_null());
+        assert_eq!(d["log_tail"], serde_json::json!([]));
+
+        sched(&e, &[], &["install", "--every", "30"]);
+        fs::write(e.state.join("sync.log"), "1\n2\n3\n4\n5\n6\n7\n").unwrap();
+        let d = doc(&e);
+        assert_eq!(d["installed"], true);
+        assert_eq!(d["loaded"], false);
+        assert_eq!(d["interval_minutes"], 30);
+        assert_eq!(d["log_tail"], serde_json::json!(["3", "4", "5", "6", "7"]));
+    }
+}
