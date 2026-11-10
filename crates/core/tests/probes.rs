@@ -230,7 +230,6 @@ fn codex_drift_is_caught_and_the_database_is_never_written() {
     assert_eq!(again, fs::read(&db).unwrap());
 
     let blocked = CodexAdapter::new(h.root.clone(), t.path().join("state"), stamp())
-        .with_session_writes(true)
         .with_blocked_kinds(&[Kind::Session]);
     let project = Scope::Project("/work/app".into());
     assert!(!blocked.supports(Kind::Session, &project));

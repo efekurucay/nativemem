@@ -71,6 +71,16 @@ public struct NativememCLI: Sendable {
         try await run(["items", "--json"], as: ItemsDocument.self).items
     }
 
+    /// Chat sessions, without their turns.
+    public func sessions() async throws -> [Item] {
+        try await run(["items", "--kind", "session", "--json"], as: ItemsDocument.self).items
+    }
+
+    /// The transcript of one session; native ids often begin with "-", so the value is attached with "=".
+    public func sessionShow(agent: String, nativeId: String) async throws -> SessionTranscript {
+        try await run(["session", "show", "--agent", agent, "--id=\(nativeId)", "--json"])
+    }
+
     /// Exits with 3 while an agent needs action; the document is complete either way.
     public func doctor() async throws -> DoctorDocument {
         try await run(["doctor", "--json"])

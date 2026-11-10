@@ -1,0 +1,6 @@
+{ "agent": "claude", "native_id": "-Users-x-app/0198a1b2.jsonl",
+  "title": "Fix login", "cwd": "/Users/x/app",
+  "created_ms": 1794304800000, "updated_ms": 1794308400000,
+  "turns": [
+    { "role": "user", "text": "how do I fix the login?", "ts_ms": 1794304800000 },
+    { "role": "assistant", "text": "Check the **token expiry**:\n\n- read the claim\n- compare it to now", "ts_ms": 1794304860000 } ] }

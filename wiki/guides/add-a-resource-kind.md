@@ -67,7 +67,7 @@ are the reference for a kind without a marker and with a directory as its unit.
 - [ ] JSON contract: add `kind` values to `docs/desktop.md` only as a reported drift unless the user
   asked for a spec edit; add constants and a decoding test in
   `apps/macos/Sources/NativememKit/Contract.swift` and `apps/macos/Tests/NativememKitTests/`.
-  Decide whether the app shows or filters the kind (sessions are filtered in `MemoryIndex.swift`).
+  Decide whether the app shows or filters the kind (sessions are filtered out of the memory views in `MemoryIndex.swift` and listed by `SessionIndex.swift`).
 
 ### 6. Tests
 

@@ -30,7 +30,6 @@ pub struct AgentsFileAdapter {
     memory: MemoryStore,
     skills: SkillStore,
     sessions: Option<OpencodeSessions>,
-    session_writes: bool,
 }
 
 impl AgentsFileAdapter {
@@ -44,7 +43,6 @@ impl AgentsFileAdapter {
             state_dir: state_dir.clone(),
             backups: backups.clone(),
             sessions: None,
-            session_writes: false,
             memory: MemoryStore::new(
                 agent.clone(),
                 dir.clone(),
@@ -89,7 +87,7 @@ impl AgentsFileAdapter {
     }
 
     /// OpenCode's session database. `options` is `None` while session sync is off, so nothing is
-    /// read; replicas are written only while session writes are enabled.
+    /// read or written.
     pub fn with_opencode_sessions(mut self, db: PathBuf, options: Option<SessionOptions>) -> Self {
         self.sessions = Some(OpencodeSessions::new(
             db,
@@ -104,21 +102,6 @@ impl AgentsFileAdapter {
     pub fn with_session_busy_timeout(mut self, wait: std::time::Duration) -> Self {
         self.sessions = self.sessions.map(|s| s.with_busy_timeout(wait));
         self
-    }
-
-    /// Whether session replicas are written into OpenCode; off unless the caller opts in.
-    pub fn with_session_writes(mut self, enabled: bool) -> Self {
-        self.session_writes = enabled;
-        self
-    }
-
-    pub fn session_writes_enabled(&self) -> bool {
-        self.session_writes
-    }
-
-    /// Whether the agent has a session database to read from.
-    pub fn has_session_store(&self) -> bool {
-        self.sessions.is_some()
     }
 
     fn scan_sessions(&self) -> Result<SessionScan> {
@@ -177,7 +160,7 @@ impl Adapter for AgentsFileAdapter {
                 (Kind::Memory, Scope::Project(_))
                 | (Kind::Instruction | Kind::Skill, Scope::Global) => true,
                 (Kind::Session, Scope::Project(_)) => {
-                    self.session_writes && self.sessions.is_some()
+                    self.sessions.as_ref().is_some_and(|s| s.is_enabled())
                 }
                 _ => false,
             }

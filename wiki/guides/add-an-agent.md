@@ -114,7 +114,7 @@ adapter) and Claude Code (full adapter with sessions) are the two reference impl
   agent's own listing and opens an item, then everything.
 - [ ] Record the outcome on the agent page and raise the evidence levels of the facts it confirmed.
 - [ ] Anything that writes into a store the agent builds its list from, and cannot be verified, stays
-  behind an opt-in switch and a schema probe (`wiki/decisions/codex-session-writes-gated.md`).
+  behind a schema probe that pauses the kind when it fails (`wiki/decisions/codex-session-writes-gated.md`).
 
 ## Source anchors
 

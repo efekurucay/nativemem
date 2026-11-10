@@ -9,6 +9,12 @@ public enum SidebarSelection: Hashable, Sendable {
     case folderOnly(path: String)
 }
 
+/// What the list of a selected project folder shows.
+public enum ItemMode: Hashable, Sendable {
+    case memory
+    case sessions
+}
+
 /// Draft of an item being edited in the detail pane.
 public struct EditDraft: Equatable, Sendable {
     public var name: String
@@ -38,6 +44,7 @@ public struct EditDraft: Equatable, Sendable {
 @MainActor @Observable
 public final class AppModel {
     public private(set) var index = MemoryIndex.empty
+    public private(set) var sessionIndex = SessionIndex.empty
     public private(set) var status: StatusDocument?
     public private(set) var doctor: DoctorDocument?
     public private(set) var isLoading = false
@@ -48,6 +55,8 @@ public final class AppModel {
     public var selectedItemID: String?
     public var projectSearch = ""
     public var itemSearch = ""
+    /// Applies to project folders only; every other row lists memory.
+    public private(set) var itemMode = ItemMode.memory
 
     public var editDraft: EditDraft?
     public var editError: String?
@@ -55,6 +64,7 @@ public final class AppModel {
     public private(set) var uneditableItemIDs: Set<String> = []
     private var pendingSidebar: SidebarSelection?
     private var pendingItemID: String?
+    private var pendingMode: ItemMode?
 
     public init() {
         cli = NativememCLI.locateOnThisMachine().map(NativememCLI.init(binary:))
@@ -82,13 +92,30 @@ public final class AppModel {
         ProjectTree.filter(projectTree, matching: projectSearch)
     }
 
+    public var selectedFolderPath: String? {
+        switch sidebar {
+        case .folder(let path), .folderOnly(let path): path
+        default: nil
+        }
+    }
+
+    public var showsSessions: Bool { itemMode == .sessions && selectedFolderPath != nil }
+
+    /// Sessions of the selected folder and below, whatever the search says.
+    public var folderSessionCount: Int {
+        guard let selection = sidebar else { return 0 }
+        return sessionIndex.sessions(in: selection).count
+    }
+
     public var visibleSections: [ItemSection] {
         guard let selection = sidebar else { return [] }
+        if showsSessions { return sessionIndex.sections(for: selection, matching: itemSearch) }
         return index.sections(for: selection, matching: itemSearch)
     }
 
     public var selectedItem: LogicalItem? {
-        selectedItemID.flatMap { index.item(id: $0) }
+        guard let id = selectedItemID else { return nil }
+        return showsSessions ? sessionIndex.item(id: id) : index.item(id: id)
     }
 
     /// Shown as the badge of the Overview row.
@@ -123,10 +150,12 @@ public final class AppModel {
         defer { isLoading = false }
         do {
             async let loadedItems = cli.items()
+            async let loadedSessions: [Item] = (try? await cli.sessions()) ?? []
             async let loadedStatus = cli.status()
             async let loadedDoctor: DoctorDocument? = try? await cli.doctor()
             let (entries, statusDocument) = try await (loadedItems, loadedStatus)
             index = MemoryIndex(entries: entries)
+            sessionIndex = SessionIndex(entries: await loadedSessions)
             status = statusDocument
             doctor = await loadedDoctor
             if selectedItem == nil { selectedItemID = nil }
@@ -186,6 +215,11 @@ public final class AppModel {
         return try await cli.skillShow(agent: item.primary.agent, name: item.primary.name).text
     }
 
+    public func sessionTranscript(of item: LogicalItem) async throws -> SessionTranscript {
+        guard let cli else { throw CLIError.notFound }
+        return try await cli.sessionShow(agent: item.primary.agent, nativeId: item.primary.nativeId)
+    }
+
     public func markReviewed(_ agent: String) async {
         guard let cli else { return }
         do {
@@ -229,10 +263,25 @@ public final class AppModel {
 
     // MARK: - Selection with unsaved-edit guard
 
+    public func requestMode(_ value: ItemMode) {
+        if editDirty, value != itemMode {
+            pendingMode = value
+            pendingSidebar = nil
+            pendingItemID = nil
+            askDiscard = true
+        } else {
+            if itemMode != value { selectedItemID = nil }
+            itemMode = value
+            editDraft = nil
+            editError = nil
+        }
+    }
+
     public func requestSidebar(_ value: SidebarSelection?) {
         if editDirty, value != sidebar {
             pendingSidebar = value
             pendingItemID = nil
+            pendingMode = nil
             askDiscard = true
         } else {
             if sidebar != value { selectedItemID = nil }
@@ -246,6 +295,7 @@ public final class AppModel {
         if editDirty, id != selectedItemID {
             pendingItemID = id
             pendingSidebar = nil
+            pendingMode = nil
             askDiscard = true
         } else {
             selectedItemID = id
@@ -260,17 +310,22 @@ public final class AppModel {
         if let sidebar = pendingSidebar {
             if self.sidebar != sidebar { selectedItemID = nil }
             self.sidebar = sidebar
+        } else if let mode = pendingMode {
+            if itemMode != mode { selectedItemID = nil }
+            itemMode = mode
         } else if let id = pendingItemID {
             selectedItemID = id
         }
         pendingSidebar = nil
         pendingItemID = nil
+        pendingMode = nil
         askDiscard = false
     }
 
     public func cancelDiscard() {
         pendingSidebar = nil
         pendingItemID = nil
+        pendingMode = nil
         askDiscard = false
     }
 }

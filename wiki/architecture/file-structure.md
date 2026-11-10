@@ -72,12 +72,13 @@ nativemem-sync/
 │       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/add/edit, JSON output
 │       │   ├── doctor.rs         `doctor`, compatibility reports, warnings, notification delivery
 │       │   └── schedule.rs       launchd scheduling (macOS only)
-│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications), opencode_sessions.rs (switch, notice, drift, data-home resolution)
+│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications), opencode_sessions.rs (drift, data-home resolution)
 ├── apps/macos/                   Swift package, macOS 14+, no third-party dependencies
 │   ├── Package.swift
 │   ├── Sources/Nativemem/        app entry point (`NativememApp.swift`)
 │   ├── Sources/NativememKit/     app logic and views
 │   │   ├── SkillTextView.swift   read-only SKILL.md of a skill
+│   │   ├── SessionIndex.swift, SessionDetailView.swift  sessions per project folder, read-only transcript
 │   │   ├── NewEntry.swift, NewEntrySheet.swift  the New sheet: draft and validation, the form
 │   │   ├── NativememCLI.swift    finds and runs the binary, decodes JSON
 │   │   ├── Contract.swift        Codable types mirroring the CLI JSON contract
@@ -87,7 +88,7 @@ nativemem-sync/
 │   │   ├── SyncSession.swift     preview then apply flow
 │   │   ├── BodyText.swift, MarkdownBlocks.swift  body rendering
 │   │   └── SidebarView, ItemListView, ItemDetailView, OverviewView, SyncSheet, ContentView
-│   ├── Tests/NativememKitTests/  contract, doctor, index, tree, sectioning, body parser, sync headline, new entry tests
+│   ├── Tests/NativememKitTests/  contract, doctor, index, session, tree, sectioning, body parser, sync headline, new entry tests
 │   │   └── Fixtures/             one JSON file per CLI document shape
 │   ├── Resources/AppIcon.png
 │   └── scripts/bundle.sh         builds the app bundle into `apps/macos/build/` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`)

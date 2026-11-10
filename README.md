@@ -14,8 +14,8 @@ is involved.
 | Agent | Memory | Instruction sections (global) | Skills (global) | Chat sessions |
 |---|---|---|---|---|
 | Claude Code | read and write | `CLAUDE.md` | read and write | read and write |
-| Codex | read (generated memories) and receive copies | `AGENTS.md` | read and write | read and write; writes are off unless `NATIVEMEM_CODEX_SESSION_WRITES=on` |
-| OpenCode | receive copies | `AGENTS.md` | read and write | read and write; writes are off unless `NATIVEMEM_OPENCODE_SESSION_WRITES=on` |
+| Codex | read (generated memories) and receive copies | `AGENTS.md` | read and write | read and write, while the Codex schema checks pass |
+| OpenCode | receive copies | `AGENTS.md` | read and write | read and write, while the OpenCode schema checks pass |
 | Pi | receive copies | `AGENTS.md` | read and write | read and write |
 
 Hermes has research notes only and no adapter. An agent takes part in a run only when its home
@@ -64,7 +64,8 @@ agent homes, so you can try every command without touching real data.
 
 A native SwiftUI window onto the CLI: the Overview shows each agent's status and counts, the
 sidebar groups memory by project folder and lists skills on their own row, and the detail pane
-shows an item (a skill's `SKILL.md`, read-only), which agents hold it and where it came from. It can
+shows an item (a skill's `SKILL.md`, read-only), which agents hold it and where it came from. A
+project folder also lists its chat sessions, newest first, with the transcript shown read-only. It can
 preview and apply a sync, create a memory entry or a global instruction section in any agent,
 delete an item, and shows what `doctor` reports. The app runs the embedded `nativemem` CLI for every action and holds no sync
 logic of its own. See [docs/desktop.md](docs/desktop.md).
@@ -186,8 +187,7 @@ default applies and such sessions exist. Nothing in Claude's settings is changed
 
 Codex copies are rollout files under `sessions/` shaped like what Codex's own importer writes; for a
 Claude session this tool also adds the matching record to Codex's import ledger so Codex does not
-import it again, and a session Codex already imported counts as its copy. Codex session writes are off unless
-`NATIVEMEM_CODEX_SESSION_WRITES=on`; with them on, Codex lists threads from
+import it again, and a session Codex already imported counts as its copy. Codex lists threads from
 its state database, so each copy also gets one row in the `threads` table of `state_<n>.sqlite`,
 shaped like the row Codex's importer inserts. The writes run only while the `codex.state_db` and
 `codex.threads_columns` checks of `nativemem doctor` pass; it is inserted or refreshed for copies
@@ -197,9 +197,8 @@ online backup to `<state dir>/backups/<stamp>/codex/` (the five newest copies ar
 that is locked is skipped and the row follows on the next run. That Codex lists and opens a copy is
 `[UNVERIFIED]` until you run `codex resume` in the project folder and see it.
 
-OpenCode sessions live in `opencode.db` (SQLite). They are read whenever the file exists. Copies are
-written only with `NATIVEMEM_OPENCODE_SESSION_WRITES=on` and while the `opencode.session_schema` and
-`opencode.version` checks of `nativemem doctor` pass: per copy one `session_v2` row, its
+OpenCode sessions live in `opencode.db` (SQLite). They are read and copied whenever the file exists and
+the `opencode.session_schema` and `opencode.version` checks of `nativemem doctor` pass: per copy one `session_v2` row, its
 `session_message` rows, the `event_sequence` row and, when the folder has none, a `project` row, in
 one transaction after a consistent backup of the database to `<state dir>/backups/<stamp>/opencode/`
 (the five newest are kept). Rows OpenCode made are never changed and no row is deleted; a locked
@@ -221,6 +220,7 @@ Build the CLI with `cargo build --release`; the binary is `target/release/native
 nativemem status                      # entries found per agent, what is skipped and why
 nativemem items [--json]              # list every entry in the native stores
 nativemem items --kind session        # chat sessions (never with bodies)
+nativemem session show --agent <id> --id <native id> [--json]   # one session's transcript, read-only
 nativemem items --kind skill          # skills (never with file contents)
 nativemem skill show --agent <id> --name <skill> [--json]   # the SKILL.md text
 nativemem sync                        # dry run: print the plan, change nothing
@@ -237,8 +237,7 @@ nativemem schedule uninstall
 
 Global options: `--claude-home`, `--codex-home`, `--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir`,
 `--session-days`, `--exclude-automated-sessions`, `--no-sessions` (env `NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`, `NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_OPENCODE_DATA_HOME`,
-`NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`, `NATIVEMEM_SESSION_DAYS`). `NATIVEMEM_CODEX_SESSION_WRITES=on`
-lets sync write session copies into Codex and `NATIVEMEM_OPENCODE_SESSION_WRITES=on` into OpenCode (both off by default; `status` and `doctor` say so). Defaults are `~/.claude` (or `CLAUDE_CONFIG_DIR`),
+`NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`, `NATIVEMEM_SESSION_DAYS`). Defaults are `~/.claude` (or `CLAUDE_CONFIG_DIR`),
 `~/.codex` (or `CODEX_HOME`), `~/.config/opencode` (or `OPENCODE_CONFIG_DIR`), `~/.local/share/opencode` for the OpenCode database (or `$XDG_DATA_HOME/opencode`), `~/.pi/agent`
 (or `PI_CODING_AGENT_DIR`) and `~/.nativemem`. `--json` prints one JSON
 document, including errors as `{"error": ..., "code": ...}`.

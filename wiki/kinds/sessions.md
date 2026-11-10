@@ -130,7 +130,7 @@ adopts the imported thread as the Codex replica with an empty hash, so it is nev
   every replica is a row and not a file, a replica the user deleted is not observed, the ledger row
   stays and the session is never written again. Decision: `wiki/decisions/opencode-session-writes-gated.md`.
 
-## Codex needs a thread row; writes are opt-in and follow the schema probes
+## Codex needs a thread row; writes follow the schema probes
 
 Codex lists threads from its state database, so each replica rollout also gets one `threads` row
 (`crates/core/src/adapters/codex_threads.rs`, called from `Adapter::finish` after the run's writes).
@@ -139,11 +139,24 @@ first and last message time, and the importer's constants for the rest (`wiki/ag
 Rows are inserted or refreshed only for rollouts carrying `nativemem_origin`, a rollout without a row
 gets it on the next run, and Codex's own rows are never touched or deleted. The writer runs only when
 `codex.state_db` and `codex.threads_columns` pass; a failing check pauses sessions for Codex (neither
-read nor written). Writes into Codex are opt-in (`NATIVEMEM_CODEX_SESSION_WRITES=on`; `status` and `doctor` show a notice while
-they are off, and nothing is planned for Codex then); sessions always flow from Codex to Claude Code
-and Pi. `--no-sessions` writes no row either. A locked database is skipped
+read nor written). Sessions flow in every direction with no switch: Codex is a write target whenever
+session sync is on and the probes pass. `--no-sessions` writes no row either. A locked database is skipped
 with a `skipped` note and repaired on the next run. Decision:
 `wiki/decisions/codex-session-writes-gated.md`.
+
+## Listing and reading
+
+`items --kind session --json` lists sessions with an empty `body` and a `session` object
+(`created_ms`, `updated_ms`, `turns`, the number of turns); no other kind carries it. `session show
+--agent <id> --id <native id> --json` prints one session's title, cwd, times and turns
+(`role`, `text`, `ts_ms`) and nothing else: it takes no lock and writes nothing. It answers
+`unknown_agent`, `invalid` for an id that is not a session id and `not_found`. The desktop app lists
+the sessions of a project folder (`SessionIndex`, copies folded into their original through
+`replica_of`) and shows the transcript read-only; "Show in Finder" is offered for the agents that keep
+one file per session and not for OpenCode (`LogicalItem.storedAsFile`). Tests:
+`session_show_prints_the_transcript_read_only`,
+`session_show_reports_unknown_agent_invalid_id_and_missing_session` in `crates/cli/tests/cli.rs`;
+`SessionTests` in `apps/macos/Tests/NativememKitTests`.
 
 ## Scope flags
 
@@ -188,6 +201,7 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 - `crates/core/src/adapters/opencode_project.rs`
 - `crates/core/src/adapters/pi.rs`
 - `crates/cli/src/main.rs`
+- `apps/macos/Sources/NativememKit/SessionIndex.swift`
 - `docs/design.md` (Chat sessions)
 
 ## Rules
@@ -197,7 +211,7 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 - MUST: Bump the adapter's `SESSION_WRITER_REVISION` when the written format changes.
 - MUST: Render tool activity through `render_tool` so all targets read the same.
 - MUST: Write Codex's SQLite database only through `codex_threads.rs`, only while the schema probes pass.
-- MUST: Write OpenCode's database only through `opencode_sessions.rs`, only with its switch on and while the schema probes pass.
+- MUST: Write OpenCode's database only through `opencode_sessions.rs`, only while the schema probes pass.
 - MUST: Plan nothing for a session the target agent does not accept (`Adapter::accepts`).
 - SHOULD: Set the replica's file mtime to the original's so resume lists keep the relative order.
 

@@ -2186,8 +2186,7 @@ mod session_tests {
             },
             codex: {
                 let a = CodexAdapter::new(root.join("codex"), state.clone(), backups.clone())
-                    .with_claude_home(root.join("claude"))
-                    .with_session_writes(true);
+                    .with_claude_home(root.join("claude"));
                 match options {
                     Some(o) => a.with_sessions(o),
                     None => a,

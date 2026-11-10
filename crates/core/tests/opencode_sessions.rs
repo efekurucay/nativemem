@@ -69,7 +69,7 @@ fn fx() -> Fx {
     }
 }
 
-fn adapter_with(f: &Fx, stamp: &str, writes: bool) -> AgentsFileAdapter {
+fn adapter(f: &Fx, stamp: &str) -> AgentsFileAdapter {
     AgentsFileAdapter::new(
         "opencode",
         f.home.clone(),
@@ -78,11 +78,6 @@ fn adapter_with(f: &Fx, stamp: &str, writes: bool) -> AgentsFileAdapter {
     )
     .with_search_path(OsString::new())
     .with_opencode_sessions(f.data.db(), Some(SessionOptions::default()))
-    .with_session_writes(writes)
-}
-
-fn adapter(f: &Fx, stamp: &str) -> AgentsFileAdapter {
-    adapter_with(f, stamp, true)
 }
 
 fn key(id: &str) -> ItemKey {
@@ -315,9 +310,9 @@ fn sessions_are_not_read_while_session_sync_is_off() {
         f.state.clone(),
         BackupSession::with_stamp("T"),
     )
-    .with_opencode_sessions(f.data.db(), None)
-    .with_session_writes(true);
+    .with_opencode_sessions(f.data.db(), None);
     assert!(off.scan().unwrap().is_empty());
+    assert!(!off.supports(Kind::Session, &Scope::Project(PathBuf::from(CWD))));
 }
 
 // ---- writing ----
@@ -837,15 +832,11 @@ fn only_the_newest_database_backups_are_kept_and_nothing_else_is_pruned() {
 // ---- gating ----
 
 #[test]
-fn writes_follow_the_switch_the_probes_and_the_store() {
+fn writes_follow_the_probes_and_the_store() {
     let f = fx();
     native(&f, "ses_a", Some("Mine"), &[("user", "q")]);
     let project = Scope::Project(PathBuf::from(CWD));
-    assert!(adapter_with(&f, "T", true).supports(Kind::Session, &project));
-    let off = adapter_with(&f, "T", false);
-    assert!(!off.supports(Kind::Session, &project));
-    assert_eq!(off.scan().unwrap().len(), 1, "still read as a source");
-    assert!(off.has_session_store() && !off.session_writes_enabled());
+    assert!(adapter(&f, "T").supports(Kind::Session, &project));
     let blocked = adapter(&f, "T").with_blocked_kinds(&[Kind::Session]);
     assert!(!blocked.supports(Kind::Session, &project));
     assert!(blocked.scan().unwrap().is_empty());
@@ -855,8 +846,7 @@ fn writes_follow_the_switch_the_probes_and_the_store() {
         f.home.clone(),
         f.state.clone(),
         BackupSession::with_stamp("T"),
-    )
-    .with_session_writes(true);
+    );
     assert!(!none.supports(Kind::Session, &project));
 }
 
@@ -991,20 +981,20 @@ fn world() -> World {
 }
 
 impl World {
-    fn adapters(&self, writes: bool) -> (ClaudeAdapter, PiAdapter, AgentsFileAdapter) {
+    fn adapters(&self) -> (ClaudeAdapter, PiAdapter, AgentsFileAdapter) {
         let stamp = || BackupSession::with_stamp("T");
         (
             ClaudeAdapter::new(self.claude.clone(), self.f.state.clone(), stamp())
                 .with_sessions(SessionOptions::default()),
             PiAdapter::new(self.pi.clone(), self.f.state.clone(), stamp())
                 .with_sessions(SessionOptions::default()),
-            adapter_with(&self.f, "T", writes),
+            adapter(&self.f, "T"),
         )
     }
 
     /// Plans, applies, and returns the agents the plan wrote replicas to.
-    fn plan_and_apply(&self, writes: bool) -> Vec<String> {
-        let (c, p, o) = self.adapters(writes);
+    fn plan_and_apply(&self) -> Vec<String> {
+        let (c, p, o) = self.adapters();
         let all: Vec<&dyn Adapter> = vec![&c, &p, &o];
         let plan = engine::plan(&all, &self.ledger).unwrap();
         let targets = plan
@@ -1027,8 +1017,8 @@ impl World {
         targets
     }
 
-    fn plan(&self, writes: bool) -> engine::Plan {
-        let (c, p, o) = self.adapters(writes);
+    fn plan(&self) -> engine::Plan {
+        let (c, p, o) = self.adapters();
         let all: Vec<&dyn Adapter> = vec![&c, &p, &o];
         engine::plan(&all, &self.ledger).unwrap()
     }
@@ -1054,16 +1044,16 @@ fn a_claude_session_becomes_an_opencode_replica_and_the_second_plan_is_empty() {
         Some("Fix login"),
         &[("user", "fix it"), ("assistant", "done")],
     );
-    let first = w.plan_and_apply(true);
+    let first = w.plan_and_apply();
     assert_eq!(wrote(&first, "opencode"), 1);
     assert_eq!(wrote(&first, "pi"), 1);
-    let second = w.plan(true);
+    let second = w.plan();
     assert!(second.is_empty(), "{second}");
     let conn = w.f.data.connect();
     assert_eq!(count(&conn, "SELECT count(*) FROM session_v2"), 1);
     assert_eq!(count(&conn, "SELECT count(*) FROM event_sequence"), 1);
     assert_eq!(count(&conn, "SELECT count(*) FROM project"), 1);
-    w.plan_and_apply(true);
+    w.plan_and_apply();
     assert_eq!(
         count(&conn, "SELECT count(*) FROM session_v2"),
         1,
@@ -1080,24 +1070,24 @@ fn an_opencode_session_becomes_a_claude_and_pi_replica() {
         Some("Native chat"),
         &[("user", "hello"), ("assistant", "hi")],
     );
-    let first = w.plan_and_apply(false);
+    let first = w.plan_and_apply();
     assert_eq!(wrote(&first, "claude"), 1);
     assert_eq!(wrote(&first, "pi"), 1);
     assert_eq!(wrote(&first, "opencode"), 0);
-    assert!(w.plan(false).is_empty());
-    assert_eq!(
-        w.f.data.session_ids(),
-        ["ses_a"],
-        "nothing is written into OpenCode while the switch is off"
-    );
+    assert!(w.plan().is_empty());
+    assert_eq!(w.f.data.session_ids(), ["ses_a"], "its own row only");
 }
 
 #[test]
-fn the_switch_off_plans_nothing_for_opencode_as_a_target() {
+fn a_paused_session_kind_plans_nothing_for_opencode_and_leaves_the_database_alone() {
     let w = world();
     ClaudeHome::new(&w.claude).add_session(Path::new(CWD), "c1", Some("T"), &[("user", "q")]);
-    let done = w.plan_and_apply(false);
-    assert_eq!(wrote(&done, "opencode"), 0);
+    let (c, p, o) = w.adapters();
+    let o = o.with_blocked_kinds(&[Kind::Session]);
+    let all: Vec<&dyn Adapter> = vec![&c, &p, &o];
+    let plan = engine::plan(&all, &w.ledger).unwrap();
+    assert_eq!(writes_to(&plan, "opencode"), 0, "{plan}");
+    assert_eq!(writes_to(&plan, "pi"), 1, "{plan}");
     assert!(w.f.data.session_ids().is_empty());
     assert!(!w.f.state.join("backups").exists());
 }
@@ -1111,19 +1101,19 @@ fn a_lost_ledger_adopts_the_replica_by_its_marker() {
         Some("T"),
         &[("user", "q"), ("assistant", "a")],
     );
-    w.plan_and_apply(true);
+    w.plan_and_apply();
     let rows = dump(&w.f.data.connect());
     let fresh = World {
         ledger: Ledger::in_memory().unwrap(),
         ..w
     };
-    let plan = fresh.plan(true);
+    let plan = fresh.plan();
     assert_eq!(writes_to(&plan, "opencode"), 0, "{plan}");
     assert!(
         !plan.actions.is_empty(),
         "the replica is adopted rather than written again"
     );
-    let (c, p, o) = fresh.adapters(true);
+    let (c, p, o) = fresh.adapters();
     let all: Vec<&dyn Adapter> = vec![&c, &p, &o];
     engine::apply(
         plan,
@@ -1135,7 +1125,7 @@ fn a_lost_ledger_adopts_the_replica_by_its_marker() {
     )
     .unwrap();
     assert_eq!(dump(&fresh.f.data.connect()), rows);
-    assert!(fresh.plan(true).is_empty());
+    assert!(fresh.plan().is_empty());
 }
 
 #[test]
@@ -1148,22 +1138,22 @@ fn a_deleted_replica_is_never_written_again_and_a_vanished_original_removes_noth
         Some("T"),
         &[("user", "q"), ("assistant", "a")],
     );
-    w.plan_and_apply(true);
+    w.plan_and_apply();
     let conn = w.f.data.connect();
     conn.execute_batch(
         "DELETE FROM session_message; DELETE FROM event_sequence; DELETE FROM session_v2;",
     )
     .unwrap();
-    let plan = w.plan(true);
+    let plan = w.plan();
     assert_eq!(writes_to(&plan, "opencode"), 0, "{plan}");
-    w.plan_and_apply(true);
+    w.plan_and_apply();
     assert_eq!(count(&conn, "SELECT count(*) FROM session_v2"), 0);
 
     let w2 = world();
     ClaudeHome::new(&w2.claude).add_session(Path::new(CWD), "c1", Some("T"), &[("user", "q")]);
-    w2.plan_and_apply(true);
+    w2.plan_and_apply();
     fs::remove_dir_all(w2.claude.join("projects")).unwrap();
-    let plan = w2.plan(true);
+    let plan = w2.plan();
     assert!(plan.actions.is_empty(), "{plan}");
     assert_eq!(
         count(&w2.f.data.connect(), "SELECT count(*) FROM session_v2"),
@@ -1181,7 +1171,7 @@ fn a_grown_original_refreshes_an_untouched_replica_but_not_a_continued_one() {
         Some("T"),
         &[("user", "q"), ("assistant", "a")],
     );
-    w.plan_and_apply(true);
+    w.plan_and_apply();
     claude.add_session(
         Path::new(CWD),
         "c1",
@@ -1193,10 +1183,10 @@ fn a_grown_original_refreshes_an_untouched_replica_but_not_a_continued_one() {
             ("assistant", "yes"),
         ],
     );
-    let plan = w.plan(true);
+    let plan = w.plan();
     assert_eq!(writes_to(&plan, "opencode"), 1, "{plan}");
-    w.plan_and_apply(true);
-    assert!(w.plan(true).is_empty());
+    w.plan_and_apply();
+    assert!(w.plan().is_empty());
     let conn = w.f.data.connect();
     let user_turns = count(
         &conn,
@@ -1226,7 +1216,7 @@ fn a_grown_original_refreshes_an_untouched_replica_but_not_a_continued_one() {
             ("user", "third"),
         ],
     );
-    assert_eq!(writes_to(&w.plan(true), "opencode"), 0);
+    assert_eq!(writes_to(&w.plan(), "opencode"), 0);
 }
 
 #[test]
@@ -1239,7 +1229,7 @@ fn an_older_original_keeps_the_newest_time_updated_ordering() {
         Some("Old chat"),
         &[("user", "q"), ("assistant", "a")],
     );
-    w.plan_and_apply(true);
+    w.plan_and_apply();
     let conn = w.f.data.connect();
     let replica_updated: i64 = conn
         .query_row(
@@ -1248,7 +1238,7 @@ fn an_older_original_keeps_the_newest_time_updated_ordering() {
             |r| r.get(0),
         )
         .unwrap();
-    let (c, _, _) = w.adapters(true);
+    let (c, _, _) = w.adapters();
     let original = c
         .scan()
         .unwrap()

@@ -7,8 +7,6 @@ use std::process::{Command, Output};
 use nativemem_core::testkit::{ClaudeHome, OpencodeData};
 use serde_json::{json, Value};
 
-const NOTICE: &str = "session writes are off; set NATIVEMEM_OPENCODE_SESSION_WRITES=on to let nativemem write sessions into OpenCode";
-
 struct Fx {
     _t: tempfile::TempDir,
     root: PathBuf,
@@ -39,7 +37,7 @@ fn fx() -> Fx {
 }
 
 impl Fx {
-    fn command(&self, switch: Option<&str>) -> Command {
+    fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_nativemem"));
         cmd.env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CODEX_HOME")
@@ -47,15 +45,10 @@ impl Fx {
             .env_remove("PI_CODING_AGENT_DIR")
             .env_remove("NATIVEMEM_OPENCODE_HOME")
             .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
-            .env_remove("NATIVEMEM_OPENCODE_SESSION_WRITES")
-            .env_remove("NATIVEMEM_CODEX_SESSION_WRITES")
             .env_remove("NATIVEMEM_PI_HOME")
             .env_remove("XDG_DATA_HOME")
             .env("HOME", self.root.join("home"))
             .env("PATH", self.root.join("bin"));
-        if let Some(v) = switch {
-            cmd.env("NATIVEMEM_OPENCODE_SESSION_WRITES", v);
-        }
         cmd.arg("--claude-home")
             .arg(&self.claude)
             .arg("--codex-home")
@@ -69,27 +62,27 @@ impl Fx {
         cmd
     }
 
-    fn run(&self, switch: Option<&str>, args: &[&str]) -> Output {
-        let mut cmd = self.command(switch);
+    fn run(&self, args: &[&str]) -> Output {
+        let mut cmd = self.command();
         cmd.arg("--opencode-data-home")
             .arg(self.data.root.clone())
             .args(args);
         cmd.output().unwrap()
     }
 
-    fn json(&self, switch: Option<&str>, args: &[&str]) -> (Option<i32>, Value) {
-        let o = self.run(switch, args);
+    fn json(&self, args: &[&str]) -> (Option<i32>, Value) {
+        let o = self.run(args);
         let doc = serde_json::from_slice(&o.stdout)
             .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&o.stdout)));
         (o.status.code(), doc)
     }
 
-    fn sync(&self, switch: Option<&str>, apply: bool) -> (Option<i32>, Value) {
+    fn sync(&self, apply: bool) -> (Option<i32>, Value) {
         let mut args = vec!["sync", "--json"];
         if apply {
             args.push("--apply");
         }
-        self.json(switch, &args)
+        self.json(&args)
     }
 
     /// The agent entry of a `status` or `doctor` document that carries `notices`.
@@ -130,14 +123,14 @@ impl Fx {
 #[test]
 fn a_synced_session_reaches_opencode_and_the_second_plan_is_empty() {
     let f = fx();
-    let (code, _) = f.sync(Some("on"), true);
+    let (code, _) = f.sync(true);
     assert_eq!(code, Some(0));
     assert_eq!(f.data.session_ids().len(), 1);
-    let (code, plan) = f.sync(Some("on"), false);
+    let (code, plan) = f.sync(false);
     assert_eq!(code, Some(0));
     assert_eq!(plan["actions"], json!([]), "{plan}");
     assert_eq!(plan["notes"], json!([]), "{plan}");
-    f.sync(Some("on"), true);
+    f.sync(true);
     assert_eq!(f.data.session_ids().len(), 1, "a session id appears once");
     let backups = f.state.join("backups");
     let stamps = fs::read_dir(backups)
@@ -149,33 +142,20 @@ fn a_synced_session_reaches_opencode_and_the_second_plan_is_empty() {
 }
 
 #[test]
-fn opencode_session_writes_are_opt_in_and_the_notice_says_so() {
+fn opencode_shows_no_session_writes_notice() {
     let f = fx();
-    let before = fs::read(f.data.db()).unwrap();
-    let (code, plan) = f.sync(None, false);
-    assert_eq!((code, &plan["notes"]), (Some(0), &json!([])), "{plan}");
-    assert!(
-        !plan.to_string().contains("\"agent\":\"opencode\""),
-        "{plan}"
-    );
-    let (code, _) = f.sync(None, true);
-    assert_eq!(code, Some(0));
-    assert_eq!(fs::read(f.data.db()).unwrap(), before);
-    assert!(!f.state.join("backups").exists());
     for command in ["status", "doctor"] {
-        let (_, doc) = f.json(None, &[command, "--json"]);
+        let (_, doc) = f.json(&[command, "--json"]);
         let opencode = f.agent(&doc, "opencode");
-        assert_eq!(opencode["notices"], json!([NOTICE]), "{command}: {doc}");
+        assert_eq!(opencode["notices"], json!([]), "{command}: {doc}");
         assert!(opencode["status"] == "ok" || opencode["status"] == "updated");
     }
-    let o = f.run(None, &["status"]);
-    assert!(String::from_utf8_lossy(&o.stdout).contains(&format!("opencode: {NOTICE}")));
-    let (_, doc) = f.json(Some("on"), &["status", "--json"]);
-    assert_eq!(f.agent(&doc, "opencode")["notices"], json!([]));
+    let o = f.run(&["status"]);
+    assert!(!String::from_utf8_lossy(&o.stdout).contains("session writes are off"));
 }
 
 #[test]
-fn opencode_sessions_are_read_as_a_source_while_writes_are_off() {
+fn opencode_sessions_are_read_as_a_source() {
     let f = fx();
     f.data.add_session(
         "ses_native",
@@ -184,18 +164,24 @@ fn opencode_sessions_are_read_as_a_source_while_writes_are_off() {
         &[("user", "hello"), ("assistant", "hi")],
         1_794_304_900_000,
     );
-    let (_, status) = f.json(None, &["status", "--json"]);
+    let (_, status) = f.json(&["status", "--json"]);
     assert_eq!(f.counts(&status, "opencode")["sessions"], 1);
     assert_eq!(f.counts(&status, "opencode")["automated_sessions"], 0);
     let before = f.claude_sessions();
-    f.sync(None, true);
+    f.sync(true);
     assert_eq!(
         f.claude_sessions(),
         before + 1,
         "the OpenCode session became a Claude replica"
     );
-    assert_eq!(f.data.session_ids(), ["ses_native"]);
-    let (_, plan) = f.sync(None, false);
+    let ids = f.data.session_ids();
+    assert!(ids.contains(&"ses_native".to_string()), "{ids:?}");
+    assert_eq!(
+        ids.len(),
+        2,
+        "the Claude session became an OpenCode replica"
+    );
+    let (_, plan) = f.sync(false);
     assert_eq!(plan["actions"], json!([]), "{plan}");
 }
 
@@ -211,7 +197,7 @@ fn a_drifted_schema_pauses_opencode_sessions_in_both_directions() {
         &[("user", "hello")],
         1_794_304_900_000,
     );
-    let (code, doc) = f.json(Some("on"), &["doctor", "--json"]);
+    let (code, doc) = f.json(&["doctor", "--json"]);
     assert_eq!(code, Some(3), "{doc}");
     let opencode = f.agent(&doc, "opencode");
     assert_eq!(opencode["status"], "action_required");
@@ -226,7 +212,7 @@ fn a_drifted_schema_pauses_opencode_sessions_in_both_directions() {
     assert_eq!(failing[0]["id"], "opencode.session_schema");
     let before = fs::read(f.data.db()).unwrap();
     let claude_before = f.claude_sessions();
-    f.sync(Some("on"), true);
+    f.sync(true);
     assert_eq!(fs::read(f.data.db()).unwrap(), before, "nothing written");
     assert_eq!(f.claude_sessions(), claude_before, "nothing read either");
     assert!(
@@ -256,33 +242,33 @@ fn the_data_home_comes_from_the_flag_the_env_the_xdg_variable_or_the_home_direct
         let doc: Value = serde_json::from_slice(&o.stdout).unwrap();
         f.counts(&doc, "opencode")["sessions"].as_i64().unwrap()
     };
-    assert_eq!(sessions(f.command(None)), 0, "nothing at the default place");
+    assert_eq!(sessions(f.command()), 0, "nothing at the default place");
 
-    let mut env = f.command(None);
+    let mut env = f.command();
     env.env("NATIVEMEM_OPENCODE_DATA_HOME", &f.data.root);
     assert_eq!(sessions(env), 1);
 
     let xdg = f.root.join("xdg");
     fs::create_dir_all(&xdg).unwrap();
     fs::rename(&f.data.root, xdg.join("opencode")).unwrap();
-    let mut xdg_cmd = f.command(None);
+    let mut xdg_cmd = f.command();
     xdg_cmd.env("XDG_DATA_HOME", &xdg);
     assert_eq!(sessions(xdg_cmd), 1);
 
     let home_data = f.root.join("home/.local/share");
     fs::create_dir_all(&home_data).unwrap();
     fs::rename(xdg.join("opencode"), home_data.join("opencode")).unwrap();
-    assert_eq!(sessions(f.command(None)), 1);
+    assert_eq!(sessions(f.command()), 1);
 }
 
 #[test]
 fn without_a_database_opencode_takes_no_part_in_sessions_and_shows_no_notice() {
     let f = fx();
     fs::remove_file(f.data.db()).unwrap();
-    let (code, _) = f.sync(Some("on"), true);
+    let (code, _) = f.sync(true);
     assert_eq!(code, Some(0));
     assert!(!f.data.db().exists(), "the database is never created");
-    let (_, doc) = f.json(None, &["doctor", "--json"]);
+    let (_, doc) = f.json(&["doctor", "--json"]);
     assert_eq!(f.agent(&doc, "opencode")["notices"], json!([]));
 }
 
@@ -290,7 +276,7 @@ fn without_a_database_opencode_takes_no_part_in_sessions_and_shows_no_notice() {
 fn no_sessions_leaves_the_database_alone() {
     let f = fx();
     let before = fs::read(f.data.db()).unwrap();
-    let o = f.run(Some("on"), &["--no-sessions", "sync", "--apply", "--json"]);
+    let o = f.run(&["--no-sessions", "sync", "--apply", "--json"]);
     assert_eq!(o.status.code(), Some(0));
     assert_eq!(fs::read(f.data.db()).unwrap(), before);
 }
@@ -298,17 +284,14 @@ fn no_sessions_leaves_the_database_alone() {
 #[test]
 fn opencode_sessions_cannot_be_deleted_or_edited_from_here() {
     let f = fx();
-    let (code, doc) = f.json(
-        None,
-        &[
-            "delete",
-            "--agent",
-            "opencode",
-            "--id",
-            "ses_x.jsonl",
-            "--json",
-        ],
-    );
+    let (code, doc) = f.json(&[
+        "delete",
+        "--agent",
+        "opencode",
+        "--id",
+        "ses_x.jsonl",
+        "--json",
+    ]);
     assert_eq!(
         (code, &doc["code"]),
         (Some(1), &json!("unsupported")),

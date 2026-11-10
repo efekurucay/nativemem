@@ -18,7 +18,7 @@ use nativemem_core::error::{Error, Result};
 use nativemem_core::fsx::BackupSession;
 use nativemem_core::ledger::Ledger;
 use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Kind, Observed, Scope};
-use nativemem_core::session::{is_session_id, SessionOptions};
+use nativemem_core::session::{is_session_id, Role, Session, SessionOptions};
 use nativemem_core::slug::slugify;
 use serde_json::{json, Value};
 
@@ -151,6 +151,8 @@ enum Command {
     },
     /// Skills of the agents
     Skill(SkillArgs),
+    /// Chat sessions of the agents
+    Session(SessionArgs),
     /// Run `sync --apply` on a timer through a launchd agent (macOS)
     Schedule(ScheduleArgs),
 }
@@ -171,6 +173,28 @@ enum SkillCommand {
         /// The skill's directory name
         #[arg(long, allow_hyphen_values = true)]
         name: String,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct SessionArgs {
+    #[command(subcommand)]
+    command: SessionCommand,
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Print the transcript of one session; reads only
+    Show {
+        /// claude, codex, opencode or pi
+        #[arg(long)]
+        agent: String,
+        /// The session's native id, as listed by `items --kind session`
+        #[arg(long, allow_hyphen_values = true)]
+        id: String,
         /// Print one JSON document
         #[arg(long)]
         json: bool,
@@ -305,11 +329,6 @@ impl Agents {
         sessions: Option<SessionOptions>,
         blocked: &Blocked,
     ) -> Self {
-        // Session writes into Codex and OpenCode are opt-in and, once on, still follow the
-        // compatibility probes.
-        let writes_on = |name: &str| std::env::var(name).is_ok_and(|v| v == "on");
-        let codex_session_writes = writes_on("NATIVEMEM_CODEX_SESSION_WRITES");
-        let opencode_session_writes = writes_on("NATIVEMEM_OPENCODE_SESSION_WRITES");
         let state = || roots.state.clone();
         let present = |dir: &Path| dir.is_dir();
         let paused = |id: &str| blocked.get(id).cloned().unwrap_or_default();
@@ -326,7 +345,6 @@ impl Agents {
             codex: present(&roots.codex).then(|| {
                 let a = CodexAdapter::new(roots.codex.clone(), state(), backups.clone())
                     .with_claude_home(roots.claude.clone())
-                    .with_session_writes(codex_session_writes)
                     .with_visible_roots(shared())
                     .with_blocked_kinds(&paused("codex"));
                 match sessions {
@@ -345,7 +363,6 @@ impl Agents {
                 let db = roots.opencode_data.join(DATABASE);
                 if db.is_file() {
                     a.with_opencode_sessions(db, sessions)
-                        .with_session_writes(opencode_session_writes)
                 } else {
                     a
                 }
@@ -574,7 +591,7 @@ fn items(roots: &Roots, agents: &Agents, kind: Option<Kind>, json: bool) -> Resu
         let list: Vec<Value> = observed
             .iter()
             .map(|o| {
-                json!({
+                let mut item = json!({
                     "agent": o.agent.as_str(),
                     "native_id": o.native_id,
                     "kind": o.item.kind.as_str(),
@@ -586,7 +603,15 @@ fn items(roots: &Roots, agents: &Agents, kind: Option<Kind>, json: bool) -> Resu
                     "body": if matches!(o.item.kind, Kind::Session | Kind::Skill) { "" } else { &o.item.body },
                     "replica_of": o.replica_of.as_ref().map(key_json),
                     "hash": content_hash(&o.item),
-                })
+                });
+                if let Some(session) = Session::from_body(&o.item.body).filter(|_| o.item.kind == Kind::Session) {
+                    item["session"] = json!({
+                        "created_ms": session.created_ms,
+                        "updated_ms": session.updated_ms,
+                        "turns": session.turns.len(),
+                    });
+                }
+                item
             })
             .collect();
         print_json(&json!({ "items": list }));
@@ -646,6 +671,52 @@ fn refuse_session(id: &str) -> Outcome<()> {
             code: "unsupported",
             message: "chat sessions cannot be deleted or edited from here".into(),
         });
+    }
+    Ok(())
+}
+
+fn session_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<()> {
+    let not_found = || Failure::NotFound {
+        agent: agent.to_string(),
+        id: id.to_string(),
+    };
+    let adapter = agents.named(agent)?;
+    if !is_session_id(id) {
+        return Err(Failure::Coded {
+            code: "invalid",
+            message: format!("{id:?} is not a session id"),
+        });
+    }
+    let found = find_entry(adapter.ok_or_else(not_found)?, id)?
+        .filter(|o| o.item.kind == Kind::Session)
+        .ok_or_else(not_found)?;
+    let session = Session::from_body(&found.item.body)
+        .ok_or_else(|| Error::Parse(format!("unreadable session {id:?}")))?;
+    if json {
+        let turns: Vec<Value> = session
+            .turns
+            .iter()
+            .map(|t| json!({ "role": t.role.as_str(), "text": t.text, "ts_ms": t.ts_ms }))
+            .collect();
+        print_json(&json!({
+            "agent": agent,
+            "native_id": id,
+            "title": session.title,
+            "cwd": session.cwd.display().to_string(),
+            "created_ms": session.created_ms,
+            "updated_ms": session.updated_ms,
+            "turns": turns,
+        }));
+    } else {
+        println!("{}", session.title);
+        println!("{agent}  {id}  {}", session.cwd.display());
+        for t in &session.turns {
+            let who = match t.role {
+                Role::User => "You",
+                Role::Assistant => "Assistant",
+            };
+            println!("\n{who}:\n{}", t.text);
+        }
     }
     Ok(())
 }
@@ -1161,6 +1232,9 @@ fn run(cli: &Cli) -> Outcome<u8> {
         Command::Skill(SkillArgs {
             command: SkillCommand::Show { agent, name, json },
         }) => skill_show(&agents, agent, name, *json).map(|()| 0),
+        Command::Session(SessionArgs {
+            command: SessionCommand::Show { agent, id, json },
+        }) => session_show(&agents, agent, id, *json).map(|()| 0),
         Command::Schedule(args) => run_schedule(cli, args, &roots).map(|()| 0),
     }
 }
@@ -1176,6 +1250,9 @@ fn wants_json(command: &Command) -> bool {
         | Command::Edit { json, .. }
         | Command::Skill(SkillArgs {
             command: SkillCommand::Show { json, .. },
+        })
+        | Command::Session(SessionArgs {
+            command: SessionCommand::Show { json, .. },
         })
         | Command::Schedule(ScheduleArgs {
             command: ScheduleCommand::Status { json },

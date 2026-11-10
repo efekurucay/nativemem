@@ -12,10 +12,8 @@ fn run(claude: &Path, codex: &Path, state: &Path, args: &[&str]) -> Output {
         .env_remove("OPENCODE_CONFIG_DIR")
         .env_remove("PI_CODING_AGENT_DIR")
         .env("HOME", state.with_file_name("home"))
-        .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
         .env_remove("NATIVEMEM_OPENCODE_HOME")
         .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
-        .env_remove("NATIVEMEM_OPENCODE_SESSION_WRITES")
         .env_remove("XDG_DATA_HOME")
         .env_remove("NATIVEMEM_PI_HOME")
         .arg("--claude-home")
@@ -453,10 +451,8 @@ fn run_stdin(f: &Fx, stdin: &str, args: &[&str]) -> (Option<i32>, Value) {
         .env_remove("OPENCODE_CONFIG_DIR")
         .env_remove("PI_CODING_AGENT_DIR")
         .env("HOME", f.state.with_file_name("home"))
-        .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
         .env_remove("NATIVEMEM_OPENCODE_HOME")
         .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
-        .env_remove("NATIVEMEM_OPENCODE_SESSION_WRITES")
         .env_remove("XDG_DATA_HOME")
         .env_remove("NATIVEMEM_PI_HOME")
         .arg("--claude-home")
@@ -648,7 +644,6 @@ mod schedule {
             .env_remove("PI_CODING_AGENT_DIR")
             .env_remove("NATIVEMEM_OPENCODE_HOME")
             .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
-            .env_remove("NATIVEMEM_OPENCODE_SESSION_WRITES")
             .env_remove("XDG_DATA_HOME")
             .env_remove("NATIVEMEM_PI_HOME")
             .env_remove("NATIVEMEM_LAUNCH_AGENTS_DIR")
@@ -766,12 +761,10 @@ mod schedule {
             .env_remove("PI_CODING_AGENT_DIR")
             .env_remove("NATIVEMEM_OPENCODE_HOME")
             .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
-            .env_remove("NATIVEMEM_OPENCODE_SESSION_WRITES")
             .env_remove("XDG_DATA_HOME")
             .env_remove("NATIVEMEM_PI_HOME")
             .env_remove("NATIVEMEM_STATE_DIR")
             .env("HOME", e.state.parent().unwrap())
-            .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
             .args(["schedule", "--no-launchctl", "--launch-agents-dir"])
             .arg(&e.agents)
             .arg("install")
@@ -1226,12 +1219,86 @@ fn items_leaves_sessions_out_unless_asked_and_never_prints_bodies() {
         assert_eq!(i["body"], "");
         assert_eq!(i["scope"], json!({"type": "project", "path": "/w/app"}));
         assert_eq!(i["description"], "Fix login");
+        let session = i["session"].as_object().unwrap();
+        assert_eq!(session["turns"], CHAT.len());
+        assert!(session["updated_ms"].as_i64().unwrap() > 0);
     }
     assert_eq!(list.iter().filter(|i| i["replica_of"].is_null()).count(), 1);
     let pi = list.iter().find(|i| i["agent"] == "pi").unwrap();
     assert_eq!(pi["replica_of"]["origin"], "claude");
     let human = text(&run(&f.claude, &f.codex, &f.state, &["items"]));
     assert!(!human.contains("session"), "{human}");
+}
+
+#[test]
+fn memory_items_carry_no_session_object() {
+    let f = Fx::new();
+    let (_, items) = f.json(&["items", "--json"]);
+    assert!(items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|i| i.get("session").is_none()));
+}
+
+#[test]
+fn session_show_prints_the_transcript_read_only() {
+    let (f, _) = with_session();
+    let (code, doc) = f.json(&[
+        "session",
+        "show",
+        "--agent",
+        "claude",
+        "--id",
+        "-w-app/c1.jsonl",
+        "--json",
+    ]);
+    assert_eq!(code, Some(0), "{doc}");
+    assert_eq!(doc["agent"], "claude");
+    assert_eq!(doc["native_id"], "-w-app/c1.jsonl");
+    assert_eq!(doc["title"], "Fix login");
+    assert_eq!(doc["cwd"], "/w/app");
+    assert!(doc["created_ms"].as_i64().unwrap() > 0);
+    let turns = doc["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), CHAT.len());
+    for (turn, (role, text)) in turns.iter().zip(CHAT) {
+        assert_eq!(
+            (turn["role"].as_str(), turn["text"].as_str()),
+            (Some(*role), Some(*text))
+        );
+        assert!(turn["ts_ms"].as_i64().unwrap() > 0);
+    }
+    let human = text(&run(
+        &f.claude,
+        &f.codex,
+        &f.state,
+        &[
+            "session",
+            "show",
+            "--agent",
+            "claude",
+            "--id",
+            "-w-app/c1.jsonl",
+        ],
+    ));
+    assert!(
+        human.contains("Fix login") && human.contains("You:") && human.contains("Assistant:"),
+        "{human}"
+    );
+    assert!(!f.state.join("sync.lock").exists(), "no lock is taken");
+}
+
+#[test]
+fn session_show_reports_unknown_agent_invalid_id_and_missing_session() {
+    let (f, _) = with_session();
+    let code_of = |agent: &str, id: &str| {
+        let (code, doc) = f.json(&["session", "show", "--agent", agent, "--id", id, "--json"]);
+        assert_eq!(code, Some(1), "{doc}");
+        doc["code"].as_str().unwrap().to_string()
+    };
+    assert_eq!(code_of("nobody", "-w-app/c1.jsonl"), "unknown_agent");
+    assert_eq!(code_of("claude", "memory/x.md"), "invalid");
+    assert_eq!(code_of("claude", "-w-app/missing.jsonl"), "not_found");
 }
 
 #[test]
@@ -1247,9 +1314,7 @@ fn delete_and_edit_refuse_session_ids() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_nativemem"))
         .env("HOME", f.state.with_file_name("home"))
         .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
-        .env_remove("NATIVEMEM_OPENCODE_SESSION_WRITES")
         .env_remove("XDG_DATA_HOME")
-        .env("NATIVEMEM_CODEX_SESSION_WRITES", "on")
         .arg("--claude-home")
         .arg(&f.claude)
         .arg("--codex-home")

@@ -10,16 +10,13 @@ Session replicas whose target is Codex. Reading Codex rollouts as originals is u
 
 ## Decision
 
-Codex session writes (rollout files, `threads` rows and importer-ledger records) are opt-in: the CLI
-enables them only when `NATIVEMEM_CODEX_SESSION_WRITES=on`, because the user decides when nativemem
-may touch Codex's data (the desktop app's bundled CLI would otherwise run the writer from its Sync
-button). While the switch is off `CodexAdapter` answers `supports(Session, Project)` false, nothing is
-planned for Codex sessions and `status` and `doctor` show the notice `session writes are off; set
-NATIVEMEM_CODEX_SESSION_WRITES=on to let nativemem write sessions into Codex`. With the switch on,
-`supports` is true unless the compatibility watch pauses sessions for Codex. The watch pauses them when the
-checks `codex.state_db` or `codex.threads_columns` (or any other Codex session check) fail, so
-nothing is read or written for Codex sessions while the database does not have the shape the row
-writer was written against. Every replica rollout gets a `threads` row in `state_<n>.sqlite`
+Codex session writes (rollout files, `threads` rows and importer-ledger records) have no switch. They
+happen whenever session sync is on (`--no-sessions` turns it off) and the compatibility watch does not
+pause sessions for Codex: `CodexAdapter` answers `supports(Session, Project)` true while it has a session
+store and the kind is not blocked. The watch pauses sessions when the checks `codex.state_db` or
+`codex.threads_columns` (or any other Codex session check) fail, so nothing is read or written for
+Codex sessions while the database does not have the shape the row writer was written against. The
+probes are the gate. Every replica rollout gets a `threads` row in `state_<n>.sqlite`
 (`crates/core/src/adapters/codex_threads.rs`); the row is the only thing besides the rollout file
 that Codex's resume list needs.
 
@@ -37,7 +34,7 @@ that Codex's resume list needs.
 
 - No row is deleted, and a row Codex or the user changed keeps those columns.
 - Reading Codex sessions as originals, adopting threads Codex imported, and memory and instruction
-  sync are unaffected by the switch.
+  sync do not depend on the row writer.
 - A rollout that lost its row (skipped run, busy database) gets it on the next run.
 - Codex's own import of a Claude session is respected: the importer-ledger record is added and a
   thread Codex imported is adopted, so a thread id appears once in the database.
@@ -60,8 +57,9 @@ that Codex's resume list needs.
 ## Verification checklist
 
 - [ ] With a failing `codex.threads_columns`, `sync --apply` writes no Codex rollout and no row
-- [ ] Without `NATIVEMEM_CODEX_SESSION_WRITES=on`, no Codex session is written, planned or noted as skipped
-- [ ] `README.md` names the switch and the guard
+- [ ] With `--no-sessions`, no Codex rollout, row or backup is written
+- [ ] With the probes passing and no environment variable set, `sync --apply` writes the rollout and its row
+- [ ] `README.md` names the guard
 
 ## Related docs
 

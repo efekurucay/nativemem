@@ -1,4 +1,4 @@
-# Decision: OpenCode session writes are opt-in, probe-guarded and marked inside the message JSON
+# Decision: OpenCode session writes are probe-guarded and marked inside the message JSON
 
 ## Purpose
 
@@ -6,20 +6,17 @@ Record when session copies are written into OpenCode's database and why they loo
 
 ## Scope
 
-Session replicas whose target is OpenCode. Reading OpenCode sessions as originals is unaffected by the switch.
+Session replicas whose target is OpenCode. Reading OpenCode sessions as originals follows the same probes.
 
 ## Decision
 
-OpenCode session writes are opt-in: the CLI enables them only when `NATIVEMEM_OPENCODE_SESSION_WRITES=on`,
-because the user decides when nativemem may touch OpenCode's database. The agent takes part in session
-sync only when `<data home>/opencode.db` exists (`--opencode-data-home`, `NATIVEMEM_OPENCODE_DATA_HOME`,
-else `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode`). While the switch is off
-`AgentsFileAdapter` answers `supports(Session, Project)` false, nothing is planned for OpenCode as a
-target, sessions are still read as originals, and `status` and `doctor` show the notice `session writes
-are off; set NATIVEMEM_OPENCODE_SESSION_WRITES=on to let nativemem write sessions into OpenCode`. With the
-switch on, `supports` is true unless the compatibility watch pauses sessions: `opencode.session_schema`
-(column signature of `session_v2`, `session_message`, `project`, `event_sequence`) or `opencode.version`
-(major `2`) failing pauses OpenCode sessions, so nothing is read or written.
+OpenCode session writes have no switch. The agent takes part in session sync only when
+`<data home>/opencode.db` exists (`--opencode-data-home`, `NATIVEMEM_OPENCODE_DATA_HOME`, else
+`$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode`). While that file exists and session sync is on
+(`--no-sessions` turns it off), `AgentsFileAdapter` answers `supports(Session, Project)` true unless the
+compatibility watch pauses sessions: `opencode.session_schema` (column signature of `session_v2`,
+`session_message`, `project`, `event_sequence`) or `opencode.version` (major `2`) failing pauses OpenCode
+sessions, so nothing is read or written. The probes are the gate.
 
 A replica is one `session_v2` row plus its `session_message` rows and `event_sequence` row, written in one
 `BEGIN IMMEDIATE` transaction after the run's online backup (`wiki/architecture/safety.md`). The values:
@@ -85,8 +82,9 @@ every writer.
 ## Verification checklist
 
 - [ ] With a failing `opencode.session_schema`, `sync --apply` reads and writes no OpenCode session
-- [ ] Without `NATIVEMEM_OPENCODE_SESSION_WRITES=on`, `opencode.db` is unchanged and no backup exists
-- [ ] `README.md` names the switch and the guard
+- [ ] With `--no-sessions`, `opencode.db` is unchanged and no backup exists
+- [ ] With the probes passing and no environment variable set, `sync --apply` writes the replica rows after one database backup
+- [ ] `README.md` names the guard
 
 ## Related docs
 

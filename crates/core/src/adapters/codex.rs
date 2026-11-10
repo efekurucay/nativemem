@@ -59,7 +59,6 @@ pub struct CodexAdapter {
     skills: SkillStore,
     sessions: Option<CodexSessions>,
     claude_home: Option<PathBuf>,
-    session_writes: bool,
     /// Rollouts written in this run whose `threads` row `finish` refreshes.
     written: RefCell<Vec<PathBuf>>,
     blocked: Vec<Kind>,
@@ -153,7 +152,6 @@ impl CodexAdapter {
             backups,
             sessions: None,
             claude_home: None,
-            session_writes: false,
             written: RefCell::new(Vec::new()),
             blocked: Vec::new(),
         }
@@ -169,17 +167,6 @@ impl CodexAdapter {
     pub fn with_blocked_kinds(mut self, kinds: &[Kind]) -> Self {
         self.blocked = kinds.to_vec();
         self
-    }
-
-    /// Whether session replicas are written into Codex; off unless the caller opts in. Codex lists a thread only when its
-    /// state database has a row for it; `finish` maintains that row.
-    pub fn with_session_writes(mut self, enabled: bool) -> Self {
-        self.session_writes = enabled;
-        self
-    }
-
-    pub fn session_writes_enabled(&self) -> bool {
-        self.session_writes
     }
 
     /// Where Claude Code's transcripts live. Codex's importer ledger records the bytes of the
@@ -243,8 +230,9 @@ impl CodexAdapter {
         Ok((native_id, path))
     }
 
-    /// Reads rollouts as session originals; without this call sessions stay out. Replicas are
-    /// written only while session writes are enabled (`with_session_writes`).
+    /// Reads rollouts as session originals and lets replicas be written; without this call
+    /// sessions stay out. Codex lists a thread only when its state database has a row for it;
+    /// `finish` maintains that row.
     pub fn with_sessions(mut self, options: SessionOptions) -> Self {
         self.sessions = Some(CodexSessions::new(self.home.clone(), options));
         self
@@ -300,7 +288,7 @@ impl Adapter for CodexAdapter {
             return false;
         }
         match (kind, scope) {
-            (Kind::Session, Scope::Project(_)) => self.session_writes,
+            (Kind::Session, Scope::Project(_)) => self.sessions.is_some(),
             (Kind::Memory, Scope::Project(_))
             | (Kind::Instruction | Kind::Skill, Scope::Global) => true,
             _ => false,
@@ -327,8 +315,7 @@ impl Adapter for CodexAdapter {
     /// Writes the `threads` rows of the replica rollouts; a busy database is left for the next run.
     fn finish(&self) -> Result<Vec<(String, String)>> {
         let written = self.written.take();
-        if self.sessions.is_none() || !self.session_writes || self.blocked.contains(&Kind::Session)
-        {
+        if self.sessions.is_none() || self.blocked.contains(&Kind::Session) {
             return Ok(Vec::new());
         }
         let busy = codex_threads::sync_rows(

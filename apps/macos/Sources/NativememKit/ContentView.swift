@@ -72,6 +72,11 @@ public struct ContentView: View {
         .task { await model.reload() }
     }
 
+    private var emptyDetailTitle: String {
+        if model.showsSessions { return "No session selected" }
+        return model.sidebar == .skills ? "No skill selected" : "No memory selected"
+    }
+
     @ViewBuilder
     private var detailColumn: some View {
         switch model.sidebar {
@@ -81,16 +86,18 @@ public struct ContentView: View {
             HSplitView {
                 ItemListView(model: model)
                     .frame(minWidth: 260, idealWidth: 340, maxWidth: 520)
-                if let item = model.selectedItem {
+                if let item = model.selectedItem, model.showsSessions {
+                    SessionDetailView(model: model, item: item)
+                        .id(item.id)
+                        .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+                        .layoutPriority(1)
+                } else if let item = model.selectedItem {
                     ItemDetailView(model: model, item: item, onDelete: { await model.delete(item) })
                         .id(item.id)
                         .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
                         .layoutPriority(1)
                 } else {
-                    ContentUnavailableView(
-                        model.sidebar == .skills ? "No skill selected" : "No memory selected",
-                        systemImage: "doc.text"
-                    )
+                    ContentUnavailableView(emptyDetailTitle, systemImage: "doc.text")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }

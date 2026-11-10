@@ -293,6 +293,11 @@ impl OpencodeSessions {
         self
     }
 
+    /// Whether session sync is on.
+    pub fn is_enabled(&self) -> bool {
+        self.options.is_some()
+    }
+
     pub fn database(&self) -> &Path {
         &self.db
     }
