@@ -23,7 +23,8 @@ Code, Codex, OpenCode, Pi. Hermes has research notes only and no adapter.
 - Code, comments and docs describe the current state only; history lives in git. One canonical name
   per symbol, and a replaced implementation is removed, not kept beside its replacement.
 - Update the wiki in the same task as the change (`wiki/WIKI-CREATOR.md` has the routing table).
-- Commits carry no AI attribution trailers (no `Co-Authored-By`, no "Generated with" footer).
+- Commits are `type(scope): summary` (the subjects feed the release notes) and carry no AI attribution
+  trailers (no `Co-Authored-By`, no "Generated with" footer).
 - Keep changes surgical: every changed line traces to the request.
 
 ## Commands
@@ -35,6 +36,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cd apps/macos && swift test                             # app tests
 apps/macos/scripts/bundle.sh                            # builds apps/macos/build/nativemem.app
+scripts/release.sh X.Y.Z [--dry-run]                    # local release: checks, bump, macOS artifacts, notes, tag
+scripts/demo-home.sh <tmp dir> [path-to-nativemem]      # synthetic agent homes for trying the CLI and app
 ```
 
 Binary usage (on temp roots only): `nativemem status`, `items [--kind ...]`, `sync [--apply]`,
@@ -43,5 +46,6 @@ an agent that needs action, follow `wiki/runbooks/agent-update-action-required.m
 
 ## Related
 
-- `README.md`, `docs/design.md`, `docs/desktop.md`
+- `README.md`, `docs/design.md`, `docs/desktop.md`, `CONTRIBUTING.md`
+- Release and CI: `wiki/guides/release.md`, `wiki/architecture/ci.md`
 - `AGENTS.md` is a symlink to this file.

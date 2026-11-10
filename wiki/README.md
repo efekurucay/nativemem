@@ -30,6 +30,7 @@ agent can act on this repo without re-deriving facts.
 | `wiki/architecture/context-quality.md` | The quality bar every page must meet, evidence levels |
 | `wiki/architecture/file-structure.md` | The real tree and what each crate, module and folder owns |
 | `wiki/architecture/overview.md` | Adapters, neutral model, ledger, three-way decision table, `supports`, writer revisions, policy per kind |
+| `wiki/architecture/ci.md` | GitHub Actions workflows, runners, what is best-effort and what runs only locally |
 | `wiki/architecture/compatibility.md` | Compatibility watch: probes, status, `compat.json`, gating, `doctor`, prompt, notifications |
 | `wiki/architecture/safety.md` | Backups, atomic writes, mass-delete guard, lock, no writes in git repos, secrets, test isolation, staged rollout |
 | `wiki/kinds/memory.md` | Project memory entries: model, stores, markers, write-back |
@@ -43,6 +44,7 @@ agent can act on this repo without re-deriving facts.
 | `wiki/runbooks/agent-update-action-required.md` | What to do when an agent shows ActionRequired: prompt flow, `--accept`, rollback |
 | `wiki/guides/add-an-agent.md` | End-to-end checklist for a new agent |
 | `wiki/guides/add-a-resource-kind.md` | End-to-end checklist for a new resource kind |
+| `wiki/guides/release.md` | Cutting a release with `scripts/release.sh`: notes, artifacts, versioning, signing, rollback |
 | `wiki/guides/verify-with-real-agents.md` | Staged rollout recipe and rollback from `~/.nativemem/backups` |
 | `wiki/decisions/no-shared-store.md` | Decision: there is no shared store |
 | `wiki/decisions/native-flow-only.md` | Decision: only files and formats the agents already read |
@@ -60,6 +62,7 @@ agent can act on this repo without re-deriving facts.
 - `docs/desktop.md`
 - `crates/core/src/lib.rs`
 - `crates/cli/src/main.rs`
+- `scripts/release.sh`
 
 ## Rules
 

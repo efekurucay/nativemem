@@ -1,28 +1,97 @@
 # nativemem
 
-`nativemem` keeps each coding agent's own memory in sync with the others. There is no shared
-store: every agent keeps reading its own files, in its own format, from its own home directory.
-The tool translates between them, so what one agent learns about a project shows up in the
-others without re-teaching. Text is copied verbatim and project scope is preserved. No LLM is
-involved; the behaviour is deterministic.
+`nativemem` keeps each coding agent's own memory, global instruction sections and chat sessions in
+sync with the other agents. There is no shared store: every agent keeps reading its own files, in
+its own format, from its own home directory, and the tool translates between them. What one agent
+learns about a project shows up in the others without re-teaching. Only the native flow is used:
+text is copied verbatim, project scope is preserved, no agent configuration is changed and no LLM
+is involved.
 
-## How it works
+![Overview](docs/images/overview.png)
 
-- **Adapters.** Each agent is an adapter that scans its native store and can write, update and
-  remove entries in the agent's own format. The sync engine knows nothing about agent formats.
-- **Ledger.** A small SQLite ledger in the state directory records, per entry, the origin and
-  the content hash of each side at the last successful sync. It stores ids, hashes and paths,
-  not entry text.
-- **Three-way decision.** For each entry the engine compares the original, its replicas and the
-  ledger: new entries are copied, one-sided edits propagate (including edits made to a replica,
-  which are written back to the original), and edits on both sides are reported as conflicts
-  and left alone.
-- **Deletes propagate, with backups.** Removing an entry on one side removes it on the other
-  sides. Every delete or overwrite first copies the old file to the backup directory.
-- **Nothing is written inside git repositories.** Only agent home directories and the state
-  directory are touched.
+## Supported agents
 
-## Current support
+| Agent | Memory | Instruction sections (global) | Chat sessions |
+|---|---|---|---|
+| Claude Code | read and write | `CLAUDE.md` | read and write |
+| Codex | read (generated memories) and receive copies | `AGENTS.md` | read and write; writes are off unless `NATIVEMEM_CODEX_SESSION_WRITES=on` |
+| OpenCode | receive copies | `AGENTS.md` | not supported |
+| Pi | receive copies | `AGENTS.md` | read and write |
+
+Hermes has research notes only and no adapter. An agent takes part in a run only when its home
+directory exists. Details per agent are in [Current support](#current-support) and in the wiki.
+
+## Install
+
+**macOS.** Download `nativemem-macos-universal.zip` (the desktop app, which embeds the CLI) or
+`nativemem-cli-<tag>-macos-universal.tar.gz` (the CLI alone) from the
+[Releases](https://github.com/efekurucay/nativemem/releases) page. The macOS artifacts are built on
+the maintainer's machine, not in CI. Or build from source.
+
+**Linux.** Download `nativemem-cli-<tag>-linux-x86_64.tar.gz` or `...-linux-aarch64.tar.gz` from
+Releases. Linux support is best-effort: the CLI works, `schedule` and notifications are macOS-only.
+
+**Windows.** Build from source (best-effort, CLI only; `schedule` and notifications are
+macOS-only).
+
+**Verify.** Each release lists SHA-256 checksums in `SHA256SUMS-macos.txt` and `SHA256SUMS-linux.txt`.
+
+**From source.** Needs Rust 1.89 or newer and a C compiler (SQLite is bundled):
+
+```
+cargo build --release     # binary: target/release/nativemem
+```
+
+## Quick start
+
+These commands read your real agent homes. `sync` only previews until `--apply`; every root can be overridden (see Usage).
+
+```
+nativemem status          # entries found per agent, what is skipped and why
+nativemem sync            # preview: print the plan, change nothing
+nativemem sync --apply    # execute the plan
+nativemem schedule install   # macOS: sync every 60 minutes through launchd
+nativemem doctor          # compatibility check of each agent's on-disk formats
+```
+
+`scripts/demo-home.sh <dir> [path-to-nativemem]` builds a synthetic environment with made-up
+agent homes, so you can try every command without touching real data.
+
+## Desktop app (macOS)
+
+![Memory detail](docs/images/memory-detail.png)
+
+A native SwiftUI window onto the CLI: the Overview shows each agent's status and counts, the
+sidebar groups memory by project folder, and the detail pane shows an item, which agents hold it
+and where it came from. It can preview and apply a sync, delete an item, and shows what
+`doctor` reports. The app runs the embedded `nativemem` CLI for every action and holds no sync
+logic of its own. See [docs/desktop.md](docs/desktop.md).
+
+Build it with `apps/macos/scripts/bundle.sh` (output: `apps/macos/build/nativemem.app`). The app
+is ad-hoc signed, not notarized, so Gatekeeper blocks the first launch of a downloaded copy. Either
+right-click the app and choose Open, or run:
+
+```
+xattr -dr com.apple.quarantine nativemem.app
+```
+
+## Safety
+
+- `sync` is a dry run unless `--apply` is given.
+- Every delete or overwrite backs up first to `<state dir>/backups/<UTC timestamp>/<agent>/...`;
+  writes are atomic.
+- Nothing is written inside a git repository; only agent home directories and the state directory
+  are touched.
+- Secrets and session bodies are never printed, and the ledger stores ids and hashes, not text.
+- A mass-delete guard refuses large removals, and a failed scan aborts the run before planning.
+- The compatibility watch (`doctor`) pauses the kinds whose on-disk format an agent update changed.
+- The tool never transmits anything over the network.
+
+## Reference
+
+The sections below describe behaviour in detail.
+
+### Current support
 
 | Agent | Instruction sections (global) | Project memory |
 |---|---|---|
@@ -45,16 +114,23 @@ configuration file is changed. An edit made to a replica file is written back to
 Codex originals are generated by Codex, so they are read but never edited or deleted by
 `nativemem`. Entries without a project scope are reported and skipped.
 
-Chat sessions are a separate kind with their own policy, see below.
+### How it works
 
-Notes:
+- **Adapters.** Each agent is an adapter that scans its native store and can write, update and
+  remove entries in the agent's own format. The sync engine knows nothing about agent formats.
+- **Ledger.** A small SQLite ledger in the state directory records, per entry, the origin and
+  the content hash of each side at the last successful sync. It stores ids, hashes and paths,
+  not entry text.
+- **Three-way decision.** For each entry the engine compares the original, its replicas and the
+  ledger: new entries are copied, one-sided edits propagate (including edits made to a replica,
+  which are written back to the original), and edits on both sides are reported as conflicts
+  and left alone.
+- **Deletes propagate, with backups.** Removing an entry on one side removes it on the other
+  sides. Every delete or overwrite first copies the old file to the backup directory.
+- **Nothing is written inside git repositories.** Only agent home directories and the state
+  directory are touched.
 
-- OpenCode reads `~/.claude/CLAUDE.md` only when its own global `AGENTS.md` is absent. Creating
-  that file replaces the fallback; the synced region carries the Claude Code sections over.
-- Pi loads the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` in
-  each directory, so an `AGENTS.override.md` in its home shadows the synced `AGENTS.md`.
-
-## Chat sessions
+### Chat sessions
 
 Sessions travel between Claude Code, Codex and Pi in every direction. A session is copied once, as a
 resumable transcript in the target agent's own format, with each tool call and its result shown
@@ -101,7 +177,7 @@ object, `parent_thread_id` or `thread_source: subagent`), a headless `exec` run 
 originator `codex_exec`), or a thread started by Claude Code (originator `Claude Code`). A session
 without a recognised marker counts as interactive. Pi has no such marker.
 
-## Usage
+### Usage
 
 Build the CLI with `cargo build --release`; the binary is `target/release/nativemem`.
 
@@ -135,7 +211,7 @@ entries (`sessions` in `--json`).
 Exit codes: 0 success, 2 when conflicts or skipped writes remain, 1 on error. `doctor` exits 3
 when an agent needs action.
 
-### Compatibility watch (`doctor`)
+#### Compatibility watch (`doctor`)
 
 The agents update themselves and `nativemem` depends on their on-disk formats. Every adapter
 compares what it finds on disk with the formats it was written against (key sets, column
@@ -158,7 +234,7 @@ signatures, type sets, small integers; never message text) and reports a status 
   only); `schedule install` adds `--notify` to the job. `NATIVEMEM_NOTIFY_FILE` appends the text
   to a file instead of notifying.
 
-### Scheduled sync (macOS)
+#### Scheduled sync (macOS)
 
 `schedule install` copies the running executable to `<state dir>/bin/nativemem`, writes
 `~/Library/LaunchAgents/dev.nativemem.sync.plist` and loads it with `launchctl`. The job runs
@@ -172,16 +248,7 @@ Writing runs (`sync --apply`, `delete`, `edit`) take an exclusive lock on
 `<state dir>/sync.lock`. If another run holds it, the command fails with code `busy` and
 writes nothing. `status`, `items` and dry-run `sync` do not lock.
 
-## Desktop app (macOS)
-
-```
-apps/macos/scripts/bundle.sh
-```
-
-This builds the Swift app and bundles it as `apps/macos/build/nativemem.app`. See
-`docs/desktop.md` for what it does.
-
-## Safety
+### Safety details
 
 - `sync` is a dry run unless `--apply` is given.
 - Backups go to `<state dir>/backups/<UTC timestamp>/<agent>/<relative path>`.
@@ -191,7 +258,7 @@ This builds the Swift app and bundles it as `apps/macos/build/nativemem.app`. Se
   mass deletion.
 - Writes are atomic: temp file in the same directory, fsync, rename.
 
-## Not yet
+### Not yet
 
 - Agents other than Claude Code, Codex, OpenCode and Pi.
 - Resource kinds other than memory entries, instruction sections and chat sessions (MCP config, skills).
@@ -199,6 +266,14 @@ This builds the Swift app and bundles it as `apps/macos/build/nativemem.app`. Se
 - Memory maintenance: classification, promotion to global scope, summarising, stale cleanup.
 - Global-scope Claude entries and writing back to Codex originals.
 
-See `docs/design.md` for the full design.
+## Documentation
 
-Documentation: [wiki/README.md](wiki/README.md)
+- [wiki/README.md](wiki/README.md): the knowledge base (architecture, agents, kinds, guides, runbooks)
+- [docs/design.md](docs/design.md): design and build plan
+- [docs/desktop.md](docs/desktop.md): desktop app and the CLI JSON contract
+- [wiki/guides/release.md](wiki/guides/release.md): cutting a release; the release notes are built from commit subjects of the form `type(scope): summary`
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+

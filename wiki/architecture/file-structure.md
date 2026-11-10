@@ -7,19 +7,30 @@ right place.
 
 ## Scope
 
-Tracked source, docs and wiki. Build output (`target/`, `apps/macos/.build/`, `apps/macos/build/`)
-and the local scratch folder `gitdex/` are ignored by `.gitignore` and not described.
+Tracked source, docs, scripts, CI configuration and wiki. Build output (`target/`, `apps/macos/.build/`,
+`apps/macos/build/`, `dist/`) and the local scratch folder `gitdex/` are ignored by `.gitignore` and not described.
 
 ## Tree
 
 ```
 nativemem-sync/
-├── Cargo.toml                    workspace: crates/core, crates/cli
+├── Cargo.toml                    workspace: crates/core, crates/cli; version and package metadata
+├── LICENSE                       MIT
+├── CONTRIBUTING.md · SECURITY.md contribution rules; private vulnerability reporting
 ├── CLAUDE.md                     entry point for coding agents (AGENTS.md is a symlink to it)
 ├── README.md                     user-facing overview, usage, support table
 ├── docs/
 │   ├── design.md                 original design and build plan
-│   └── desktop.md                desktop app spec and the CLI JSON contract
+│   ├── desktop.md                desktop app spec and the CLI JSON contract
+│   └── images/                   screenshots referenced by README.md (overview.png, memory-detail.png)
+├── scripts/
+│   ├── release.sh                local release: checks, version bump, macOS artifacts, notes, commit, tag
+│   └── demo-home.sh              synthetic agent homes with generic memory items for trying the CLI and app
+├── .github/
+│   ├── workflows/                ci.yml (Linux checks), release.yml (Linux binaries, release), portability.yml (manual Windows build)
+│   ├── ISSUE_TEMPLATE/           bug_report, agent_update, config
+│   ├── PULL_REQUEST_TEMPLATE.md
+│   └── dependabot.yml            weekly grouped cargo and actions updates
 ├── crates/
 │   ├── core/                     library `nativemem-core`: no agent format knowledge in the engine
 │   │   └── src/
@@ -73,14 +84,14 @@ nativemem-sync/
 │   ├── Tests/NativememKitTests/  contract, doctor, index, tree, sectioning, body parser, sync headline tests
 │   │   └── Fixtures/             one JSON file per CLI document shape
 │   ├── Resources/AppIcon.png
-│   └── scripts/bundle.sh         builds the release app bundle into `apps/macos/build/`
+│   └── scripts/bundle.sh         builds the app bundle into `apps/macos/build/` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`)
 └── wiki/                         this knowledge base
     ├── README.md · CLAUDE.md · WIKI-CREATOR.md
-    ├── architecture/             compatibility, context-quality, file-structure, overview, safety
+    ├── architecture/             ci, compatibility, context-quality, file-structure, overview, safety
     ├── kinds/                    memory, instruction-sections, sessions
     ├── agents/                   claude-code, codex, pi, opencode, hermes
     ├── runbooks/                 agent-update-action-required
-    ├── guides/                   add-an-agent, add-a-resource-kind, verify-with-real-agents
+    ├── guides/                   add-an-agent, add-a-resource-kind, release, verify-with-real-agents
     ├── decisions/                one short decision record per file
     └── _templates/               PAGE.md, AGENT.md
 ```
@@ -97,6 +108,9 @@ nativemem-sync/
 | Reading roots, flags, environment, the lock, exit codes, JSON output | `crates/cli/src/main.rs` |
 | Compatibility probes, status, state file, prompt | `crates/core/src/compat.rs`, `crates/core/src/adapters/*_probes.rs`, `crates/cli/src/doctor.rs` |
 | Fixture homes for tests | `crates/core/src/testkit.rs` |
+| Releases, release notes, macOS packaging | `scripts/release.sh`, `apps/macos/scripts/bundle.sh`, `wiki/guides/release.md` |
+| Continuous integration | `.github/workflows/`, `wiki/architecture/ci.md` |
+| Demo data | `scripts/demo-home.sh` |
 | Display names of agents in the app | `apps/macos/Sources/NativememKit/MemoryIndex.swift` (`agentDisplayName`) |
 
 ## Source anchors
@@ -106,6 +120,8 @@ nativemem-sync/
 - `crates/core/src/adapters/mod.rs`
 - `crates/cli/src/doctor.rs`
 - `apps/macos/Package.swift`
+- `scripts/release.sh`
+- `.github/workflows/ci.yml`
 - `.gitignore`
 
 ## Rules

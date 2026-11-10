@@ -58,16 +58,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cd apps/macos && swift test
 apps/macos/scripts/bundle.sh
+scripts/release.sh X.Y.Z [--dry-run]
+scripts/demo-home.sh <tmp dir> [path-to-nativemem]
 ```
 
-Build and test commands are safe: tests use temp directories. Running `target/release/nativemem`
+Build and test commands are safe: tests use temp directories. `scripts/release.sh` is run by the maintainer only; `--with-doctor` reads the real agent homes. Running `target/release/nativemem`
 without explicit temp roots is not.
 
 ## Wiki discipline
 
 When behaviour, a format, a safety rule or a decision changes, update the wiki in the same task.
 Routing: `wiki/WIKI-CREATOR.md`. Quality bar: `wiki/architecture/context-quality.md`.
-Commits carry no AI attribution trailers.
+Commits are `type(scope): summary`, which feeds the release notes (`wiki/guides/release.md`), and carry no AI attribution trailers.
 
 ## Source anchors
 

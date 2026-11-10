@@ -33,6 +33,10 @@ Every page under `wiki/`. The wiki records the current state; history lives in g
 | New decision | `wiki/decisions/<decision>.md` with current-state wording ("X does Y because Z"); index row in `wiki/README.md`; link from the pages it governs |
 | Verified or disproved agent fact | The agent's Facts table: change the evidence level, never leave a stale tag |
 | New directory or module | `wiki/architecture/file-structure.md` |
+| Release process, version rules, signing, artifact names | `wiki/guides/release.md`; `scripts/release.sh` and `apps/macos/scripts/bundle.sh` are the source; `README.md` install section |
+| CI workflow, runner or check change | `wiki/architecture/ci.md`; the commands in `CLAUDE.md` and `wiki/CLAUDE.md` when they change |
+| Packaging (app bundle, universal build, signing identity) | `wiki/guides/release.md`; `wiki/architecture/file-structure.md` |
+| Demo data (`scripts/demo-home.sh`) | `wiki/architecture/file-structure.md`; `CONTRIBUTING.md` if the workflow for contributors changes |
 | New page | Index row in `wiki/README.md`, a `Related docs` link from at least one existing page |
 
 An existing topic is updated in place: no change log, `Last updated` moves forward.
