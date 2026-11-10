@@ -13,23 +13,20 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
-use rusqlite::backup::{Backup, StepResult};
-use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 
 use super::codex_probes::state_databases;
 use super::codex_rollout::{CLI_VERSION, HISTORY_MODE, MODEL_PROVIDER, ORIGIN_KEY, SOURCE};
 use super::codex_sessions::{collect_rollouts, parse, thread_id_of};
+use super::sqlite_guard::{self, Stop};
 use crate::error::{Error, Result};
 use crate::fsx::BackupSession;
 use crate::session::Role;
 
-/// How long a database that another process holds locked is waited for before the run skips it.
-pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-/// Database backups kept below `<state dir>/backups`; older ones are deleted.
-pub const KEPT_BACKUPS: usize = 5;
+pub use super::sqlite_guard::BUSY_TIMEOUT;
 
 /// What Codex's importer writes for an imported thread.
 const SANDBOX_POLICY: &str = r#"{"type":"read-only"}"#;
@@ -51,30 +48,6 @@ struct Candidate {
     row: ThreadRow,
     /// The rollout was written in this run, so its row is refreshed even when it exists.
     refresh: bool,
-}
-
-enum Stop {
-    Busy,
-    Failed(Error),
-}
-
-impl From<rusqlite::Error> for Stop {
-    fn from(e: rusqlite::Error) -> Self {
-        match &e {
-            rusqlite::Error::SqliteFailure(f, _)
-                if matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) =>
-            {
-                Stop::Busy
-            }
-            _ => Stop::Failed(Error::Parse(format!("codex state database: {e}"))),
-        }
-    }
-}
-
-impl From<Error> for Stop {
-    fn from(e: Error) -> Self {
-        Stop::Failed(e)
-    }
 }
 
 /// First and last message time of a rollout, from its turn events.
@@ -192,80 +165,6 @@ fn upsert_sql(refresh: bool) -> String {
     )
 }
 
-fn db_backups(state_dir: &Path) -> Vec<(String, PathBuf)> {
-    let Ok(stamps) = fs::read_dir(state_dir.join("backups")) else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    for stamp in stamps.flatten() {
-        let dir = stamp.path().join("codex");
-        for file in fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let name = file.file_name().to_string_lossy().into_owned();
-            if name.starts_with("state_") && name.ends_with(".sqlite") {
-                found.push((
-                    stamp.file_name().to_string_lossy().into_owned(),
-                    file.path(),
-                ));
-            }
-        }
-    }
-    found.sort();
-    found
-}
-
-/// Deletes all but the newest `KEPT_BACKUPS` database backup copies, and nothing else.
-fn prune_backups(state_dir: &Path) {
-    let found = db_backups(state_dir);
-    for (_, file) in found.iter().take(found.len().saturating_sub(KEPT_BACKUPS)) {
-        let _ = fs::remove_file(file);
-        if let Some(dir) = file.parent() {
-            let _ = fs::remove_dir(dir);
-            if let Some(stamp) = dir.parent() {
-                let _ = fs::remove_dir(stamp);
-            }
-        }
-    }
-}
-
-/// A consistent copy of the database through SQLite's online backup, once per run.
-fn backup_database(
-    source: &Connection,
-    db: &Path,
-    state_dir: &Path,
-    session: &BackupSession,
-    busy: Duration,
-) -> std::result::Result<(), Stop> {
-    let name = db.file_name().map(PathBuf::from).unwrap_or_default();
-    let dir = state_dir
-        .join("backups")
-        .join(session.stamp())
-        .join("codex");
-    let dest = dir.join(name);
-    if dest.exists() {
-        return Ok(());
-    }
-    fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
-    let copy = || -> std::result::Result<(), Stop> {
-        let mut target = Connection::open(&dest)?;
-        let backup = Backup::new(source, &mut target)?;
-        let deadline = Instant::now() + busy;
-        loop {
-            match backup.step(256)? {
-                StepResult::Done => return Ok(()),
-                StepResult::More => {}
-                _ if Instant::now() >= deadline => return Err(Stop::Busy),
-                _ => std::thread::sleep(Duration::from_millis(25)),
-            }
-        }
-    };
-    if let Err(e) = copy() {
-        let _ = fs::remove_file(&dest);
-        return Err(e);
-    }
-    prune_backups(state_dir);
-    Ok(())
-}
-
 /// Reads the row back and checks it against the rollout.
 fn verify(conn: &Connection, row: &ThreadRow) -> std::result::Result<(), Stop> {
     let stored = conn
@@ -334,7 +233,15 @@ fn write_rows(
 
     let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     conn.busy_timeout(busy)?;
-    backup_database(&conn, db, state_dir, session, busy)?;
+    sqlite_guard::backup_database(
+        &conn,
+        db,
+        state_dir,
+        session,
+        "codex",
+        &|name| name.starts_with("state_") && name.ends_with(".sqlite"),
+        busy,
+    )?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     {
         let mut refresh = tx.prepare(&upsert_sql(true))?;

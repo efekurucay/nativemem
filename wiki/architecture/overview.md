@@ -97,7 +97,7 @@ fallback. Test: `memory_is_planned_only_for_agents_that_support_it`.
 |---|---|---|---|---|
 | Claude Code | yes, originals and replicas | yes | yes | yes |
 | Codex | yes; originals are generated and read-only, replicas are written | yes | yes | only with `NATIVEMEM_CODEX_SESSION_WRITES=on` while the Codex schema probes pass; each written replica also gets a `threads` row |
-| OpenCode | replicas only | yes | yes | no |
+| OpenCode | replicas only | yes | yes | only with `NATIVEMEM_OPENCODE_SESSION_WRITES=on` while the OpenCode schema and version probes pass and `opencode.db` exists; sessions are always read as a source |
 | Pi | replicas only | yes | yes | yes |
 
 `Adapter::accepts(item)` (default true) is a second gate for one item: the engine plans nothing for a
@@ -114,8 +114,8 @@ Anchors: `supports` in `crates/core/src/adapters/claude.rs`, `codex.rs`, `pi.rs`
 overridden). The ledger records the revision a replica was written with. A session replica with a
 lower revision is rewritten (the file is backed up first) while it is unmodified; a modified one is
 left alone. Adopted replicas are recorded at the current revision. Current values: Claude sessions
-1, Codex sessions 1, Pi sessions 2, everything else 0
-(`SESSION_WRITER_REVISION` in the three adapter files). Bump the constant whenever the written
+1, Codex sessions 1, OpenCode sessions 1, Pi sessions 2, everything else 0
+(`SESSION_WRITER_REVISION` in the adapter files). Bump the constant whenever the written
 session format changes. Tests: `unmodified_replica_with_an_older_writer_revision_is_rewritten_once`,
 `modified_replica_with_an_older_writer_revision_is_left_alone`.
 
@@ -132,12 +132,12 @@ session format changes. Tests: `unmodified_replica_with_an_older_writer_revision
 
 Commands: `status`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
 `delete`, `edit`, `skill show`, `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
-`--opencode-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
-`NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`), `--session-days`
+`--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
+`NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_OPENCODE_DATA_HOME`, `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`), `--session-days`
 (`NATIVEMEM_SESSION_DAYS`), `--exclude-automated-sessions`, `--no-sessions`. Without a flag, a root
 falls back to `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, then
-`~/.claude`, `~/.codex`, `~/.config/opencode`, `~/.pi/agent`; the state directory defaults to
-`~/.nativemem`. `NATIVEMEM_CODEX_SESSION_WRITES=on` enables Codex session writes (off by default). `NATIVEMEM_REPO` names the repo in
+`~/.claude`, `~/.codex`, `~/.config/opencode`, `~/.pi/agent`; the OpenCode data home (it holds `opencode.db`) falls back to `$XDG_DATA_HOME/opencode`, then `~/.local/share/opencode`; the state directory defaults to
+`~/.nativemem`. `NATIVEMEM_CODEX_SESSION_WRITES=on` and `NATIVEMEM_OPENCODE_SESSION_WRITES=on` enable session writes into Codex and OpenCode (off by default). `NATIVEMEM_REPO` names the repo in
 `doctor` prompts; `NATIVEMEM_NOTIFY_FILE` redirects notifications to a file. Exit codes: 0
 success, 2 when conflicts or skipped writes remain, 3 when `doctor` finds an agent that needs action,
 1 on error. With `--json`, one JSON document is

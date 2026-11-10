@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use nativemem_core::adapters::agents_file::AgentsFileAdapter;
 use nativemem_core::adapters::claude::ClaudeAdapter;
 use nativemem_core::adapters::codex::CodexAdapter;
+use nativemem_core::adapters::opencode_sessions::DATABASE;
 use nativemem_core::adapters::pi::PiAdapter;
 use nativemem_core::adapters::skills::skill_name;
 use nativemem_core::compat::{self, AgentReport, CompatState};
@@ -39,6 +40,9 @@ struct Cli {
     /// OpenCode home [default: $OPENCODE_CONFIG_DIR or ~/.config/opencode]
     #[arg(long, global = true, env = "NATIVEMEM_OPENCODE_HOME")]
     opencode_home: Option<PathBuf>,
+    /// OpenCode data home, which holds opencode.db [default: $XDG_DATA_HOME/opencode or ~/.local/share/opencode]
+    #[arg(long, global = true, env = "NATIVEMEM_OPENCODE_DATA_HOME")]
+    opencode_data_home: Option<PathBuf>,
     /// Pi home [default: $PI_CODING_AGENT_DIR or ~/.pi/agent]
     #[arg(long, global = true, env = "NATIVEMEM_PI_HOME")]
     pi_home: Option<PathBuf>,
@@ -260,6 +264,8 @@ struct Roots {
     claude: PathBuf,
     codex: PathBuf,
     opencode: PathBuf,
+    /// The directory that holds `opencode.db`.
+    opencode_data: PathBuf,
     pi: PathBuf,
     state: PathBuf,
     /// The shared skills directory Codex and Pi also read: `<user home>/.agents/skills`.
@@ -281,9 +287,11 @@ impl Agents {
         sessions: Option<SessionOptions>,
         blocked: &Blocked,
     ) -> Self {
-        // Codex session writes are opt-in and, once on, still follow the compatibility probes.
-        let codex_session_writes =
-            std::env::var("NATIVEMEM_CODEX_SESSION_WRITES").is_ok_and(|v| v == "on");
+        // Session writes into Codex and OpenCode are opt-in and, once on, still follow the
+        // compatibility probes.
+        let writes_on = |name: &str| std::env::var(name).is_ok_and(|v| v == "on");
+        let codex_session_writes = writes_on("NATIVEMEM_CODEX_SESSION_WRITES");
+        let opencode_session_writes = writes_on("NATIVEMEM_OPENCODE_SESSION_WRITES");
         let state = || roots.state.clone();
         let present = |dir: &Path| dir.is_dir();
         let paused = |id: &str| blocked.get(id).cloned().unwrap_or_default();
@@ -309,8 +317,20 @@ impl Agents {
                 }
             }),
             opencode: present(&roots.opencode).then(|| {
-                AgentsFileAdapter::new("opencode", roots.opencode.clone(), state(), backups.clone())
-                    .with_blocked_kinds(&paused("opencode"))
+                let a = AgentsFileAdapter::new(
+                    "opencode",
+                    roots.opencode.clone(),
+                    state(),
+                    backups.clone(),
+                )
+                .with_blocked_kinds(&paused("opencode"));
+                let db = roots.opencode_data.join(DATABASE);
+                if db.is_file() {
+                    a.with_opencode_sessions(db, sessions)
+                        .with_session_writes(opencode_session_writes)
+                } else {
+                    a
+                }
             }),
             pi: present(&roots.pi).then(|| {
                 let a = PiAdapter::new(roots.pi.clone(), state(), backups.clone())
@@ -373,6 +393,11 @@ fn resolve(cli: &Cli) -> Result<Roots> {
             Some("OPENCODE_CONFIG_DIR"),
             ".config/opencode",
         )?,
+        opencode_data: match (&cli.opencode_data_home, env_path("XDG_DATA_HOME")) {
+            (Some(p), _) => p.clone(),
+            (None, Some(xdg)) => xdg.join("opencode"),
+            (None, None) => home()?.join(".local/share/opencode"),
+        },
         pi: pick(&cli.pi_home, Some("PI_CODING_AGENT_DIR"), ".pi/agent")?,
         state: pick(&cli.state_dir, None, ".nativemem")?,
         shared_skills: std::env::home_dir().map(|h| h.join(SHARED_SKILLS)),
@@ -452,6 +477,7 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
         let report = match a.id().as_str() {
             "claude" => present.claude.as_ref().map(|c| c.session_report()),
             "codex" => present.codex.as_ref().map(|c| c.session_report()),
+            "opencode" => present.opencode.as_ref().map(|c| c.session_report()),
             "pi" => present.pi.as_ref().map(|c| c.session_report()),
             _ => None,
         };
@@ -883,6 +909,7 @@ fn run_schedule(cli: &Cli, args: &ScheduleArgs, roots: &Roots) -> Outcome<()> {
             .opencode_home
             .clone()
             .or_else(|| env_path("OPENCODE_CONFIG_DIR")),
+        opencode_data: cli.opencode_data_home.clone(),
         pi: cli
             .pi_home
             .clone()

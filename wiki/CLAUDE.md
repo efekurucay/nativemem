@@ -20,9 +20,9 @@ All work in this repo: Rust core and CLI, the macOS app, tests, docs and this wi
 ## Invariants
 
 - **Never touch real agent state.** Do not run the `nativemem` binary, the tests or the desktop app
-  against the real `~/.claude`, `~/.codex`, `~/.pi`, `~/.config/opencode`, `~/.hermes` or
+  against the real `~/.claude`, `~/.codex`, `~/.pi`, `~/.config/opencode`, `~/.local/share/opencode`, `~/.hermes` or
   `~/.nativemem`. Use temp directories and explicit roots (`--claude-home`, `--codex-home`,
-  `--opencode-home`, `--pi-home`, `--state-dir`). Anchor: `crates/cli/tests/cli.rs` (the `run`
+  `--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir`). Anchor: `crates/cli/tests/cli.rs` (the `run`
   helper redirects `HOME`, removes every root variable and passes temp roots).
 - **Adapters take their root as a constructor argument.** Only the CLI resolves defaults
   (`resolve` in `crates/cli/src/main.rs`).
@@ -37,7 +37,7 @@ All work in this repo: Rust core and CLI, the macOS app, tests, docs and this wi
   See `wiki/decisions/session-snapshot-policy.md`.
 - **Nothing is written inside a git repository.** Only agent home directories and the state
   directory are written.
-- **Agent-owned state is never edited.** Codex SQLite files, `hooks.json`, `config.toml`, generated
+- **Agent-owned state is never edited.** Codex SQLite files (except the `threads` rows of `codex_threads.rs`), OpenCode's `opencode.db` (except the rows of `opencode_sessions.rs`), `hooks.json`, `config.toml`, generated
   `memories/MEMORY.md` and `memory_summary.md`, and any file that holds secrets.
 - **Secrets are never printed or stored.** The ledger holds ids, hashes and paths, not entry text.
   Do not paste file contents of agent homes into output, logs, tests or wiki pages.

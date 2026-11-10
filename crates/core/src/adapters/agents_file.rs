@@ -8,9 +8,11 @@ use crate::compat::Check;
 use crate::error::{Error, Result};
 use crate::fsx::BackupSession;
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
+use crate::session::{is_session_id, SessionOptions, SessionReport, SessionScan};
 
 use super::memory_store::MemoryStore;
 use super::opencode_probes;
+use super::opencode_sessions::{OpencodeSessions, SESSION_WRITER_REVISION};
 use super::sections::InstructionFile;
 use super::skills::{skill_name, SkillReport, SkillStore};
 
@@ -21,10 +23,14 @@ pub struct AgentsFileAdapter {
     agent: AgentId,
     home: PathBuf,
     search_path: Option<std::ffi::OsString>,
+    state_dir: PathBuf,
+    backups: BackupSession,
     blocked: Vec<Kind>,
     instructions: InstructionFile,
     memory: MemoryStore,
     skills: SkillStore,
+    sessions: Option<OpencodeSessions>,
+    session_writes: bool,
 }
 
 impl AgentsFileAdapter {
@@ -35,6 +41,10 @@ impl AgentsFileAdapter {
             home: dir.clone(),
             search_path: crate::probe::process_path(),
             blocked: Vec::new(),
+            state_dir: state_dir.clone(),
+            backups: backups.clone(),
+            sessions: None,
+            session_writes: false,
             memory: MemoryStore::new(
                 agent.clone(),
                 dir.clone(),
@@ -78,6 +88,51 @@ impl AgentsFileAdapter {
         self
     }
 
+    /// OpenCode's session database. `options` is `None` while session sync is off, so nothing is
+    /// read; replicas are written only while session writes are enabled.
+    pub fn with_opencode_sessions(mut self, db: PathBuf, options: Option<SessionOptions>) -> Self {
+        self.sessions = Some(OpencodeSessions::new(
+            db,
+            self.state_dir.clone(),
+            self.backups.clone(),
+            options,
+        ));
+        self
+    }
+
+    /// How long a locked session database is waited for before a run skips it.
+    pub fn with_session_busy_timeout(mut self, wait: std::time::Duration) -> Self {
+        self.sessions = self.sessions.map(|s| s.with_busy_timeout(wait));
+        self
+    }
+
+    /// Whether session replicas are written into OpenCode; off unless the caller opts in.
+    pub fn with_session_writes(mut self, enabled: bool) -> Self {
+        self.session_writes = enabled;
+        self
+    }
+
+    pub fn session_writes_enabled(&self) -> bool {
+        self.session_writes
+    }
+
+    /// Whether the agent has a session database to read from.
+    pub fn has_session_store(&self) -> bool {
+        self.sessions.is_some()
+    }
+
+    fn scan_sessions(&self) -> Result<SessionScan> {
+        match &self.sessions {
+            Some(s) if !self.blocked.contains(&Kind::Session) => s.scan(&self.agent),
+            _ => Ok(SessionScan::default()),
+        }
+    }
+
+    /// Sessions that cannot be synced and how many are automated.
+    pub fn session_report(&self) -> Result<SessionReport> {
+        Ok(self.scan_sessions()?.report())
+    }
+
     /// Where the version probe looks for the agent's executable [default: `PATH`].
     pub fn with_search_path(mut self, path: std::ffi::OsString) -> Self {
         self.search_path = Some(path);
@@ -106,17 +161,34 @@ impl Adapter for AgentsFileAdapter {
             "opencode" => opencode_probes::probes(&self.home),
             _ => Vec::new(),
         };
+        if let Some(s) = &self.sessions {
+            checks.extend(opencode_probes::session_probes(
+                s.database(),
+                self.version().as_deref(),
+            ));
+        }
         checks.push(self.skills_check());
         checks
     }
 
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
         !self.blocked.contains(&kind)
-            && matches!(
-                (kind, scope),
+            && match (kind, scope) {
                 (Kind::Memory, Scope::Project(_))
-                    | (Kind::Instruction | Kind::Skill, Scope::Global)
-            )
+                | (Kind::Instruction | Kind::Skill, Scope::Global) => true,
+                (Kind::Session, Scope::Project(_)) => {
+                    self.session_writes && self.sessions.is_some()
+                }
+                _ => false,
+            }
+    }
+
+    fn writer_revision(&self, kind: Kind) -> u32 {
+        if kind == Kind::Session {
+            SESSION_WRITER_REVISION
+        } else {
+            0
+        }
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
@@ -130,6 +202,7 @@ impl Adapter for AgentsFileAdapter {
         if !self.blocked.contains(&Kind::Skill) {
             out.extend(self.skills.scan()?);
         }
+        out.extend(self.scan_sessions()?.observed);
         Ok(out)
     }
 
@@ -146,11 +219,17 @@ impl Adapter for AgentsFileAdapter {
             Kind::Instruction => self.instructions.write_replica(key, item),
             Kind::Memory => self.memory.write_replica(key, item),
             Kind::Skill => self.skills.write(item),
-            Kind::Session => Err(self.unsupported("write_replica session")),
+            Kind::Session => match &self.sessions {
+                Some(sessions) => sessions.write(key, item, self.version().as_deref()),
+                None => Err(self.unsupported("write_replica session")),
+            },
         }
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+        if is_session_id(native_id) {
+            return Err(self.unsupported("write_original session"));
+        }
         if skill_name(native_id).is_some() {
             return self.skills.write(item).map(|_| ());
         }
@@ -161,6 +240,9 @@ impl Adapter for AgentsFileAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
+        if is_session_id(native_id) {
+            return Err(self.unsupported("remove session"));
+        }
         if let Some(name) = skill_name(native_id) {
             return self.skills.remove(name);
         }

@@ -54,6 +54,7 @@ agent can act on this repo without re-deriving facts.
 | `wiki/decisions/instruction-sections-as-items.md` | Decision: one `## ` section is one item |
 | `wiki/decisions/routing-block-for-agents-without-memory.md` | Decision: a marked block in the global instruction file points at per-project indexes |
 | `wiki/decisions/codex-session-writes-gated.md` | Decision: Codex session writes are guarded by the schema probes and always carry a thread row |
+| `wiki/decisions/opencode-session-writes-gated.md` | Decision: OpenCode session writes are opt-in, guarded by the schema probes and marked by a key inside the message JSON |
 | `wiki/_templates/PAGE.md` | Skeleton for a new page |
 | `wiki/_templates/AGENT.md` | Skeleton for a new agent page |
 

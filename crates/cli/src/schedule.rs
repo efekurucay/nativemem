@@ -19,6 +19,7 @@ pub struct ExplicitRoots {
     pub claude: Option<PathBuf>,
     pub codex: Option<PathBuf>,
     pub opencode: Option<PathBuf>,
+    pub opencode_data: Option<PathBuf>,
     pub pi: Option<PathBuf>,
     pub state: Option<PathBuf>,
 }
@@ -157,6 +158,7 @@ fn install(
         ("--claude-home", &explicit.claude),
         ("--codex-home", &explicit.codex),
         ("--opencode-home", &explicit.opencode),
+        ("--opencode-data-home", &explicit.opencode_data),
         ("--pi-home", &explicit.pi),
         ("--state-dir", &explicit.state),
     ] {

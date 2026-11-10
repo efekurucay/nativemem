@@ -18,7 +18,7 @@ does not run `nativemem` against a real home (`wiki/CLAUDE.md`). Paths below use
 - [ ] Note the agents' versions (each agent's own `--version`) in the stage notes.
 - [ ] Rehearse on copies: copy the agent homes to a temp directory and run with explicit roots, for
   example `nativemem --claude-home /tmp/rehearsal/claude --codex-home /tmp/rehearsal/codex
-  --opencode-home /tmp/rehearsal/opencode --pi-home /tmp/rehearsal/pi --state-dir /tmp/rehearsal/state
+  --opencode-home /tmp/rehearsal/opencode --opencode-data-home /tmp/rehearsal/opencode-data --pi-home /tmp/rehearsal/pi --state-dir /tmp/rehearsal/state
   sync`. Copies can hold secrets; delete them afterwards.
 - [ ] Take a hash of files that must not change, for example `shasum` of `~/.codex/config.toml`, and
   compare after each stage.
@@ -78,7 +78,16 @@ does not run `nativemem` against a real home (`wiki/CLAUDE.md`). Paths below use
   are visible to it (ask for the rules), since it reads `~/.claude/CLAUDE.md` only while its own
   `AGENTS.md` is absent.
 - [ ] Ask in a synced project about a synced memory item and confirm it reads the project index.
-- [ ] Sessions are not synced for OpenCode; the checks stop here.
+- [ ] Sessions flow from OpenCode to the other agents without any switch. Writes into OpenCode need
+  `NATIVEMEM_OPENCODE_SESSION_WRITES=on`; `nativemem doctor --agent opencode` must pass first. Quit
+  OpenCode and its background service, apply a narrow slice (`--session-days 1`), start OpenCode again,
+  run `opencode -c` and the session picker in a synced project folder and confirm the copies are
+  listed newest first, open without a model warning, and continue (the `[UNVERIFIED]` facts on
+  `wiki/agents/opencode.md`; record the result there).
+- [ ] `<state dir>/backups/<stamp>/opencode/opencode.db` exists after the first write; rollback is
+  quitting OpenCode and its service and copying that file back over `opencode.db` (remove its `-wal`
+  and `-shm`).
+- [ ] Without the switch, `opencode.db` is byte for byte unchanged after `sync --apply`.
 
 ## What to record
 
@@ -95,7 +104,7 @@ Every run that overwrites or deletes a file first copies it to
 1. List the runs: `ls ~/.nativemem/backups`. Pick the stamp of the run to undo.
 2. Restore a file: copy `~/.nativemem/backups/<stamp>/<agent>/<relative path>` back to
    `<agent root>/<relative path>` (for Claude Code, root `~/.claude`; Codex `~/.codex`; OpenCode
-   `~/.config/opencode`; Pi `~/.pi/agent`).
+   `~/.config/opencode`, its database `~/.local/share/opencode/opencode.db`; Pi `~/.pi/agent`).
 3. Files that did not exist before the run (new replicas, a new region in a new file) have no backup:
    `nativemem sync --json` output of the run lists them as `add` actions. Delete them in the agent
    if they should go.
@@ -137,4 +146,4 @@ Every run that overwrites or deletes a file first copies it to
 
 ## Last updated
 
-2026-11-10
+2026-11-11

@@ -44,7 +44,7 @@ nativemem-sync/
 │   │       ├── probe.rs          read-only helpers for probes: tails, newest files, executable lookup
 │   │       ├── slug.rs           slugify
 │   │       ├── error.rs          Error enum (Io, Parse, Ledger, Unsupported, MassDelete)
-│   │       ├── testkit.rs        fixture builders: ClaudeHome, CodexHome, PiHome (temp dirs only)
+│   │       ├── testkit.rs        fixture builders: ClaudeHome, CodexHome, PiHome, OpencodeData (temp dirs only; `testkit_opencode_schema.sql` is the real structure of OpenCode's session tables)
 │   │       └── adapters/
 │   │           ├── mod.rs        adapter module list
 │   │           ├── claude.rs     Claude Code: project memory, CLAUDE.md sections, session replicas
@@ -52,24 +52,27 @@ nativemem-sync/
 │   │           ├── codex.rs      Codex: generated-memory originals, replica store, AGENTS.md, rollouts
 │   │           ├── codex_sessions.rs   Codex rollout reader (originals, replica detection, automated markers)
 │   │           ├── codex_threads.rs    `threads` row writer for replica rollouts, database backup and retention
+│   │           ├── sqlite_guard.rs     shared by the Codex and OpenCode row writers: busy timeout, busy-or-failed, online backup once per run, 5 kept
+│   │           ├── opencode_sessions.rs  OpenCode session reader and writer for `opencode.db` (rows, marker, verify)
+│   │           ├── opencode_project.rs   OpenCode project id and worktree for a directory (SHA-1, git rules)
 │   │           ├── codex_rollout.rs    Codex rollout writer shaped like Codex's own importer output
 │   │           ├── codex_imports.rs    Codex importer ledger (`external_agent_session_imports.json`)
 │   │           ├── claude_probes.rs    Claude compatibility probes and their expected constants
 │   │           ├── codex_probes.rs     Codex probes: state database, rollouts, import ledger
 │   │           ├── pi_probes.rs        Pi probes: session header, entry types, directory encoding
-│   │           ├── opencode_probes.rs  OpenCode probes: config directory and AGENTS.md
+│   │           ├── opencode_probes.rs  OpenCode probes: config directory, AGENTS.md, session tables, installed version
 │   │           ├── pi.rs         Pi: AGENTS.md through agents_file, session reader and writer
 │   │           ├── agents_file.rs      generic adapter for agents that only read a global AGENTS.md (OpenCode, Pi)
 │   │           ├── skills.rs     skill directories: manifest hash, atomic tree copy, visible roots, layout probe
 │   │           ├── memory_store.rs     replica store plus routing block, shared by Codex, OpenCode, Pi
 │   │           └── sections.rs   instruction-section parser, managed regions, byte-preserving edits, markers
-│   │   └── tests/                probes.rs (probes, drift, blocked kinds), skills.rs (skill mirroring over four temp homes)
+│   │   └── tests/                probes.rs (probes, drift, blocked kinds), opencode_sessions.rs (OpenCode reader, writer, database safety, probes, engine flow), skills.rs (skill mirroring over four temp homes)
 │   └── cli/                      binary `nativemem`
 │       ├── src/
 │       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/edit, JSON output
 │       │   ├── doctor.rs         `doctor`, compatibility reports, warnings, notification delivery
 │       │   └── schedule.rs       launchd scheduling (macOS only)
-│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications)
+│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications), opencode_sessions.rs (switch, notice, drift, data-home resolution)
 ├── apps/macos/                   Swift package, macOS 14+, no third-party dependencies
 │   ├── Package.swift
 │   ├── Sources/Nativemem/        app entry point (`NativememApp.swift`)

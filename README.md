@@ -15,7 +15,7 @@ is involved.
 |---|---|---|---|---|
 | Claude Code | read and write | `CLAUDE.md` | read and write | read and write |
 | Codex | read (generated memories) and receive copies | `AGENTS.md` | read and write | read and write; writes are off unless `NATIVEMEM_CODEX_SESSION_WRITES=on` |
-| OpenCode | receive copies | `AGENTS.md` | read and write | not supported |
+| OpenCode | receive copies | `AGENTS.md` | read and write | read and write; writes are off unless `NATIVEMEM_OPENCODE_SESSION_WRITES=on` |
 | Pi | receive copies | `AGENTS.md` | read and write | read and write |
 
 Hermes has research notes only and no adapter. An agent takes part in a run only when its home
@@ -195,11 +195,21 @@ online backup to `<state dir>/backups/<stamp>/codex/` (the five newest copies ar
 that is locked is skipped and the row follows on the next run. That Codex lists and opens a copy is
 `[UNVERIFIED]` until you run `codex resume` in the project folder and see it.
 
+OpenCode sessions live in `opencode.db` (SQLite). They are read whenever the file exists. Copies are
+written only with `NATIVEMEM_OPENCODE_SESSION_WRITES=on` and while the `opencode.session_schema` and
+`opencode.version` checks of `nativemem doctor` pass: per copy one `session_v2` row, its
+`session_message` rows, the `event_sequence` row and, when the folder has none, a `project` row, in
+one transaction after a consistent backup of the database to `<state dir>/backups/<stamp>/opencode/`
+(the five newest are kept). Rows OpenCode made are never changed and no row is deleted; a locked
+database is skipped and written on the next run. Copies carry a `nativemem_origin` key inside each
+message's JSON, which OpenCode does not show. Whether the running OpenCode service needs a restart
+to list new copies and whether `opencode -c` opens them is `[UNVERIFIED]`.
+
 Automated sessions are recognised by structure only: a Claude Code transcript whose first line has
 an `entrypoint` starting with `sdk`; a Codex rollout that is a sub-agent thread (`source` an
 object, `parent_thread_id` or `thread_source: subagent`), a headless `exec` run (`source: exec` or
-originator `codex_exec`), or a thread started by Claude Code (originator `Claude Code`). A session
-without a recognised marker counts as interactive. Pi has no such marker.
+originator `codex_exec`), or a thread started by Claude Code (originator `Claude Code`); an OpenCode sub-agent session (`parent_id` set, never copied). A session
+without a recognised marker counts as interactive. Pi has no such marker, and neither has a headless `opencode run`.
 
 ### Usage
 
@@ -221,11 +231,11 @@ nativemem schedule status [--json]
 nativemem schedule uninstall
 ```
 
-Global options: `--claude-home`, `--codex-home`, `--opencode-home`, `--pi-home`, `--state-dir`,
-`--session-days`, `--exclude-automated-sessions`, `--no-sessions` (env `NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`, `NATIVEMEM_OPENCODE_HOME`,
+Global options: `--claude-home`, `--codex-home`, `--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir`,
+`--session-days`, `--exclude-automated-sessions`, `--no-sessions` (env `NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`, `NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_OPENCODE_DATA_HOME`,
 `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`, `NATIVEMEM_SESSION_DAYS`). `NATIVEMEM_CODEX_SESSION_WRITES=on`
-lets sync write session copies into Codex (off by default; `status` and `doctor` say so). Defaults are `~/.claude` (or `CLAUDE_CONFIG_DIR`),
-`~/.codex` (or `CODEX_HOME`), `~/.config/opencode` (or `OPENCODE_CONFIG_DIR`), `~/.pi/agent`
+lets sync write session copies into Codex and `NATIVEMEM_OPENCODE_SESSION_WRITES=on` into OpenCode (both off by default; `status` and `doctor` say so). Defaults are `~/.claude` (or `CLAUDE_CONFIG_DIR`),
+`~/.codex` (or `CODEX_HOME`), `~/.config/opencode` (or `OPENCODE_CONFIG_DIR`), `~/.local/share/opencode` for the OpenCode database (or `$XDG_DATA_HOME/opencode`), `~/.pi/agent`
 (or `PI_CODING_AGENT_DIR`) and `~/.nativemem`. `--json` prints one JSON
 document, including errors as `{"error": ..., "code": ...}`.
 
@@ -289,7 +299,7 @@ writes nothing. `status`, `items` and dry-run `sync` do not lock.
 
 - Agents other than Claude Code, Codex, OpenCode and Pi.
 - Resource kinds other than memory entries, instruction sections, skills and chat sessions (MCP config).
-- Sessions for OpenCode and Hermes.
+- Sessions for Hermes.
 - Memory maintenance: classification, promotion to global scope, summarising, stale cleanup.
 - Global-scope Claude entries and writing back to Codex originals.
 

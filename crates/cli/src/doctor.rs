@@ -36,8 +36,9 @@ pub fn assess_all(agents: &Agents, state: &mut CompatState) -> Vec<AgentReport> 
 }
 
 const CODEX_WRITES_OFF: &str = "session writes are off; set NATIVEMEM_CODEX_SESSION_WRITES=on to let nativemem write sessions into Codex";
+const OPENCODE_WRITES_OFF: &str = "session writes are off; set NATIVEMEM_OPENCODE_SESSION_WRITES=on to let nativemem write sessions into OpenCode";
 
-/// Adds the informational notices: Codex session writes being off, skills whose own copy differs
+/// Adds the informational notices: Codex and OpenCode session writes being off, skills whose own copy differs
 /// from a copy the agent also reads elsewhere, and sessions other agents hold that Claude Code
 /// would delete.
 pub fn add_notices(agents: &Agents, reports: &mut [AgentReport]) {
@@ -58,6 +59,15 @@ pub fn add_notices(agents: &Agents, reports: &mut [AgentReport]) {
     {
         if let Some(r) = reports.iter_mut().find(|r| r.agent.as_str() == "codex") {
             r.notices.push(CODEX_WRITES_OFF.to_string());
+        }
+    }
+    if agents
+        .opencode
+        .as_ref()
+        .is_some_and(|o| o.has_session_store() && !o.session_writes_enabled())
+    {
+        if let Some(r) = reports.iter_mut().find(|r| r.agent.as_str() == "opencode") {
+            r.notices.push(OPENCODE_WRITES_OFF.to_string());
         }
     }
     let Some(claude) = agents.claude.as_ref() else {

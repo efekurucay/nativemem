@@ -309,6 +309,129 @@ impl PiHome {
     }
 }
 
+/// OpenCode's data home with `opencode.db`, built from the real structure of the tables the
+/// session adapter uses.
+pub struct OpencodeData {
+    pub root: PathBuf,
+}
+
+impl OpencodeData {
+    pub fn new(dir: &Path) -> Self {
+        OpencodeData {
+            root: dir.to_path_buf(),
+        }
+    }
+
+    pub fn db(&self) -> PathBuf {
+        self.root.join("opencode.db")
+    }
+
+    pub fn connect(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.db()).unwrap()
+    }
+
+    /// Creates `opencode.db` (structure only, no rows) plus the `extra` column definitions added
+    /// to `session_v2`.
+    pub fn write_db(&self, extra: &[&str]) {
+        fs::create_dir_all(&self.root).unwrap();
+        let conn = self.connect();
+        conn.execute_batch(include_str!("testkit_opencode_schema.sql"))
+            .unwrap();
+        for column in extra {
+            conn.execute(&format!("ALTER TABLE session_v2 ADD COLUMN {column}"), [])
+                .unwrap();
+        }
+    }
+
+    /// A session OpenCode itself created: its `project` row (the id of a directory without a
+    /// version-control marker) if missing, the `session_v2` row, one message row per turn, and the
+    /// `event_sequence` row. Times are `BASE_MS`-based, `updated_ms` is the last update.
+    pub fn add_session(
+        &self,
+        id: &str,
+        cwd: &Path,
+        title: Option<&str>,
+        turns: Turns,
+        updated_ms: i64,
+    ) {
+        let conn = self.connect();
+        let project = crate::adapters::opencode_project::sha1_hex(
+            format!("directory:{}", cwd.display()).as_bytes(),
+        );
+        conn.execute(
+            "INSERT OR IGNORE INTO project (id, worktree, sandboxes, time_created, time_updated) \
+             VALUES (?1, ?2, '[]', 1, 1)",
+            rusqlite::params![project, cwd.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_v2 (id, project_id, slug, directory, path, title, version, \
+             time_created, time_updated) VALUES (?1, ?2, 'quick-fox', ?3, '', ?4, '2.2.6', ?5, ?6)",
+            rusqlite::params![
+                id,
+                project,
+                cwd.to_string_lossy(),
+                title,
+                BASE_MS,
+                updated_ms
+            ],
+        )
+        .unwrap();
+        for (i, (role, text)) in turns.iter().enumerate() {
+            let ts = BASE_MS + i as i64 * 1000;
+            let (kind, data) = if *role == "user" {
+                ("user", json!({"text": text, "time": {"created": ts}}))
+            } else {
+                (
+                    "assistant",
+                    json!({"agent": "build", "model": {"providerID": "p", "id": "m"},
+                           "content": [{"type": "reasoning", "text": "hidden", "time": {"created": ts}},
+                                       {"type": "text", "text": text}],
+                           "finish": "stop", "time": {"created": ts, "completed": ts}}),
+                )
+            };
+            self.add_message(id, 4 + i as i64, kind, ts, &data);
+        }
+        conn.execute(
+            "INSERT INTO event_sequence (aggregate_id, seq) VALUES (?1, ?2)",
+            rusqlite::params![id, 3 + turns.len() as i64],
+        )
+        .unwrap();
+    }
+
+    /// One `session_message` row with the given `data`.
+    pub fn add_message(&self, session: &str, seq: i64, kind: &str, ts: i64, data: &Value) {
+        self.connect()
+            .execute(
+                "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                rusqlite::params![
+                    format!("msg_native{session}{seq}"),
+                    session,
+                    kind,
+                    seq,
+                    ts,
+                    data.to_string()
+                ],
+            )
+            .unwrap();
+    }
+
+    /// The ids of every row of `session_v2`, sorted.
+    pub fn session_ids(&self) -> Vec<String> {
+        let conn = self.connect();
+        let mut stmt = conn
+            .prepare("SELECT id FROM session_v2 ORDER BY id")
+            .unwrap();
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        ids
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

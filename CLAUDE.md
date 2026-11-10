@@ -15,8 +15,8 @@ Code, Codex, OpenCode, Pi. Hermes has research notes only and no adapter.
 ## Hard rules
 
 - Never run the `nativemem` binary, the tests or the desktop app against the real `~/.claude`,
-  `~/.codex`, `~/.pi`, `~/.config/opencode`, `~/.hermes` or `~/.nativemem`. Use temp directories and
-  explicit roots (`--claude-home`, `--codex-home`, `--opencode-home`, `--pi-home`, `--state-dir`).
+  `~/.codex`, `~/.pi`, `~/.config/opencode`, `~/.local/share/opencode`, `~/.hermes` or `~/.nativemem`. Use temp directories and
+  explicit roots (`--claude-home`, `--codex-home`, `--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir`).
 - CLI tests redirect `HOME` and pass every root explicitly (see `run` in `crates/cli/tests/cli.rs`).
 - Never print secrets or session bodies, and never write inside a git repository.
 - Every delete or overwrite backs up first; writes are atomic (`crates/core/src/fsx.rs`).

@@ -40,6 +40,9 @@ impl Fx {
             .env_remove("OPENCODE_CONFIG_DIR")
             .env_remove("PI_CODING_AGENT_DIR")
             .env_remove("NATIVEMEM_OPENCODE_HOME")
+            .env_remove("NATIVEMEM_OPENCODE_DATA_HOME")
+            .env_remove("NATIVEMEM_OPENCODE_SESSION_WRITES")
+            .env_remove("XDG_DATA_HOME")
             .env_remove("NATIVEMEM_PI_HOME")
             .env_remove("NATIVEMEM_CODEX_SESSION_WRITES")
             .env("HOME", self.state.with_file_name("home"));
@@ -52,6 +55,8 @@ impl Fx {
             .arg(&self.codex)
             .arg("--opencode-home")
             .arg(self.state.with_file_name("opencode"))
+            .arg("--opencode-data-home")
+            .arg(self.state.with_file_name("opencode-data"))
             .arg("--pi-home")
             .arg(self.state.with_file_name("pi"))
             .arg("--state-dir")

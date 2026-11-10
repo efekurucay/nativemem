@@ -2,12 +2,12 @@
 
 ## Purpose
 
-How chat sessions are read, converted and written between Claude Code, Codex and Pi, and why they
+How chat sessions are read, converted and written between Claude Code, Codex, OpenCode and Pi, and why they
 follow a snapshot policy instead of the replication policy of memory.
 
 ## Scope
 
-`Kind::Session` with `Scope::Project(<cwd>)`. OpenCode and Hermes have no session adapter. Policy
+`Kind::Session` with `Scope::Project(<cwd>)`. Hermes has no session adapter. Policy
 rationale: `wiki/decisions/session-snapshot-policy.md`. Agent-side listing and resume behaviour:
 `wiki/agents/`.
 
@@ -22,7 +22,8 @@ ordered list of turns (`user` or `assistant`, text, timestamp).
 - Titles are single-line and at most 200 characters; without a title the text is `Untitled session`.
 - Engine item: `kind` session, `scope` `Project(cwd)`, `name` the session's own id, `description` the
   title, `body` the deterministic JSON of the neutral model. `native_id` is the path below the
-  agent's session root and ends in `.jsonl` (`is_session_id` classifies by that suffix).
+  agent's session root and ends in `.jsonl` (`is_session_id` classifies by that suffix); for OpenCode it
+  is `<session id>.jsonl`, the id of the `session_v2` row.
 - The content hash covers cwd, title and each turn's role and text; ids and timestamps are left out,
   so a replica hashes like its original.
 
@@ -77,6 +78,7 @@ A marker survives a lost ledger, so a replica is never mistaken for an original.
 |---|---|---|
 | Claude Code | Extra top-level key `nativemem_origin: "<agent>:<native id>"` on every line the tool writes. Claude reads lines by known keys, so the key is ignored and the file stays a valid transcript; a continued replica keeps it because Claude only appends | `MARKER_KEY` in `crates/core/src/adapters/claude_sessions.rs` |
 | Pi | A `custom` entry with `customType: "nativemem-origin"` and `data.origin`. Pi keeps custom entries out of the model context | `MARKER_TYPE` in `crates/core/src/adapters/pi.rs` |
+| OpenCode | Extra key `nativemem_origin: "<agent>:<native id>"` inside the `data` JSON of every `session_message` row the tool writes. OpenCode's own rows never have it and its readers use only the keys they know, so the key is not shown (excess keys being ignored is `[UNVERIFIED]`); the first message row decides, so a lost ledger still recognises the replica. A column such as `session_v2.metadata` was not chosen because no observed row fills it, so its shape is unknown | `MARKER_KEY` in `crates/core/src/adapters/opencode_sessions.rs` |
 | Codex | `nativemem_origin` and `nativemem_title` in `session_meta`, plus Codex's own import marker event `<EXTERNAL SESSION IMPORTED>`. Any rollout containing that event is a replica whichever program wrote it | `ORIGIN_KEY`, `TITLE_KEY` in `crates/core/src/adapters/codex_rollout.rs`, `IMPORT_MARKER` in `crates/core/src/adapters/codex_sessions.rs` |
 
 A rollout Codex imported itself maps to its Claude original through `external_agent_session_imports.json`
@@ -111,6 +113,22 @@ adopts the imported thread as the Codex replica with an empty hash, so it is nev
   Claude origin the matching record is also added to `external_agent_session_imports.json` so Codex's
   importer does not import the session again. Anchors: `crates/core/src/adapters/codex_sessions.rs`,
   `codex_rollout.rs`, `codex_imports.rs`.
+
+- **OpenCode**: originals and replicas are rows of `<data home>/opencode.db`
+  (`crates/core/src/adapters/opencode_sessions.rs`). Reading takes `session_v2` rows with `parent_id`
+  NULL and `time_archived` NULL, ordered by id; `directory` is the cwd, `title` the title (else the
+  first user text), `time_created` and `time_updated` the times in milliseconds. `session_message`
+  rows in `seq` order give the turns: `user` text, `assistant` `text` blocks, and `tool` blocks
+  rendered with `render_tool` (input from `state.input`, result from `state.content` or
+  `state.error`); reasoning blocks, provider state, files and the `system`, `synthetic`, `idle` and
+  `model-switched` rows are dropped. A session over 200 MB of message data is skipped and listed. The
+  window flag compares `time_updated`. Sub-agent sessions (`parent_id` set) are counted as
+  automated and never read; no structural marker separates a headless `opencode run` from an
+  interactive session. A replica is written as in `wiki/agents/opencode.md` (rows, ids, times,
+  `event_sequence`, project row). Refresh while unmodified rewrites the replica's own rows in place;
+  a replica with a row that lacks the marker was continued in OpenCode and is left alone. Because
+  every replica is a row and not a file, a replica the user deleted is not observed, the ledger row
+  stays and the session is never written again. Decision: `wiki/decisions/opencode-session-writes-gated.md`.
 
 ## Codex needs a thread row; writes are opt-in and follow the schema probes
 
@@ -152,6 +170,7 @@ Structural markers only; a missing or unknown marker counts as interactive.
 |---|---|
 | Claude Code | The first `user` or `assistant` line's `entrypoint` starts with `sdk` (`sdk-cli`, `sdk-ts`) |
 | Codex | `session_meta.source` is an object (sub-agent), `parent_thread_id` is set, `thread_source` is `subagent`, `source` is `exec`, or `originator` is `codex_exec` or `Claude Code` |
+| OpenCode | `parent_id` is set (sub-agent session): counted, never read. No marker exists for headless runs |
 | Pi | No marker exists; every Pi session counts as interactive |
 
 Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
@@ -165,6 +184,8 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 - `crates/core/src/adapters/codex_rollout.rs`
 - `crates/core/src/adapters/codex_imports.rs`
 - `crates/core/src/adapters/codex_threads.rs`
+- `crates/core/src/adapters/opencode_sessions.rs`
+- `crates/core/src/adapters/opencode_project.rs`
 - `crates/core/src/adapters/pi.rs`
 - `crates/cli/src/main.rs`
 - `docs/design.md` (Chat sessions)
@@ -176,6 +197,7 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 - MUST: Bump the adapter's `SESSION_WRITER_REVISION` when the written format changes.
 - MUST: Render tool activity through `render_tool` so all targets read the same.
 - MUST: Write Codex's SQLite database only through `codex_threads.rs`, only while the schema probes pass.
+- MUST: Write OpenCode's database only through `opencode_sessions.rs`, only with its switch on and while the schema probes pass.
 - MUST: Plan nothing for a session the target agent does not accept (`Adapter::accepts`).
 - SHOULD: Set the replica's file mtime to the original's so resume lists keep the relative order.
 
@@ -190,6 +212,8 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 
 - `wiki/decisions/session-snapshot-policy.md`
 - `wiki/decisions/codex-session-writes-gated.md`
+- `wiki/decisions/opencode-session-writes-gated.md`
+- `wiki/agents/opencode.md`
 - `wiki/agents/codex.md`
 - `wiki/agents/pi.md`
 - `wiki/agents/claude-code.md`
