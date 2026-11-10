@@ -26,6 +26,7 @@ mod doctor;
 mod mcp;
 #[cfg(target_os = "macos")]
 mod schedule;
+mod subagent;
 
 #[derive(Parser)]
 #[command(
@@ -154,6 +155,8 @@ enum Command {
     Skill(SkillArgs),
     /// The MCP hub: one local MCP server that holds the real servers and their secrets
     Mcp(mcp::McpArgs),
+    /// Subagents: a coding agent run headless with a chosen harness and model, offered by the hub
+    Subagent(subagent::SubagentArgs),
     /// Chat sessions of the agents
     Session(SessionArgs),
     /// Run `sync --apply` on a timer through a launchd agent (macOS)
@@ -1177,6 +1180,7 @@ fn run(cli: &Cli) -> Outcome<u8> {
             accept: Some(_), ..
         } => Some(lock_state(&roots.state)?),
         Command::Mcp(args) if args.writes() => Some(lock_state(&roots.state)?),
+        Command::Subagent(args) if args.writes() => Some(lock_state(&roots.state)?),
         _ => None,
     };
     let watches_compat = matches!(
@@ -1273,6 +1277,7 @@ fn run(cli: &Cli) -> Outcome<u8> {
             command: SkillCommand::Show { agent, name, json },
         }) => skill_show(&agents, agent, name, *json).map(|()| 0),
         Command::Mcp(args) => mcp::run(args, &roots, &explicit_roots(cli), &backups),
+        Command::Subagent(args) => subagent::run(args, &roots, &backups),
         Command::Session(SessionArgs {
             command: SessionCommand::Show { agent, id, json },
         }) => session_show(&agents, agent, id, *json).map(|()| 0),
@@ -1300,6 +1305,7 @@ fn wants_json(command: &Command) -> bool {
             ..
         }) => *json,
         Command::Mcp(args) => args.json(),
+        Command::Subagent(args) => args.json(),
         Command::Schedule(_) => false,
     }
 }

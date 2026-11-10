@@ -238,6 +238,8 @@ nativemem mcp test <name> [--json]               # connect to one server and lis
 nativemem mcp login|logout <name> [--json]       # sign in to an OAuth server once, for every agent
 nativemem mcp install|uninstall|status [--agent <id>] [--json]   # the one `nativemem` MCP entry in each agent
 nativemem mcp serve                              # the hub itself: a stdio MCP server for an agent
+nativemem subagent list|add|edit|remove [--json]   # subagents.toml: a coding agent run headless with a chosen harness and model
+nativemem subagent run <name> --prompt-file <path|-> [--cwd <abs>] [--json]   # try one
 nativemem schedule install [--every <minutes>]
 nativemem schedule status [--json]
 nativemem schedule uninstall
@@ -279,6 +281,28 @@ keeps every other byte, backs up first and never writes a file that does not par
 removes it. While the hub cannot start, the agents have no MCP tools from it. Details:
 [wiki/architecture/hub.md](wiki/architecture/hub.md), [wiki/decisions/mcp-hub.md](wiki/decisions/mcp-hub.md).
 
+#### Subagents (`subagent`)
+
+A subagent is defined once in `<state dir>/subagents.toml` and callable from every agent through the hub.
+It runs a coding agent headless (`claude`, `codex`, `opencode` or `pi`) with the model you choose:
+
+```toml
+[agents.code-review]
+harness = "claude"
+model = "sonnet"
+description = "Reviews a diff for bugs"
+instructions = "Be terse."   # optional, put in front of every prompt
+timeout_secs = 900
+args = []                    # extra harness flags
+```
+
+The hub offers `subagents_list` and one tool `subagent_<name>` per definition (`prompt`, and an absolute
+`cwd` that defaults to the hub's directory). At most 4 runs go at once, a run is killed with its process
+group at `timeout_secs`, the answer is cut at 50 KB, and a subagent cannot start subagents. The hub reads
+the definitions when it starts. The harness runs with that agent's own permissions and settings, so
+put the flags it needs in `args`. `nativemem subagent run` tries one definition. Details:
+[wiki/architecture/hub.md](wiki/architecture/hub.md).
+
 #### Compatibility watch (`doctor`)
 
 The agents update themselves and `nativemem` depends on their on-disk formats. Every adapter
@@ -312,7 +336,7 @@ Re-running `install` updates the job; `uninstall` removes it and leaves the stat
 `--launch-agents-dir` (env `NATIVEMEM_LAUNCH_AGENTS_DIR`) changes the plist location. On other
 platforms these commands fail with `unsupported_platform`.
 
-Writing runs (`sync --apply`, `delete`, `add`, `edit`, and the `mcp` commands that write) take an exclusive lock on
+Writing runs (`sync --apply`, `delete`, `add`, `edit`, and the `mcp` and `subagent` commands that write) take an exclusive lock on
 `<state dir>/sync.lock` (`mcp login` and `logout` take `<state dir>/hub-oauth.lock` instead). If another run holds it, the command fails with code `busy` and
 writes nothing. `status`, `items` and dry-run `sync` do not lock.
 

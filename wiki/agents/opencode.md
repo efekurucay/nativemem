@@ -89,6 +89,11 @@ else `~/.config/opencode`.
   (`crates/hub/src/register.rs`; tests `opencode_gets_the_entry_with_comments_and_formatting_intact`,
   `opencode_follows_the_servers_layout_and_the_file_that_exists`).
 - Never touches any other file of the data directory, or a database row OpenCode created.
+- Subagents run OpenCode headless: `opencode run --model <model> --format json [args...] "<prompt>"`; the
+  answer is the `text` events of the JSON lines, joined by a blank line (`build` and `parse_answer` in
+  `crates/hub/src/harness.rs`; `wiki/architecture/hub.md`, "Subagents"). A prompt that starts with a dash is
+  given a leading newline so it does not read as a flag. The binary is looked up in `PATH`, `~/.local/bin`,
+  `/opt/homebrew/bin` and `/usr/local/bin`.
 - The marker of a copy is the key `nativemem_origin` inside each message's `data` JSON (`wiki/kinds/sessions.md`).
 
 ## Sessions: listing and resume
@@ -165,6 +170,8 @@ need to read and write `AGENTS.md` (test `opencode_probes_cover_the_config_dir_a
 | Probes pass on the real table structure and fail on added, renamed or missing columns | VERIFIED | `crates/core/tests/opencode_sessions.rs` |
 | The two probes pass on the fixtures and fail on an `AGENTS.md` directory | VERIFIED | `crates/core/tests/probes.rs` |
 | Excess keys in `mcp` entries are ignored | `[UNVERIFIED]` | not testable read-only |
+| `opencode run --help` lists `--model <provider/model>` and `--format` (`default`, `json`) and takes the message as arguments | OBSERVED | `opencode run --help` only; no run |
+| `--format json` prints one JSON event per line, and `{"type":"text","part":{"text":...}}` carries the answer | `[UNVERIFIED]` | the parser is tested on fixtures in `crates/hub/src/harness.rs`; no real run |
 
 ## Source anchors
 

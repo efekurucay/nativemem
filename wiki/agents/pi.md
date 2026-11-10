@@ -66,6 +66,14 @@ The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`
   `/mcp` is installed, `mcp install` and `mcp status` warn that Pi ignores `mcp.json`; the check reads
   `<pi home>/extensions/*` one level deep and the `extensions` of `settings.json`.
 
+## Headless run (subagents)
+
+Subagents run Pi as `pi -p --model <model> [args...] -- "<prompt>"`; the answer is stdout as plain text
+(`build` and `parse_answer` in `crates/hub/src/harness.rs`; `wiki/architecture/hub.md`, "Subagents"). `--`
+ends option parsing, so a prompt cannot read as a flag. The binary is looked up in `PATH`, `~/.local/bin`,
+`/opt/homebrew/bin`, `/usr/local/bin` and `~/.pi/agent/bin`. Pi also has `--mode json`; plain text is
+enough here.
+
 ## Sessions: listing and resume
 
 - `pi --resume` and `/resume` open a picker built from the session directory of the current cwd, with
@@ -138,6 +146,8 @@ directory names equal the encoding of the header `cwd`.
 | The three probes pass on the fixtures; header version 4, an unknown entry type and a moved session directory each fail one check | VERIFIED | `crates/core/tests/probes.rs` (`pi_*`) |
 | An `AGENTS.override.md` shadows `AGENTS.md` | OBSERVED | package source |
 | Global context candidates and ancestor loading | OBSERVED | package source |
+| `pi --help` lists `-p/--print` ("process prompt and exit"), `--model` and `--` as the end of option parsing | OBSERVED | `pi --help` only; no run |
+| In `-p` mode with the default `--mode text` the answer is printed to stdout as plain text | `[UNVERIFIED]` | help text only; no real run |
 
 ## Source anchors
 

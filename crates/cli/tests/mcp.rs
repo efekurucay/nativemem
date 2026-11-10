@@ -329,7 +329,12 @@ async fn serve_proxies_the_fake_server_over_a_child_process() {
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert_eq!(
         names,
-        ["nativemem_status", "fake__echo", "fake__env_matches"]
+        [
+            "nativemem_status",
+            "subagents_list",
+            "fake__echo",
+            "fake__env_matches"
+        ]
     );
 
     let text = |r: rmcp::model::CallToolResult| {

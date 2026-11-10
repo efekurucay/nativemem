@@ -19,11 +19,13 @@ async-trait = "0.1"
 http = "1.5.0"
 jsonc-parser = { version = "0.34.0", features = ["cst", "serde_json"] }
 keyring = "4.2.0"
+libc = "0.2"
 nativemem-core = { path = "../core" }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rmcp = { version = "3.9", features = ["server", "client", "auth", "transport-io", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tempfile = "3"
 thiserror = "1"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "process", "io-std", "io-util", "net", "sync"] }
 toml = "1.2.1"
@@ -32,4 +34,3 @@ toml_edit = "0.25.19"
 [dev-dependencies]
 base64 = "0.22"
 sha2 = "0.10"
-tempfile = "3"

@@ -5,11 +5,14 @@
 pub mod config;
 pub mod connect;
 pub mod error;
+pub mod harness;
 pub mod import;
 pub mod oauth;
 pub mod register;
+pub mod runner;
 pub mod secrets;
 pub mod serve;
+pub mod subagents;
 
 pub use config::{Auth, HubConfig, ServerSpec, Transport};
 pub use error::{HubError, Result};

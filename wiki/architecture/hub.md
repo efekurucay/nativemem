@@ -2,14 +2,15 @@
 
 ## Purpose
 
-What the hub is, where its configuration and secrets live, how it names and forwards tools, and
-what the `nativemem mcp` commands do, so the hub can be changed without re-deriving its rules.
+What the hub is, where its configuration and secrets live, how it names and forwards tools, what
+the `nativemem mcp` commands do and how it runs subagents, so the hub can be changed without
+re-deriving its rules.
 
 ## Scope
 
 The `nativemem-hub` crate and `nativemem mcp` in the CLI: configuration, secret storage,
 proxying, OAuth sign-in, management commands, the import of the agents' MCP entries and the
-registration of the hub in the agents. The hub is not a sync kind: it does not use the engine, the
+registration of the hub in the agents, and the subagents it offers as tools. The hub is not a sync kind: it does not use the engine, the
 ledger or the adapters. Agent formats for MCP entries are on `wiki/agents/*.md`; JSON shapes of the
 commands are in `docs/desktop.md`; why the hub exists is in `wiki/decisions/mcp-hub.md`.
 
@@ -92,6 +93,7 @@ Values behind `secret:<id>` live in a `SecretStore` (`crates/hub/src/secrets.rs`
 | Calls | The request is forwarded to the owning server with its original tool name; the response, including an MCP error, goes back unchanged. A transport failure becomes an error result that names the server | `HubServer::call_tool` |
 | Failures | A server that fails to connect is left out of the tool list | test `failing_and_disabled_upstreams_are_reported_and_left_out` |
 | Sign-in missing | An `oauth` server without a usable sign-in is not connected; it exposes one tool, `<server>__sign_in_required`, that answers with the error result `Sign in again: nativemem mcp login <server>` | `SIGN_IN_TOOL`; test `a_server_that_starts_signed_out_exposes_the_sign_in_tool` |
+| Subagent tools | `subagents_list` and `subagent_<name>` are answered by the hub itself, before any upstream is involved (see "Subagents") | `HubServer::call_tool` |
 | `nativemem_status` | A tool with no arguments; its text result is `{"servers": [{"name", "status": "connected" \| "error" \| "needs_login" \| "disabled", "tools"?, "error"?}]}`; for `needs_login`, `error` is the sign-in message | `STATUS_TOOL` |
 | Scope | Tools only: no resources and no prompts | `HubServer::get_info` |
 
@@ -210,8 +212,80 @@ All commands take `--json` and use the error shape and codes of `docs/desktop.md
 | `mcp status [--agent <id>]` | Whether each agent has the entry |
 | `mcp import [--apply]` | Reads the agents' MCP entries and prints the plan; `--apply` writes `hub.toml` and the secrets |
 
+`nativemem subagent list|add|edit|remove|run` manages the subagent definitions ("Subagents"); the JSON
+shapes are in `docs/desktop.md`. `add`, `edit` and `remove` run under the state lock
+(`SubagentArgs::writes` in `crates/cli/src/subagent.rs`).
+
 Every command except `serve`, `list`, `test`, `login`, `logout`, `status` and a dry-run `import` runs
 under the state lock (`McpArgs::writes` in `crates/cli/src/mcp.rs`); `install` and `uninstall` do.
+
+## Subagents
+
+A subagent is a coding agent run headless with a chosen harness and model. It is defined once and every
+agent that has the `nativemem` entry can call it. The hub offers it as a tool; it does not copy anything
+into the agents.
+
+Definitions live in `<state dir>/subagents.toml`, written by `SubagentConfig::save` with the same backup
+(`<state dir>/backups/<stamp>/hub/subagents.toml`), atomic write and state lock as `hub.toml`
+(`crates/hub/src/subagents.rs`; test `config_round_trips_and_backs_up_the_previous_file`).
+
+```toml
+[agents.code-review]
+harness = "claude"             # "claude" | "codex" | "opencode" | "pi"
+model = "sonnet"               # a model id in that harness's syntax
+description = "Reviews a diff for bugs"   # when to use it; the tool description
+instructions = "Be terse."     # optional, put in front of every prompt (blank line between)
+timeout_secs = 900             # default 900, at least 1
+args = []                      # extra harness flags, placed before the prompt
+```
+
+- A name is 1-48 characters of `a-z 0-9 -`. Unknown keys are a parse error. `model` is not empty, does
+  not start with `-` and holds no control characters; `description` is not empty (`SubagentSpec::validate`).
+- The harness commands (`build` in `crates/hub/src/harness.rs`; the page of each agent in `wiki/agents/`
+  has the evidence level of its flags):
+
+| Harness | Command | Prompt | Answer |
+|---|---|---|---|
+| `claude` | `claude -p --output-format json --model M [args]` | stdin | `result` of the JSON document; `is_error: true` is a failure |
+| `codex` | `codex exec --model M --skip-git-repo-check [args] -o <file> -` | stdin | the file, in a scratch directory removed after the run |
+| `opencode` | `opencode run --model M --format json [args] "<prompt>"` | last argument | the `text` events of the JSON lines, joined by a blank line |
+| `pi` | `pi -p --model M [args] -- "<prompt>"` | last argument | stdout |
+
+- The executable is looked up in the `PATH` of the process, then `~/.local/bin`, `/opt/homebrew/bin`,
+  `/usr/local/bin` and `~/.pi/agent/bin`, with symlinks resolved (`search_path` and `locate`, on
+  `resolve_executable` of `crates/core/src/probe.rs`). Agents start the hub with a minimal `PATH`, and the
+  child gets that search path as its `PATH` too, so a harness that is a script finds its interpreter. A
+  missing executable is an error result; `subagent add` and `edit` refuse it with code `not_installed`.
+- Tools: `subagents_list` (no arguments; `{"subagents": [{name, tool, harness, model, description}]}`)
+  and one `subagent_<name>` per definition with the input `{prompt: string, cwd?: string}`. The tool
+  description is the definition's description plus ` (harness <h>, model <m>)`. The definitions are read
+  when the hub starts (`run_stdio`); a `subagents.toml` that does not load is reported on stderr and
+  leaves the proxied servers working. A missing `prompt` or a `cwd` that is not a string is an
+  invalid-params error.
+- A run starts in `cwd` (an absolute path of an existing directory; the hub process's directory when
+  omitted) in its own process group. At most 4 runs go at once per hub process; the others wait for a slot,
+  and the wait does not count against the timeout. At `timeout_secs` the whole process group is killed
+  (`GroupGuard` in `crates/hub/src/runner.rs`; so it is when the call is cancelled).
+- A subagent cannot start subagents. The child gets `NATIVEMEM_SUBAGENT_DEPTH` = the parent's value plus one
+  (0 when unset); a run whose level would reach 2 is refused with an error result and nothing is started.
+  The hub that a subagent's own agent starts therefore lists the tools and refuses to run them. A value that
+  is not a number counts as the highest level.
+- Result: the answer, cut at 50 KB (on a character boundary) with the note `[output cut at 50 KB; N bytes
+  omitted]`. A failure is an error result with the exit code (or the timeout, or the signal) and the last
+  2 KB of stderr; stdout and the environment never appear in it. A program the harness
+  left running that still holds its output pipes is waited for 2 seconds after the harness exits, then
+  the answer is read from what arrived.
+- The harness runs with its own permissions and settings. `args` carries what it needs for that (for
+  example a permission mode of the harness), because nothing here adds flags that loosen them.
+
+Tests: `crates/hub/tests/subagents.rs` runs every harness against fake shell scripts in a temp directory
+that is the only place binaries are searched in (`claude_gets_its_prompt_on_stdin_and_answers_in_the_result_field`,
+`codex_gets_its_prompt_on_stdin_and_answers_in_the_file`, `opencode_gets_its_prompt_as_an_argument_and_answers_in_text_events`,
+`pi_gets_its_prompt_as_an_argument_and_answers_in_plain_text`, `a_failed_run_reports_the_exit_code_and_the_end_of_stderr`,
+`a_timeout_kills_the_harness_and_everything_it_started`, `a_subagent_at_the_depth_limit_cannot_start_another`,
+`a_long_answer_is_cut_with_a_note`, `at_most_four_runs_go_at_once`, `the_hub_lists_and_calls_subagent_tools`);
+`crates/cli/tests/subagent.rs` covers the commands and `mcp serve` as a child process. No real agent is
+started.
 
 ## Import
 
@@ -250,14 +324,20 @@ Tests: `crates/hub/tests/import.rs`, `import_previews_then_applies_from_the_four
 - `crates/hub/src/import.rs`
 - `crates/hub/src/oauth.rs`
 - `crates/hub/src/register.rs`
+- `crates/hub/src/subagents.rs`
+- `crates/hub/src/harness.rs`
+- `crates/hub/src/runner.rs`
 - `crates/hub/src/bin/fake_mcp.rs`
 - `crates/hub/tests/hub.rs`
 - `crates/hub/tests/import.rs`
 - `crates/hub/tests/oauth.rs`
 - `crates/hub/tests/register.rs`
+- `crates/hub/tests/subagents.rs`
 - `crates/hub/tests/common/fake_oauth.rs`
 - `crates/cli/src/mcp.rs`
+- `crates/cli/src/subagent.rs`
 - `crates/cli/tests/mcp.rs`
+- `crates/cli/tests/subagent.rs`
 - `docs/desktop.md`
 
 ## Rules
@@ -269,6 +349,9 @@ Tests: `crates/hub/tests/import.rs`, `import_previews_then_applies_from_the_four
 - MUST: Write an agent's config file only to add, update or remove the `nativemem` entry, through `crates/hub/src/register.rs`; import reads those files only.
 - MUST: Hold `<state dir>/hub-oauth.lock` while tokens are refreshed, stored or deleted, and read the store again after taking it.
 - MUST: Never print a token; scrub it from connection errors.
+- MUST: Write `subagents.toml` only through `SubagentConfig::save` (backup, atomic write) under the state lock.
+- MUST: Start a harness only from `crates/hub/src/runner.rs`, in its own process group, with the timeout, the slot limit and the depth guard.
+- MUST: Test subagents only with fake harness scripts in a temp directory that is the whole search path; never let a test find a real agent binary.
 - SHOULD: Put secrets behind `secret:<id>`; only env and header values are moved by import.
 
 ## Verification checklist
@@ -277,6 +360,7 @@ Tests: `crates/hub/tests/import.rs`, `import_previews_then_applies_from_the_four
 - [ ] `cargo test --workspace` passes, including `crates/hub/tests` and `crates/cli/tests/mcp.rs`
 - [ ] A new `mcp` command with JSON output is described in `docs/desktop.md`
 - [ ] `crates/hub/tests/oauth.rs` and `crates/hub/tests/register.rs` pass without network or real agent homes
+- [ ] `crates/hub/tests/subagents.rs` and `crates/cli/tests/subagent.rs` pass without a real agent binary
 - [ ] No test or fixture contains a real token
 
 ## Related docs

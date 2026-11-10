@@ -84,6 +84,16 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
   `codex_keeps_a_timeout_the_user_set_and_fixes_a_stale_command`). Codex rewrites this file itself, so the
   edit is re-read and retried like Claude's. Hooks are never touched.
 
+## Headless run (subagents)
+
+Subagents run Codex as `codex exec --model <model> --skip-git-repo-check [args...] -o <answer file> -` with the
+prompt on stdin; the answer is the content of the answer file, a file in a scratch directory that is removed
+after the run (`build` and `parse_answer` in `crates/hub/src/harness.rs`; `wiki/architecture/hub.md`,
+"Subagents"). `[UNVERIFIED]`: every flag and the answer-file behaviour are taken as given, because the Codex
+binary is never run by this repo's work or tests; the staged check is a `nativemem subagent run` on a
+temp state directory by the user. The binary is looked up in `PATH`, `~/.local/bin`, `/opt/homebrew/bin` and
+`/usr/local/bin`.
+
 ## Sessions: listing and resume
 
 - Codex's list is driven by the `threads` table. A thread appears with a rollout file plus a row that
@@ -204,6 +214,7 @@ layout.
 | `hooks.state` hashes pin hook commands | OBSERVED | `config.toml` structure and binary strings |
 | The five probes pass on the fixtures; a `threads` column, a `state_6.sqlite`, an extra ledger key, a missing `session_meta` key and a flat rollout path each fail one check, and the database file is never written | VERIFIED | `crates/core/tests/probes.rs` (`codex_*`) |
 | MCP `enabled` key and `type` handling | `[UNVERIFIED]` | not testable read-only |
+| `codex exec` takes `--model`, `--skip-git-repo-check` and `-o <file>`, and `-` reads the prompt from stdin | `[UNVERIFIED]` | given for the task; the codex binary is never run |
 | `startup_timeout_sec` and `tool_timeout_sec` are the keys Codex reads for an MCP server | `[UNVERIFIED]` | given for the task, not testable read-only; the codex binary is never run |
 | A nativemem-written rollout is read back as a replica | VERIFIED | test `claude_session_becomes_a_codex_rollout_with_an_import_record` |
 | Codex lists a nativemem-written rollout plus row in `codex resume` and opens it | `[UNVERIFIED]` | needs the staged check |

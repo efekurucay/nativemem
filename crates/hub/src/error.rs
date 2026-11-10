@@ -8,8 +8,12 @@ pub enum HubError {
     Invalid(String),
     #[error("server {0:?} already exists")]
     Exists(String),
+    #[error("subagent {0:?} already exists")]
+    SubagentExists(String),
     #[error("{0}")]
     NotFound(String),
+    #[error("{0}")]
+    NotInstalled(String),
     #[error("{0}")]
     Parse(String),
     #[error("secret store: {0}")]
@@ -28,7 +32,8 @@ impl HubError {
             HubError::Core(CoreError::Parse(_)) | HubError::Parse(_) => "parse",
             HubError::Core(_) => "io",
             HubError::Invalid(_) => "invalid",
-            HubError::Exists(_) => "exists",
+            HubError::Exists(_) | HubError::SubagentExists(_) => "exists",
+            HubError::NotInstalled(_) => "not_installed",
             HubError::NotFound(_) => "not_found",
             HubError::SecretStore(_) => "io",
             HubError::Busy(_) => "busy",
