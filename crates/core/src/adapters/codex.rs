@@ -402,6 +402,13 @@ impl Adapter for CodexAdapter {
         Self::agent()
     }
 
+    fn supports(&self, kind: Kind, scope: &Scope) -> bool {
+        matches!(
+            (kind, scope),
+            (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
+        )
+    }
+
     fn scan(&self) -> Result<Vec<Observed>> {
         let mut out = Vec::new();
         for (key, dir) in project_dirs(&self.home)? {

@@ -4,8 +4,15 @@ public func agentDisplayName(_ id: String) -> String {
     switch id {
     case "claude": "Claude Code"
     case "codex": "Codex"
+    case "opencode": "OpenCode"
+    case "pi": "Pi"
     default: id
     }
+}
+
+/// Agents that only keep global instruction sections, never project memory.
+public func agentHoldsMemory(_ id: String) -> Bool {
+    id != "opencode" && id != "pi"
 }
 
 /// A project path, or nil for global items.

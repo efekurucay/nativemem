@@ -12,7 +12,7 @@ skills, chat sessions) across many agents. This document covers the first releas
 
 ## First release scope
 
-- Agents: Claude Code and Codex CLI.
+- Agents: Claude Code, Codex CLI, OpenCode and Pi.
 - Resource kinds: learned memory items and global instruction sections.
 - Behaviour: faithful replication. Adds, edits and deletes propagate in both directions.
   Text is never rewritten and scope (which project an item belongs to) is preserved.
@@ -45,7 +45,7 @@ resource kind later means adding an adapter or a `Kind` variant; the engine does
 ### Model (`core::model`)
 
 ```rust
-pub struct AgentId(pub String);              // "claude", "codex"
+pub struct AgentId(pub String);              // "claude", "codex", "opencode", "pi"
 pub enum Scope { Global, Project(PathBuf) }  // Project = absolute working directory
 pub enum Kind { Memory, Instruction }        // more kinds later
 
@@ -178,8 +178,9 @@ Root: `codex_home` (default `~/.codex`, honour `CODEX_HOME`).
 - `nativemem status` — per agent: items found, replicas, skipped (with reasons).
 - `nativemem sync` — dry run: prints the plan. `nativemem sync --apply` executes it.
   `--allow-mass-delete` lifts the guard.
-- Global flags / env for roots: `--claude-home`, `--codex-home`, `--state-dir`
-  (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`, `NATIVEMEM_STATE_DIR`).
+- Global flags / env for roots: `--claude-home`, `--codex-home`, `--opencode-home`, `--pi-home`,
+  `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`, `NATIVEMEM_OPENCODE_HOME`,
+  `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`).
 - Exit code 0 on success, 2 when conflicts or skipped writes remain, 1 on error.
 
 ## Testing rules (hard requirement)
@@ -209,9 +210,19 @@ Error type design, module-internal structure, slug function details, output form
 
 ## Instruction sections (global scope)
 
+Capabilities: `Adapter::supports(kind, scope)` says what an agent can store (default: everything).
+Claude and Codex store memory in `Project` scope and instructions in `Global` scope; OpenCode and
+Pi store global instructions only. The engine leaves agents that do not support an item out of its
+replica targets, write-back targets, absent sets and adoption, so they never produce actions,
+skipped notes or counts for it. `Error::Unsupported` remains a runtime fallback.
+
 `Kind::Instruction`. One item is one top-level section of a global instruction file: the text from a
 `## ` heading through the line before the next `## ` heading. Files: Claude `<claude_home>/CLAUDE.md`,
-Codex `<codex_home>/AGENTS.md`. Scope is always `Global`; project-level instruction files live inside
+Codex `<codex_home>/AGENTS.md`, OpenCode `<opencode_home>/AGENTS.md` (default `~/.config/opencode`,
+honour `OPENCODE_CONFIG_DIR`), Pi `<pi_home>/AGENTS.md` (default `~/.pi/agent`, honour
+`PI_CODING_AGENT_DIR`). OpenCode and Pi use one generic adapter (`core::adapters::agents_file`)
+that only handles instruction sections; a missing file means no items and the first replica
+creates it. An agent takes part in a run only when its home directory exists. Scope is always `Global`; project-level instruction files live inside
 repositories and are never read or written.
 
 - Parsing: split at lines starting with `## ` that are outside fenced code blocks (``` or ~~~).
@@ -229,7 +240,7 @@ repositories and are never read or written.
   with it. Bytes outside the region are never changed by replica writes.
 - `write_original` on an instruction section rewrites its body in place and keeps the heading line;
   everything else in the file stays byte-for-byte. `remove` deletes the section. Both back up the file
-  first. Both adapters support this for instruction originals; Codex-generated memory originals stay
+  first. All adapters support this for instruction originals; Codex-generated memory originals stay
   unsupported.
 - The heading is part of identity. Editing a heading by hand is a delete plus an add. The CLI `edit`
   command changes the body only for instruction items and answers code `invalid` when the submitted

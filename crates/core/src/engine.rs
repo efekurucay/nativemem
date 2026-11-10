@@ -311,7 +311,6 @@ fn index(observed: &[Observed]) -> (BTreeMap<ItemKey, &Observed>, Replicas<'_>) 
 pub fn plan(adapters: &[&dyn Adapter], ledger: &Ledger) -> Result<Plan> {
     let observed = scan_all(adapters)?;
     let (originals, replicas) = index(&observed);
-    let ids: Vec<AgentId> = adapters.iter().map(|a| a.id()).collect();
 
     let mut keys: BTreeSet<ItemKey> = originals.keys().cloned().collect();
     keys.extend(replicas.keys().map(|(k, _)| k.clone()));
@@ -319,15 +318,15 @@ pub fn plan(adapters: &[&dyn Adapter], ledger: &Ledger) -> Result<Plan> {
 
     let mut plan = Plan::default();
     for key in keys {
-        if ids.contains(&key.origin) {
-            plan_key(&ids, &originals, &replicas, ledger, &key, &mut plan)?;
+        if adapters.iter().any(|a| a.id() == key.origin) {
+            plan_key(adapters, &originals, &replicas, ledger, &key, &mut plan)?;
         }
     }
     Ok(plan)
 }
 
 fn plan_key(
-    ids: &[AgentId],
+    adapters: &[&dyn Adapter],
     originals: &BTreeMap<ItemKey, &Observed>,
     replicas: &Replicas<'_>,
     ledger: &Ledger,
@@ -335,6 +334,25 @@ fn plan_key(
     plan: &mut Plan,
 ) -> Result<()> {
     let item_row = ledger.get_item(key)?;
+    let Some((kind, scope)) = originals
+        .get(key)
+        .map(|o| (o.item.kind, o.item.scope.clone()))
+        .or_else(|| item_row.as_ref().map(|r| (r.kind, r.scope.clone())))
+        .or_else(|| {
+            replicas
+                .iter()
+                .find(|((k, _), _)| k == key)
+                .map(|(_, o)| (o.item.kind, o.item.scope.clone()))
+        })
+    else {
+        return Ok(());
+    };
+    // Agents that cannot store this item are not part of it at all.
+    let ids: Vec<AgentId> = adapters
+        .iter()
+        .filter(|a| a.supports(kind, &scope))
+        .map(|a| a.id())
+        .collect();
     let mut sides = Vec::new();
     for agent in ids.iter().filter(|a| **a != key.origin) {
         sides.push(Side {
@@ -670,6 +688,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::adapters::agents_file::AgentsFileAdapter;
     use crate::adapters::claude::ClaudeAdapter;
     use crate::adapters::codex::CodexAdapter;
     use crate::fsx::BackupSession;
@@ -1310,5 +1329,124 @@ mod tests {
         f.sync();
         assert_eq!(f.ledger.list_items().unwrap().len(), 2);
         assert!(f.agents_md().contains("instruction alpha"));
+    }
+
+    struct Tri {
+        _t: tempfile::TempDir,
+        claude_root: PathBuf,
+        codex_root: PathBuf,
+        opencode_root: PathBuf,
+        ledger: Ledger,
+        claude: ClaudeAdapter,
+        codex: CodexAdapter,
+        opencode: AgentsFileAdapter,
+        app_dir: String,
+    }
+
+    fn tri() -> Tri {
+        let t = tempfile::tempdir().unwrap();
+        let [claude_root, codex_root, opencode_root] =
+            ["claude", "codex", "opencode"].map(|n| t.path().join(n));
+        let state = t.path().join("state");
+        for d in [&claude_root, &codex_root, &opencode_root] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let session = BackupSession::with_stamp("T");
+        let app_dir = ClaudeHome::new(&claude_root).add_project(Path::new(CWD));
+        Tri {
+            claude: ClaudeAdapter::new(claude_root.clone(), state.clone(), session.clone())
+                .with_fs_root(state.join("no-fs-root")),
+            codex: CodexAdapter::new(codex_root.clone(), state.clone(), session.clone()),
+            opencode: AgentsFileAdapter::new("opencode", opencode_root.clone(), state, session),
+            ledger: Ledger::in_memory().unwrap(),
+            claude_root,
+            codex_root,
+            opencode_root,
+            app_dir,
+            _t: t,
+        }
+    }
+
+    impl Tri {
+        fn adapters(&self) -> [&dyn Adapter; 3] {
+            [&self.claude, &self.codex, &self.opencode]
+        }
+
+        fn plan(&self) -> Plan {
+            plan(&self.adapters(), &self.ledger).unwrap()
+        }
+
+        fn sync(&self) -> Report {
+            let r = apply(
+                self.plan(),
+                &self.adapters(),
+                &self.ledger,
+                &ApplyOptions::default(),
+            )
+            .unwrap();
+            let p = self.plan();
+            assert!(p.is_empty(), "plan not empty after apply:\n{p}");
+            r
+        }
+    }
+
+    #[test]
+    fn memory_is_planned_only_for_agents_that_support_it() {
+        let f = tri();
+        ClaudeHome::new(&f.claude_root).add_memory(
+            &f.app_dir,
+            "a.md",
+            FrontmatterVariant::Nested,
+            "alpha",
+            "about alpha",
+            "user",
+            "alpha body",
+        );
+        let p = f.plan();
+        assert!(p.notes.is_empty(), "{p}");
+        assert_eq!(p.actions.len(), 1, "{p}");
+        assert!(
+            matches!(&p.actions[0], Action::Write { target, .. } if target.as_str() == "codex")
+        );
+        let r = f.sync();
+        assert!(r.notes.is_empty());
+        assert_eq!(r.done.len(), 1);
+        assert!(!f.opencode_root.join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn instruction_reaches_every_instruction_capable_agent() {
+        let f = tri();
+        fs::write(f.claude_root.join("CLAUDE.md"), RULES).unwrap();
+        let p = f.plan();
+        assert!(p.notes.is_empty(), "{p}");
+        assert_eq!(p.actions.len(), 6, "{p}");
+        let r = f.sync();
+        assert_eq!(r.done.len(), 6);
+        for root in [&f.codex_root, &f.opencode_root] {
+            let text = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+            assert_eq!(text.matches("<!-- nativemem origin=claude").count(), 3);
+        }
+        assert_eq!(f.ledger.list_items().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn opencode_section_reaches_the_others_and_edits_write_back() {
+        let f = tri();
+        fs::write(f.opencode_root.join("AGENTS.md"), "## Style\nbe terse\n").unwrap();
+        f.sync();
+        assert!(fs::read_to_string(f.claude_root.join("CLAUDE.md"))
+            .unwrap()
+            .contains("be terse"));
+        let claude = f.claude_root.join("CLAUDE.md");
+        replace_in(&claude, "be terse", "be terser");
+        f.sync();
+        assert_eq!(
+            fs::read_to_string(f.opencode_root.join("AGENTS.md")).unwrap(),
+            "## Style\nbe terser\n"
+        );
+        assert!(fs::read_to_string(f.codex_root.join("AGENTS.md"))
+            .unwrap()
+            .contains("be terser"));
     }
 }

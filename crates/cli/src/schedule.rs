@@ -18,6 +18,8 @@ const LOG_TAIL_LINES: usize = 5;
 pub struct ExplicitRoots {
     pub claude: Option<PathBuf>,
     pub codex: Option<PathBuf>,
+    pub opencode: Option<PathBuf>,
+    pub pi: Option<PathBuf>,
     pub state: Option<PathBuf>,
 }
 
@@ -154,6 +156,8 @@ fn install(
     for (flag, value) in [
         ("--claude-home", &explicit.claude),
         ("--codex-home", &explicit.codex),
+        ("--opencode-home", &explicit.opencode),
+        ("--pi-home", &explicit.pi),
         ("--state-dir", &explicit.state),
     ] {
         if let Some(v) = value {

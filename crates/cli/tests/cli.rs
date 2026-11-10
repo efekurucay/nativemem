@@ -9,10 +9,18 @@ fn run(claude: &Path, codex: &Path, state: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_nativemem"))
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("OPENCODE_CONFIG_DIR")
+        .env_remove("PI_CODING_AGENT_DIR")
+        .env_remove("NATIVEMEM_OPENCODE_HOME")
+        .env_remove("NATIVEMEM_PI_HOME")
         .arg("--claude-home")
         .arg(claude)
         .arg("--codex-home")
         .arg(codex)
+        .arg("--opencode-home")
+        .arg(state.with_file_name("opencode"))
+        .arg("--pi-home")
+        .arg(state.with_file_name("pi"))
         .arg("--state-dir")
         .arg(state)
         .args(args)
@@ -164,6 +172,98 @@ fn status_json_shape() {
           "ledger_items": 0 })
     );
     assert!(!f.state.exists());
+}
+
+fn four_agents() -> Fx {
+    let f = Fx::new();
+    for name in ["opencode", "pi"] {
+        fs::create_dir_all(f.state.with_file_name(name)).unwrap();
+    }
+    fs::write(f.claude.join("CLAUDE.md"), "# Mine\n\n## Style\nbe terse\n").unwrap();
+    f
+}
+
+#[test]
+fn instruction_sections_reach_all_four_agents_and_memory_only_two() {
+    let f = four_agents();
+    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{doc}");
+    assert_eq!(doc["notes"], json!([]));
+    assert_eq!(doc["summary"]["add"], 4);
+    let (_, status) = f.json(&["status", "--json"]);
+    let agents: Vec<(&str, u64, u64)> = status["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["id"].as_str().unwrap(),
+                a["originals"].as_u64().unwrap(),
+                a["replicas"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        agents,
+        [
+            ("claude", 2, 0),
+            ("codex", 0, 2),
+            ("opencode", 0, 1),
+            ("pi", 0, 1)
+        ]
+    );
+    for name in ["opencode", "pi"] {
+        let file = f.state.with_file_name(name).join("AGENTS.md");
+        assert!(fs::read_to_string(file).unwrap().contains("be terse"));
+    }
+    let (code, doc) = f.json(&["sync", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(doc["actions"], json!([]));
+}
+
+#[test]
+fn agent_without_a_home_directory_takes_no_part() {
+    let f = Fx::new();
+    fs::write(f.claude.join("CLAUDE.md"), "## Style\nbe terse\n").unwrap();
+    f.json(&["sync", "--apply", "--json"]);
+    assert!(!f.state.with_file_name("opencode").exists());
+    assert!(!f.state.with_file_name("pi").exists());
+    let (_, status) = f.json(&["status", "--json"]);
+    assert_eq!(status["agents"].as_array().unwrap().len(), 2);
+    let (code, doc) = f.json(&["delete", "--agent", "pi", "--id", "AGENTS.md#x", "--json"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(doc["code"], "not_found");
+}
+
+#[test]
+fn delete_and_edit_accept_opencode_and_pi() {
+    let f = four_agents();
+    for name in ["opencode", "pi"] {
+        fs::write(
+            f.state.with_file_name(name).join("AGENTS.md"),
+            format!("## {name} rule\nold\n\n## Other\nkeep\n"),
+        )
+        .unwrap();
+    }
+    let body =
+        r#"{"name":"opencode-rule","description":"opencode rule","category":null,"body":"new"}"#;
+    let (code, doc) = edit(&f, "opencode", "AGENTS.md#opencode-rule", body);
+    assert_eq!(code, Some(0), "{doc}");
+    let file = f.state.with_file_name("opencode").join("AGENTS.md");
+    assert!(fs::read_to_string(file)
+        .unwrap()
+        .contains("## opencode rule\nnew\n"));
+    let (code, doc) = f.json(&[
+        "delete",
+        "--agent",
+        "pi",
+        "--id",
+        "AGENTS.md#pi-rule",
+        "--json",
+    ]);
+    assert_eq!(code, Some(0), "{doc}");
+    let file = f.state.with_file_name("pi").join("AGENTS.md");
+    assert_eq!(fs::read_to_string(file).unwrap(), "## Other\nkeep\n");
 }
 
 #[test]
@@ -333,10 +433,18 @@ fn run_stdin(f: &Fx, stdin: &str, args: &[&str]) -> (Option<i32>, Value) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_nativemem"))
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("OPENCODE_CONFIG_DIR")
+        .env_remove("PI_CODING_AGENT_DIR")
+        .env_remove("NATIVEMEM_OPENCODE_HOME")
+        .env_remove("NATIVEMEM_PI_HOME")
         .arg("--claude-home")
         .arg(&f.claude)
         .arg("--codex-home")
         .arg(&f.codex)
+        .arg("--opencode-home")
+        .arg(f.state.with_file_name("opencode"))
+        .arg("--pi-home")
+        .arg(f.state.with_file_name("pi"))
         .arg("--state-dir")
         .arg(&f.state)
         .args(args)
@@ -512,6 +620,10 @@ mod schedule {
             .env_remove("CODEX_HOME")
             .env_remove("NATIVEMEM_CLAUDE_HOME")
             .env_remove("NATIVEMEM_CODEX_HOME")
+            .env_remove("OPENCODE_CONFIG_DIR")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env_remove("NATIVEMEM_OPENCODE_HOME")
+            .env_remove("NATIVEMEM_PI_HOME")
             .env_remove("NATIVEMEM_LAUNCH_AGENTS_DIR")
             .arg("--state-dir")
             .arg(&e.state)
@@ -587,7 +699,16 @@ mod schedule {
         let e = env();
         let o = sched(
             &e,
-            &["--claude-home", "/x/claude", "--codex-home", "/x/codex"],
+            &[
+                "--claude-home",
+                "/x/claude",
+                "--codex-home",
+                "/x/codex",
+                "--opencode-home",
+                "/x/opencode",
+                "--pi-home",
+                "/x/pi",
+            ],
             &["install"],
         );
         assert_eq!(o.status.code(), Some(0));
@@ -595,6 +716,8 @@ mod schedule {
         for needle in [
             "<string>--claude-home</string>\n        <string>/x/claude</string>",
             "<string>--codex-home</string>\n        <string>/x/codex</string>",
+            "<string>--opencode-home</string>\n        <string>/x/opencode</string>",
+            "<string>--pi-home</string>\n        <string>/x/pi</string>",
             "<string>--state-dir</string>",
         ] {
             assert!(plist.contains(needle), "{needle}\n{plist}");
@@ -610,6 +733,10 @@ mod schedule {
             .env_remove("CODEX_HOME")
             .env_remove("NATIVEMEM_CLAUDE_HOME")
             .env_remove("NATIVEMEM_CODEX_HOME")
+            .env_remove("OPENCODE_CONFIG_DIR")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env_remove("NATIVEMEM_OPENCODE_HOME")
+            .env_remove("NATIVEMEM_PI_HOME")
             .env_remove("NATIVEMEM_STATE_DIR")
             .env("HOME", e.state.parent().unwrap())
             .args(["schedule", "--no-launchctl", "--launch-agents-dir"])

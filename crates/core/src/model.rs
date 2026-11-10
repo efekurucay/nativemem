@@ -81,6 +81,11 @@ pub struct Observed {
 
 pub trait Adapter {
     fn id(&self) -> AgentId;
+    /// Whether this agent can store an item of `kind` in `scope`. The engine never plans
+    /// writes, write-backs or removals for an agent that cannot.
+    fn supports(&self, _kind: Kind, _scope: &Scope) -> bool {
+        true
+    }
     fn scan(&self) -> Result<Vec<Observed>>;
     /// Create or update the replica of `key` in this agent. Returns its native_id and path.
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)>;

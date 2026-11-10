@@ -293,6 +293,13 @@ impl Adapter for ClaudeAdapter {
         AgentId::new("claude")
     }
 
+    fn supports(&self, kind: Kind, scope: &Scope) -> bool {
+        matches!(
+            (kind, scope),
+            (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
+        )
+    }
+
     fn scan(&self) -> Result<Vec<Observed>> {
         Ok(self.collect()?.items)
     }

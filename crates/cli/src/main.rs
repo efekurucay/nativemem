@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use nativemem_core::adapters::agents_file::AgentsFileAdapter;
 use nativemem_core::adapters::claude::ClaudeAdapter;
 use nativemem_core::adapters::codex::CodexAdapter;
 use nativemem_core::engine::{self, Action, ApplyOptions, Note};
@@ -29,6 +30,12 @@ struct Cli {
     /// Codex home [default: $CODEX_HOME or ~/.codex]
     #[arg(long, global = true, env = "NATIVEMEM_CODEX_HOME")]
     codex_home: Option<PathBuf>,
+    /// OpenCode home [default: $OPENCODE_CONFIG_DIR or ~/.config/opencode]
+    #[arg(long, global = true, env = "NATIVEMEM_OPENCODE_HOME")]
+    opencode_home: Option<PathBuf>,
+    /// Pi home [default: $PI_CODING_AGENT_DIR or ~/.pi/agent]
+    #[arg(long, global = true, env = "NATIVEMEM_PI_HOME")]
+    pi_home: Option<PathBuf>,
     /// Ledger and backup directory [default: ~/.nativemem]
     #[arg(long, global = true, env = "NATIVEMEM_STATE_DIR")]
     state_dir: Option<PathBuf>,
@@ -63,7 +70,7 @@ enum Command {
     },
     /// Remove one entry from an agent's native store (with backup); does not sync
     Delete {
-        /// claude or codex
+        /// claude, codex, opencode or pi
         #[arg(long)]
         agent: String,
         /// The entry's native id, as listed by `items`
@@ -75,7 +82,7 @@ enum Command {
     },
     /// Rewrite one original entry from a JSON document on stdin; does not sync
     Edit {
-        /// claude or codex
+        /// claude, codex, opencode or pi
         #[arg(long)]
         agent: String,
         /// The entry's native id, as listed by `items`
@@ -152,7 +159,9 @@ impl Failure {
     fn message(&self) -> String {
         match self {
             Failure::Coded { message, .. } => message.clone(),
-            Failure::UnknownAgent(a) => format!("unknown agent {a:?} (expected claude or codex)"),
+            Failure::UnknownAgent(a) => {
+                format!("unknown agent {a:?} (expected claude, codex, opencode or pi)")
+            }
             Failure::NotFound { agent, id } => format!("no {agent} entry with id {id:?}"),
             Failure::Replica => {
                 "copies are edited through their original, not directly".to_string()
@@ -182,7 +191,55 @@ fn key_json(key: &ItemKey) -> Value {
 struct Roots {
     claude: PathBuf,
     codex: PathBuf,
+    opencode: PathBuf,
+    pi: PathBuf,
     state: PathBuf,
+}
+
+/// The agents that take part in a run: those whose home directory exists.
+struct Agents {
+    claude: Option<ClaudeAdapter>,
+    codex: Option<CodexAdapter>,
+    opencode: Option<AgentsFileAdapter>,
+    pi: Option<AgentsFileAdapter>,
+}
+
+impl Agents {
+    fn open(roots: &Roots, backups: &BackupSession) -> Self {
+        let state = || roots.state.clone();
+        let present = |dir: &Path| dir.is_dir();
+        let instruction_only = |id: &str, dir: &PathBuf| {
+            present(dir).then(|| AgentsFileAdapter::new(id, dir.clone(), state(), backups.clone()))
+        };
+        Agents {
+            claude: present(&roots.claude)
+                .then(|| ClaudeAdapter::new(roots.claude.clone(), state(), backups.clone())),
+            codex: present(&roots.codex)
+                .then(|| CodexAdapter::new(roots.codex.clone(), state(), backups.clone())),
+            opencode: instruction_only("opencode", &roots.opencode),
+            pi: instruction_only("pi", &roots.pi),
+        }
+    }
+
+    fn all(&self) -> Vec<&dyn Adapter> {
+        let mut out: Vec<&dyn Adapter> = Vec::new();
+        out.extend(self.claude.as_ref().map(|a| a as &dyn Adapter));
+        out.extend(self.codex.as_ref().map(|a| a as &dyn Adapter));
+        out.extend(self.opencode.as_ref().map(|a| a as &dyn Adapter));
+        out.extend(self.pi.as_ref().map(|a| a as &dyn Adapter));
+        out
+    }
+
+    /// `Err` for a name that is no agent, `Ok(None)` for an agent without a home directory.
+    fn named(&self, name: &str) -> Outcome<Option<&dyn Adapter>> {
+        Ok(match name {
+            "claude" => self.claude.as_ref().map(|a| a as &dyn Adapter),
+            "codex" => self.codex.as_ref().map(|a| a as &dyn Adapter),
+            "opencode" => self.opencode.as_ref().map(|a| a as &dyn Adapter),
+            "pi" => self.pi.as_ref().map(|a| a as &dyn Adapter),
+            other => return Err(Failure::UnknownAgent(other.to_string())),
+        })
+    }
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -208,6 +265,12 @@ fn resolve(cli: &Cli) -> Result<Roots> {
     Ok(Roots {
         claude: pick(&cli.claude_home, Some("CLAUDE_CONFIG_DIR"), ".claude")?,
         codex: pick(&cli.codex_home, Some("CODEX_HOME"), ".codex")?,
+        opencode: pick(
+            &cli.opencode_home,
+            Some("OPENCODE_CONFIG_DIR"),
+            ".config/opencode",
+        )?,
+        pi: pick(&cli.pi_home, Some("PI_CODING_AGENT_DIR"), ".pi/agent")?,
         state: pick(&cli.state_dir, None, ".nativemem")?,
     })
 }
@@ -230,16 +293,19 @@ fn lock_state(state: &Path) -> Outcome<File> {
     }
 }
 
-fn status(roots: &Roots, claude: &ClaudeAdapter, codex: &CodexAdapter, json: bool) -> Result<()> {
-    let adapters: [&dyn Adapter; 2] = [claude, codex];
+fn status(roots: &Roots, present: &Agents, json: bool) -> Result<()> {
     let mut agents = Vec::new();
-    for a in adapters {
+    for a in present.all() {
         let observed = a.scan()?;
         let replicas = observed.iter().filter(|o| o.replica_of.is_some()).count();
         let originals = observed.len() - replicas;
         // The prefix is only used by the human output.
         let mut skipped: Vec<(&str, String, String)> = Vec::new();
-        if a.id().as_str() == "claude" {
+        if let Some(claude) = present
+            .claude
+            .as_ref()
+            .filter(|_| a.id().as_str() == "claude")
+        {
             skipped.extend(
                 claude
                     .skipped_projects()?
@@ -252,7 +318,12 @@ fn status(roots: &Roots, claude: &ClaudeAdapter, codex: &CodexAdapter, json: boo
                     .into_iter()
                     .map(|(l, r)| ("file ", l, r)),
             );
-        } else {
+        }
+        if let Some(codex) = present
+            .codex
+            .as_ref()
+            .filter(|_| a.id().as_str() == "codex")
+        {
             skipped.extend(codex.skipped()?.into_iter().map(|(l, r)| ("", l, r)));
         }
         if json {
@@ -285,10 +356,9 @@ fn status(roots: &Roots, claude: &ClaudeAdapter, codex: &CodexAdapter, json: boo
     Ok(())
 }
 
-fn items(claude: &ClaudeAdapter, codex: &CodexAdapter, json: bool) -> Result<()> {
-    let adapters: [&dyn Adapter; 2] = [claude, codex];
+fn items(agents: &Agents, json: bool) -> Result<()> {
     let mut observed: Vec<Observed> = Vec::new();
-    for a in adapters {
+    for a in agents.all() {
         observed.extend(a.scan()?);
     }
     if json {
@@ -332,17 +402,15 @@ fn items(claude: &ClaudeAdapter, codex: &CodexAdapter, json: bool) -> Result<()>
 fn delete(
     roots: &Roots,
     backups: &BackupSession,
-    claude: &ClaudeAdapter,
-    codex: &CodexAdapter,
+    agents: &Agents,
     agent: &str,
     id: &str,
     json: bool,
 ) -> Outcome<()> {
-    let adapter: &dyn Adapter = match agent {
-        "claude" => claude,
-        "codex" => codex,
-        other => return Err(Failure::UnknownAgent(other.to_string())),
-    };
+    let adapter = agents.named(agent)?.ok_or_else(|| Failure::NotFound {
+        agent: agent.to_string(),
+        id: id.to_string(),
+    })?;
     adapter.remove(id)?;
     let backup_dir = roots.state.join("backups").join(backups.stamp());
     if json {
@@ -380,17 +448,15 @@ fn find_entry(adapter: &dyn Adapter, id: &str) -> Result<Option<Observed>> {
 fn edit(
     roots: &Roots,
     backups: &BackupSession,
-    claude: &ClaudeAdapter,
-    codex: &CodexAdapter,
+    agents: &Agents,
     agent: &str,
     id: &str,
     json: bool,
 ) -> Outcome<()> {
-    let adapter: &dyn Adapter = match agent {
-        "claude" => claude,
-        "codex" => codex,
-        other => return Err(Failure::UnknownAgent(other.to_string())),
-    };
+    let adapter = agents.named(agent)?.ok_or_else(|| Failure::NotFound {
+        agent: agent.to_string(),
+        id: id.to_string(),
+    })?;
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)
@@ -548,13 +614,12 @@ fn sync_json(applied: bool, actions: &[Action], notes: &[Note]) -> Value {
 
 fn sync(
     roots: &Roots,
-    claude: &ClaudeAdapter,
-    codex: &CodexAdapter,
+    agents: &Agents,
     apply: bool,
     allow_mass_delete: bool,
     json: bool,
 ) -> Result<bool> {
-    let adapters: [&dyn Adapter; 2] = [claude, codex];
+    let adapters = agents.all();
     if apply {
         let ledger = Ledger::open(&roots.state)?;
         let plan = engine::plan(&adapters, &ledger)?;
@@ -595,6 +660,14 @@ fn run_schedule(cli: &Cli, args: &ScheduleArgs, roots: &Roots) -> Outcome<()> {
             .clone()
             .or_else(|| env_path("CLAUDE_CONFIG_DIR")),
         codex: cli.codex_home.clone().or_else(|| env_path("CODEX_HOME")),
+        opencode: cli
+            .opencode_home
+            .clone()
+            .or_else(|| env_path("OPENCODE_CONFIG_DIR")),
+        pi: cli
+            .pi_home
+            .clone()
+            .or_else(|| env_path("PI_CODING_AGENT_DIR")),
         state: cli.state_dir.clone(),
     };
     schedule::run(args, roots, &explicit)
@@ -611,8 +684,7 @@ fn run_schedule(_: &Cli, _: &ScheduleArgs, _: &Roots) -> Outcome<()> {
 fn run(cli: &Cli) -> Outcome<bool> {
     let roots = resolve(cli)?;
     let backups = BackupSession::new();
-    let claude = ClaudeAdapter::new(roots.claude.clone(), roots.state.clone(), backups.clone());
-    let codex = CodexAdapter::new(roots.codex.clone(), roots.state.clone(), backups.clone());
+    let agents = Agents::open(&roots, &backups);
     let _lock = match &cli.command {
         Command::Sync { apply: true, .. } | Command::Delete { .. } | Command::Edit { .. } => {
             Some(lock_state(&roots.state)?)
@@ -620,24 +692,20 @@ fn run(cli: &Cli) -> Outcome<bool> {
         _ => None,
     };
     match &cli.command {
-        Command::Status { json } => status(&roots, &claude, &codex, *json)
+        Command::Status { json } => status(&roots, &agents, *json)
             .map(|()| false)
             .map_err(Failure::from),
         Command::Sync {
             apply,
             allow_mass_delete,
             json,
-        } => {
-            sync(&roots, &claude, &codex, *apply, *allow_mass_delete, *json).map_err(Failure::from)
-        }
-        Command::Items { json } => items(&claude, &codex, *json)
-            .map(|()| false)
-            .map_err(Failure::from),
+        } => sync(&roots, &agents, *apply, *allow_mass_delete, *json).map_err(Failure::from),
+        Command::Items { json } => items(&agents, *json).map(|()| false).map_err(Failure::from),
         Command::Delete { agent, id, json } => {
-            delete(&roots, &backups, &claude, &codex, agent, id, *json).map(|()| false)
+            delete(&roots, &backups, &agents, agent, id, *json).map(|()| false)
         }
         Command::Edit { agent, id, json } => {
-            edit(&roots, &backups, &claude, &codex, agent, id, *json).map(|()| false)
+            edit(&roots, &backups, &agents, agent, id, *json).map(|()| false)
         }
         Command::Schedule(args) => run_schedule(cli, args, &roots).map(|()| false),
     }

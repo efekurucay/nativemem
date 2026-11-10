@@ -52,12 +52,12 @@ hand-drawn borders, dividers or backgrounds.
 - One row each: name (primary), description (secondary, two lines max), a small category tag
   when present (`feedback`, `project`, `reference`, `user`).
 - A search field filters by name, description and body.
-- Each logical item appears once even though it exists in two agents: rows are originals;
+- Each logical item appears once even though it exists in several agents: rows are originals;
   copies are folded into their original.
 
 **Detail column** (an item is selected)
 - Name as title, description below, category tag.
-- "Lives in": one small label per agent that has it (`Claude Code`, `Codex`), the origin marked
+- "Lives in": one small label per agent that has it (`Claude Code`, `Codex`, `OpenCode`, `Pi`), the origin marked
   "original", others "copy".
 - Body as selectable text with simple block rendering: headings, bullet and numbered lists,
   fenced code in a monospaced font, and paragraphs. Lines inside a paragraph are joined, so
@@ -75,7 +75,7 @@ hand-drawn borders, dividers or backgrounds.
   ~/.nativemem/backups." On confirm run the delete command, then reload.
 
 **Overview** (selected in sidebar)
-- Three figures: items, projects, agents in sync.
+- Three figures: items, projects, agents in sync (an agent is in sync when it holds every item it can store; OpenCode and Pi only store instruction sections).
 - Per agent: originals, copies.
 - "Skipped" disclosure list: label + reason, as given by the CLI.
 - If the CLI binary cannot be found: a clear message and a "Choose…" button to pick it.
