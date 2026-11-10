@@ -31,8 +31,9 @@ the maintainer's machine, not in CI. Or build from source.
 **Linux.** Download `nativemem-cli-<tag>-linux-x86_64.tar.gz` or `...-linux-aarch64.tar.gz` from
 Releases. Linux support is best-effort: the CLI works, `schedule` and notifications are macOS-only.
 
-**Windows.** Build from source (best-effort, CLI only; `schedule` and notifications are
-macOS-only).
+**Windows.** Not supported yet. The workspace compiles and the core tests pass, but 22 of the 27 CLI
+integration tests fail with `Access is denied` (file replacement or locking differs on Windows), so
+treat it as unsupported until that is fixed. `schedule` and notifications are macOS-only.
 
 **Verify.** Each release lists SHA-256 checksums in `SHA256SUMS-macos.txt` and `SHA256SUMS-linux.txt`.
 

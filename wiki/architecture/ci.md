@@ -28,7 +28,7 @@ weekly grouped updates for cargo and for the actions (`.github/dependabot.yml`).
   by `scripts/release.sh` on the maintainer's machine (reasons in `wiki/guides/release.md`). CI
   never exercises the macOS-only code (`schedule`, notifications) or the Swift app; the Linux job
   compiles the CLI without them.
-- Windows: best-effort, run by hand from the Actions tab. Linux is best-effort too, but its checks
+- Windows: not supported yet. The manual `portability.yml` run compiles the workspace and passes the core tests, while 22 of the 27 CLI integration tests fail with `Access is denied` (file replacement or locking). Run it by hand from the Actions tab to re-check. Linux is best-effort too, but its checks
   run on every change.
 - Workflow execution itself is `[UNVERIFIED]` until the first run on GitHub; the files were
   validated as YAML only.
