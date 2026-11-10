@@ -129,7 +129,9 @@ Root: `claude_home` (default `~/.claude`).
 
 - Store: `projects/<dir>/memory/`. Each `*.md` except `MEMORY.md` is one item. Other files are ignored.
 - Project path: the directory name is a lossy encoding, so read the real path from the `cwd`
-  field of the first line that has one in any `projects/<dir>/*.jsonl`. No jsonl, or no `cwd`:
+  field of the first line that has one in any `projects/<dir>/*.jsonl`, ignoring lines that carry
+  the session-replica marker `nativemem_origin` (a replica this tool wrote is not evidence that the
+  folder exists). No jsonl, or no `cwd`:
   skip the directory and report it.
 - Frontmatter, two variants, both must parse:
   - nested: `name`, `description`, `metadata: { type, node_type, originSessionId, modified }`

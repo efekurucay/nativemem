@@ -11,12 +11,13 @@ use crate::session::{
 };
 use crate::slug::slugify;
 
-use super::claude_sessions::{self, ClaudeSessions};
+use super::claude_sessions::{self, ClaudeSessions, MARKER_KEY};
 use super::sections::InstructionFile;
 
 const INSTRUCTION_FILE: &str = "CLAUDE.md";
 const INDEX_FILE: &str = "MEMORY.md";
 const ORIGIN_KEY: &str = "nativemem_origin";
+const HELPER_FILE: &str = "nativemem.jsonl";
 const NEW_INDEX: &str = "# Memory Index\n\n";
 /// Bump when the written session format changes; unmodified replicas are then rewritten.
 const SESSION_WRITER_REVISION: u32 = 1;
@@ -385,7 +386,7 @@ impl Adapter for ClaudeAdapter {
             None => {
                 let encoded = encode_name(&cwd.to_string_lossy());
                 let cwd_json = serde_json::json!({ "cwd": cwd.to_string_lossy() });
-                let marker_file = self.projects_dir().join(&encoded).join("nativemem.jsonl");
+                let marker_file = self.projects_dir().join(&encoded).join(HELPER_FILE);
                 self.overwrite(&marker_file, &format!("{cwd_json}\n"))?;
                 encoded
             }
@@ -549,7 +550,9 @@ fn memory_files(mem: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// `cwd` of the first jsonl line that has one; unparsable lines are ignored.
+/// `cwd` of the first jsonl line that has one; unparsable lines are ignored. Session replica
+/// lines (they carry the marker) prove nothing about the folder, while the helper file stays
+/// evidence: it is what keeps a memory replica's new project directory resolvable.
 fn project_cwd(dir: &Path) -> Result<Option<PathBuf>> {
     let mut logs: Vec<PathBuf> = read_dir_paths(dir)?
         .into_iter()
@@ -569,7 +572,11 @@ fn project_cwd(dir: &Path) -> Result<Option<PathBuf>> {
             {
                 break;
             }
-            if !buf.windows(5).any(|w| w == b"\"cwd\"") {
+            if !buf.windows(5).any(|w| w == b"\"cwd\"")
+                || buf
+                    .windows(MARKER_KEY.len())
+                    .any(|w| w == MARKER_KEY.as_bytes())
+            {
                 continue;
             }
             let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) else {
@@ -976,6 +983,70 @@ mod tests {
         orphan_project(&f, "a-gone");
         assert!(f.adapter.scan().unwrap().is_empty());
         assert_eq!(f.adapter.skipped_projects().unwrap().len(), 1);
+    }
+
+    fn replica_session_item() -> (ItemKey, Item) {
+        use crate::session::{Role, Session, Turn};
+        let session = Session {
+            id: "o".into(),
+            cwd: "/gone/app".into(),
+            title: "t".into(),
+            created_ms: 0,
+            updated_ms: 0,
+            turns: vec![Turn::new(Role::User, "q", 0)],
+        };
+        let key = ItemKey {
+            origin: AgentId::new("pi"),
+            native_id: "--gone-app--/x.jsonl".into(),
+        };
+        (key, session.to_item())
+    }
+
+    #[test]
+    fn replica_sessions_do_not_make_a_missing_folder_resolve() {
+        let f = fx();
+        let (key, item) = replica_session_item();
+        let adapter = ClaudeAdapter::new(
+            f.root.clone(),
+            f.state.clone(),
+            BackupSession::with_stamp("T"),
+        )
+        .with_fs_root(f.root.join("no-fs-root"))
+        .with_sessions(crate::session::SessionOptions::default());
+        let (native_id, _) = adapter.write_replica(&key, &item).unwrap();
+        let dir = native_id.split('/').next().unwrap().to_string();
+        orphan_project(&f, &dir);
+        let skipped = adapter.skipped_projects().unwrap();
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(skipped[0].1.starts_with("no cwd in jsonl"));
+        let scanned = adapter.scan().unwrap();
+        assert!(scanned.iter().all(|o| o.item.kind == Kind::Session));
+        assert_eq!(scanned.len(), 1, "the replica session is still listed");
+        assert!(scanned[0].replica_of.is_some());
+        // Writing again reuses the same file.
+        assert_eq!(adapter.write_replica(&key, &item).unwrap().0, native_id);
+    }
+
+    #[test]
+    fn a_genuine_transcript_next_to_replicas_resolves_the_project() {
+        let f = fx();
+        let (key, item) = replica_session_item();
+        let adapter = ClaudeAdapter::new(
+            f.root.clone(),
+            f.state.clone(),
+            BackupSession::with_stamp("T"),
+        )
+        .with_fs_root(f.root.join("no-fs-root"));
+        let (native_id, _) = adapter.write_replica(&key, &item).unwrap();
+        let dir = native_id.split('/').next().unwrap().to_string();
+        orphan_project(&f, &dir);
+        fs::write(
+            f.root.join("projects").join(&dir).join("real.jsonl"),
+            "{\"cwd\":\"/gone/app\",\"type\":\"user\"}\n",
+        )
+        .unwrap();
+        assert!(adapter.skipped_projects().unwrap().is_empty());
+        assert_eq!(adapter.scan().unwrap().len(), 1);
     }
 
     #[test]
