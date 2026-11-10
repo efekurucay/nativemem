@@ -19,7 +19,7 @@ Claude Code). SQLite files were inspected read-only (`immutable=1`, structure an
 | Instruction sections | Read and write in `AGENTS.md` | `codex.rs` through `sections.rs` |
 | Sessions | Originals always read; replicas (with their `threads` row) written only when `NATIVEMEM_CODEX_SESSION_WRITES=on` and the schema probes pass | `codex_sessions.rs`, `codex_rollout.rs`, `codex_imports.rs`, `codex_threads.rs` |
 | Skills (global) | Read and write in `<codex home>/skills/`; `.system` and directories without `SKILL.md` are left alone; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `codex.rs` |
-| MCP servers | Read by `mcp import`; never written | `crates/hub/src/import.rs` |
+| MCP servers | Read by `mcp import`; `mcp install` and `uninstall` write the one table `[mcp_servers.nativemem]` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
 ## Native locations
 
@@ -56,7 +56,7 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
   source_modified_at, connector_names, title}], "detected_connector_records": [...]}`.
   `content_sha256` is the SHA-256 of the raw bytes of the source transcript.
 - **MCP entry**: `command`, `args`, `env`, `env_vars`, `cwd`, `url`, `http_headers`,
-  `bearer_token_env_var`, per-tool approval settings. `mcp import` carries `command`, `args`, `env`, `cwd`,
+  `bearer_token_env_var`, `startup_timeout_sec`, `tool_timeout_sec` (`[UNVERIFIED]` key names), per-tool approval settings. `mcp import` carries `command`, `args`, `env`, `cwd`,
   `url`, `http_headers` and `enabled`, and names the other keys in a warning.
 
 ## What nativemem reads and writes today
@@ -75,8 +75,14 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
   a `token_count` and the closing `task_complete`. `session_meta` also carries `nativemem_origin` and
   `nativemem_title`. The file mtime is the original's.
 - Never touches `~/.codex/sqlite/`, `thread_history_1.sqlite`, `session_index.jsonl`, `history.jsonl`,
-  `.codex-global-state.json`, `config.toml` or `hooks.json`, and in `state_5.sqlite` only the
+  `.codex-global-state.json` or `hooks.json`, and in `state_5.sqlite` only the
   `threads` rows of its own replicas.
+- `config.toml`: `mcp install` adds `[mcp_servers.nativemem]` with `command`, `args` and
+  `tool_timeout_sec = 1800`; `mcp uninstall` removes the table. The edit goes through `toml_edit`, so
+  comments, key order and every other byte stay, and a user's own `tool_timeout_sec` is kept
+  (`crates/hub/src/register.rs`; tests `codex_gets_a_table_and_every_other_byte_stays`,
+  `codex_keeps_a_timeout_the_user_set_and_fixes_a_stale_command`). Codex rewrites this file itself, so the
+  edit is re-read and retried like Claude's. Hooks are never touched.
 
 ## Sessions: listing and resume
 
@@ -198,6 +204,8 @@ layout.
 | `hooks.state` hashes pin hook commands | OBSERVED | `config.toml` structure and binary strings |
 | The five probes pass on the fixtures; a `threads` column, a `state_6.sqlite`, an extra ledger key, a missing `session_meta` key and a flat rollout path each fail one check, and the database file is never written | VERIFIED | `crates/core/tests/probes.rs` (`codex_*`) |
 | MCP `enabled` key and `type` handling | `[UNVERIFIED]` | not testable read-only |
+| `startup_timeout_sec` and `tool_timeout_sec` are the keys Codex reads for an MCP server | `[UNVERIFIED]` | given for the task, not testable read-only; the codex binary is never run |
+| Codex's default startup timeout can be shorter than the hub's connect timeout of 20 s per upstream | `[UNVERIFIED]` | if Codex reports the hub as failed to start, set `startup_timeout_sec` in the entry by hand; `install` keeps it |
 | A nativemem-written rollout is read back as a replica | VERIFIED | test `claude_session_becomes_a_codex_rollout_with_an_import_record` |
 | Codex lists a nativemem-written rollout plus row in `codex resume` and opens it | `[UNVERIFIED]` | needs the staged check |
 | Codex accepts `history_mode` `legacy` for a row written this way | `[UNVERIFIED]` | needs the staged check |

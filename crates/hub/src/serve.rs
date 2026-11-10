@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rmcp::model::{
@@ -7,18 +8,23 @@ use rmcp::model::{
     Tool,
 };
 use rmcp::service::RequestContext;
+use rmcp::transport::auth::{AuthClient, AuthError};
 use rmcp::{ErrorData as McpError, Peer, RoleClient, RoleServer, ServerHandler, ServiceError};
 use serde_json::json;
 use tokio::sync::OnceCell;
 use tokio::task::JoinSet;
 
 use crate::config::HubConfig;
-use crate::connect::{connect, Client, Connected};
+use crate::connect::{connect, Client, ConnectError, Connected};
 use crate::error::{HubError, Result};
+use crate::oauth;
 use crate::secrets::SecretStore;
 
 /// The tool that reports the state of every configured server.
 pub const STATUS_TOOL: &str = "nativemem_status";
+
+/// The tool name a server that is not signed in exposes.
+const SIGN_IN_TOOL: &str = "sign_in_required";
 
 const MAX_TOOL_NAME: usize = 64;
 
@@ -57,8 +63,12 @@ fn unique_name(server: &str, tool: &str, taken: &BTreeSet<String>) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerState {
-    Connected { tools: usize },
+    Connected {
+        tools: usize,
+    },
     Error(String),
+    /// An OAuth server whose sign-in is missing or no longer works.
+    NeedsLogin(String),
     Disabled,
 }
 
@@ -77,15 +87,29 @@ impl ServerStatus {
             ServerState::Error(message) => {
                 json!({ "name": self.name, "status": "error", "error": message })
             }
+            ServerState::NeedsLogin(message) => {
+                json!({ "name": self.name, "status": "needs_login", "error": message })
+            }
             ServerState::Disabled => json!({ "name": self.name, "status": "disabled" }),
         }
     }
 }
 
+/// Where a call goes.
+enum Target {
+    Upstream {
+        peer: Peer<RoleClient>,
+        tool: String,
+        /// The token source of an OAuth server.
+        auth: Option<AuthClient<reqwest::Client>>,
+    },
+    /// The one tool of an OAuth server that is not signed in: it says how to sign in.
+    SignIn,
+}
+
 struct Route {
-    peer: Peer<RoleClient>,
     server: String,
-    tool: String,
+    target: Target,
 }
 
 /// The connected upstreams, the tools they expose and where a call to each goes.
@@ -97,8 +121,9 @@ struct Live {
     _clients: Vec<Client>,
 }
 
-async fn connect_all(config: HubConfig, store: Arc<dyn SecretStore>) -> Live {
+async fn connect_all(config: HubConfig, store: Arc<dyn SecretStore>, state: PathBuf) -> Live {
     let mut status: Vec<ServerStatus> = Vec::new();
+    let mut signed_out: Vec<String> = Vec::new();
     let mut set = JoinSet::new();
     for (name, spec) in config.servers {
         if !spec.enabled {
@@ -108,9 +133,9 @@ async fn connect_all(config: HubConfig, store: Arc<dyn SecretStore>) -> Live {
             });
             continue;
         }
-        let store = store.clone();
+        let (store, state) = (store.clone(), state.clone());
         set.spawn(async move {
-            let result = connect(&spec, store).await;
+            let result = connect(&name, &spec, store, &state).await;
             (name, result)
         });
     }
@@ -118,12 +143,16 @@ async fn connect_all(config: HubConfig, store: Arc<dyn SecretStore>) -> Live {
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((name, Ok(c))) => connected.push((name, c)),
-            Ok((name, Err(message))) => {
-                eprintln!("nativemem hub: {name}: {message}");
-                status.push(ServerStatus {
-                    name,
-                    state: ServerState::Error(message),
-                });
+            Ok((name, Err(error))) => {
+                eprintln!("nativemem hub: {name}: {error}");
+                let state = match error {
+                    ConnectError::NeedsLogin(_) => {
+                        signed_out.push(name.clone());
+                        ServerState::NeedsLogin(error.to_string())
+                    }
+                    ConnectError::Failed(message) => ServerState::Error(message),
+                };
+                status.push(ServerStatus { name, state });
             }
             Err(e) => eprintln!("nativemem hub: a connection task failed: {e}"),
         }
@@ -143,6 +172,7 @@ async fn connect_all(config: HubConfig, store: Arc<dyn SecretStore>) -> Live {
             },
         });
         let peer = c.client.peer().clone();
+        let auth = c.auth;
         for mut tool in c.tools {
             let upstream = tool.name.to_string();
             let exposed = unique_name(&name, &upstream, &taken);
@@ -158,14 +188,38 @@ async fn connect_all(config: HubConfig, store: Arc<dyn SecretStore>) -> Live {
             routes.insert(
                 exposed,
                 Route {
-                    peer: peer.clone(),
                     server: name.clone(),
-                    tool: upstream,
+                    target: Target::Upstream {
+                        peer: peer.clone(),
+                        tool: upstream,
+                        auth: auth.clone(),
+                    },
                 },
             );
             tools.push(tool);
         }
         clients.push(c.client);
+    }
+    signed_out.sort();
+    for name in signed_out {
+        let exposed = unique_name(&name, SIGN_IN_TOOL, &taken);
+        taken.insert(exposed.clone());
+        let tool = Tool::new(
+            exposed.clone(),
+            format!("[{name}] {}", oauth::sign_in_message(&name)),
+            json!({ "type": "object", "properties": {} })
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        );
+        routes.insert(
+            exposed,
+            Route {
+                server: name,
+                target: Target::SignIn,
+            },
+        );
+        tools.push(tool);
     }
     status.sort_by(|a, b| a.name.cmp(&b.name));
     Live {
@@ -180,7 +234,7 @@ fn status_tool() -> Tool {
     let schema = json!({ "type": "object", "properties": {} });
     Tool::new(
         STATUS_TOOL,
-        "State of every server behind the nativemem hub: connected, error or disabled",
+        "State of every server behind the nativemem hub: connected, error, needs_login or disabled",
         schema.as_object().cloned().unwrap_or_default(),
     )
 }
@@ -190,21 +244,26 @@ fn status_tool() -> Tool {
 pub struct HubServer {
     config: HubConfig,
     store: Arc<dyn SecretStore>,
+    state: PathBuf,
     live: OnceCell<Live>,
 }
 
 impl HubServer {
-    pub fn new(config: HubConfig, store: Arc<dyn SecretStore>) -> Self {
+    /// `state` is the state directory: the token refresh lock lives there.
+    pub fn new(config: HubConfig, store: Arc<dyn SecretStore>, state: PathBuf) -> Self {
         HubServer {
             config,
             store,
+            state,
             live: OnceCell::new(),
         }
     }
 
     async fn live(&self) -> &Live {
         self.live
-            .get_or_init(|| connect_all(self.config.clone(), self.store.clone()))
+            .get_or_init(|| {
+                connect_all(self.config.clone(), self.store.clone(), self.state.clone())
+            })
             .await
     }
 }
@@ -262,26 +321,49 @@ impl ServerHandler for HubServer {
                 None,
             ));
         };
+        let Target::Upstream { peer, tool, auth } = &route.target else {
+            return Ok(text_result(oauth::sign_in_message(&route.server), true));
+        };
         let mut forwarded = request;
-        forwarded.name = route.tool.clone().into();
-        match route.peer.call_tool_once(forwarded).await {
+        forwarded.name = tool.clone().into();
+        match peer.call_tool_once(forwarded).await {
             Ok(response) => Ok(response),
             Err(ServiceError::McpError(e)) => Err(e),
-            Err(e) => Ok(text_result(format!("{}: {e}", route.server), true)),
+            Err(e) => {
+                let message = e.to_string();
+                // A token that stopped working mid-session: the refresh failed for good.
+                let signed_out = match auth {
+                    Some(auth) => {
+                        matches!(
+                            auth.get_access_token().await,
+                            Err(AuthError::AuthorizationRequired)
+                        ) || oauth::is_auth_required(&message)
+                    }
+                    None => false,
+                };
+                Ok(text_result(
+                    if signed_out {
+                        oauth::sign_in_message(&route.server)
+                    } else {
+                        format!("{}: {message}", route.server)
+                    },
+                    true,
+                ))
+            }
         }
     }
 }
 
 /// Serve the hub on this process's stdin and stdout until the client disconnects. Diagnostics go
 /// to stderr; stdout carries the protocol only.
-pub fn run_stdio(config: HubConfig, store: Arc<dyn SecretStore>) -> Result<()> {
+pub fn run_stdio(config: HubConfig, store: Arc<dyn SecretStore>, state: PathBuf) -> Result<()> {
     use rmcp::ServiceExt;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| HubError::Invalid(format!("cannot start the async runtime: {e}")))?;
     runtime.block_on(async {
-        let server = HubServer::new(config, store)
+        let server = HubServer::new(config, store, state)
             .serve(rmcp::transport::stdio())
             .await
             .map_err(|e| HubError::Invalid(format!("cannot start the hub: {e}")))?;

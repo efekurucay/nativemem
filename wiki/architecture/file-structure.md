@@ -69,18 +69,20 @@ nativemem-sync/
 │   │   │   ├── lib.rs            module list
 │   │   │   ├── config.rs         `hub.toml`: ServerSpec, HubConfig, validation, load, backed-up atomic save
 │   │   │   ├── secrets.rs        SecretStore trait, KeychainStore, FileStore (tests), `secret:<id>` references
-│   │   │   ├── connect.rs        connect to one upstream (stdio child or streamable HTTP), secret resolution, scrubbing, `mcp test`
+│   │   │   ├── connect.rs        connect to one upstream (stdio child or streamable HTTP, bearer for OAuth servers), secret resolution, scrubbing, `mcp test`
 │   │   │   ├── serve.rs          HubServer: tool naming, forwarding, `nativemem_status`, stdio serving
 │   │   │   ├── import.rs         read the agents' MCP entries, plan and apply the import
+│   │   │   ├── oauth.rs          OAuth sign-in (PKCE, discovery, registration, loopback redirect), token store, refresh lock, logout
+│   │   │   ├── register.rs       register the hub in each agent: the `nativemem` MCP entry (Claude, Codex, OpenCode, Pi), install, uninstall, status
 │   │   │   └── bin/fake_mcp.rs   `nativemem-fake-mcp`, a tiny stdio MCP server for tests
-│   │   └── tests/                hub.rs (proxy, failures, secrets, HTTP headers), import.rs (four fake agent homes)
+│   │   └── tests/                hub.rs (proxy, failures, secrets, HTTP headers), import.rs (four fake agent homes), oauth.rs (sign-in, refresh, needs_login over a fake authorization server), register.rs (the entry in four fake agent homes), common/fake_oauth.rs (the fake server, also used by the CLI tests)
 │   └── cli/                      binary `nativemem`
 │       ├── src/
 │       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/edit, JSON output
 │       │   ├── doctor.rs         `doctor`, compatibility reports, warnings, notification delivery
 │       │   ├── mcp.rs            `mcp` subcommands over the hub crate
 │       │   └── schedule.rs       launchd scheduling (macOS only)
-│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications), mcp.rs (hub commands and `mcp serve` over temp roots)
+│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications), mcp.rs (hub commands, sign-in, registration and `mcp serve` over temp roots)
 ├── apps/macos/                   Swift package, macOS 14+, no third-party dependencies
 │   ├── Package.swift
 │   ├── Sources/Nativemem/        app entry point (`NativememApp.swift`)
@@ -119,7 +121,7 @@ nativemem-sync/
 | Atomic writes and backups | `crates/core/src/fsx.rs` |
 | Anything that knows an agent's file format | `crates/core/src/adapters/` |
 | Reading roots, flags, environment, the lock, exit codes, JSON output | `crates/cli/src/main.rs` |
-| The MCP hub: `hub.toml`, secrets, proxying, import | `crates/hub/`, `crates/cli/src/mcp.rs`, `wiki/architecture/hub.md` |
+| The MCP hub: `hub.toml`, secrets, proxying, import, OAuth sign-in, registration in the agents | `crates/hub/`, `crates/cli/src/mcp.rs`, `wiki/architecture/hub.md`, `wiki/decisions/mcp-hub.md` |
 | Compatibility probes, status, state file, prompt | `crates/core/src/compat.rs`, `crates/core/src/adapters/*_probes.rs`, `crates/cli/src/doctor.rs` |
 | Fixture homes for tests | `crates/core/src/testkit.rs` |
 | Releases, release notes, macOS packaging | `scripts/release.sh`, `apps/macos/scripts/bundle.sh`, `wiki/guides/release.md` |

@@ -4,8 +4,8 @@
 sessions in sync with the other agents. There is no shared store: every agent keeps reading its own files, in
 its own format, from its own home directory, and the tool translates between them. What one agent
 learns about a project shows up in the others without re-teaching. Only the native flow is used:
-text is copied verbatim, project scope is preserved, no agent configuration is changed and no LLM
-is involved.
+text is copied verbatim, project scope is preserved, no agent configuration is changed (except the one
+`nativemem` MCP entry that `nativemem mcp install` adds) and no LLM is involved.
 
 ![Overview](docs/images/overview.png)
 
@@ -82,11 +82,12 @@ xattr -dr com.apple.quarantine nativemem.app
 - Every delete or overwrite backs up first to `<state dir>/backups/<UTC timestamp>/<agent>/...`;
   writes are atomic.
 - Nothing is written inside a git repository; only agent home directories and the state directory
-  are touched.
+  are touched. The only agent configuration edited is the `nativemem` MCP entry (`mcp install`).
 - Secrets and session bodies are never printed, and the ledger stores ids and hashes, not text.
 - A mass-delete guard refuses large removals, and a failed scan aborts the run before planning.
 - The compatibility watch (`doctor`) pauses the kinds whose on-disk format an agent update changed.
-- The tool never transmits anything over the network.
+- Sync never transmits anything over the network. The MCP hub talks only to the MCP servers and
+  authorization servers you configured.
 
 ## Reference
 
@@ -220,6 +221,8 @@ nativemem mcp list|add|edit|remove|enable|disable [--json]   # the MCP hub's ser
 nativemem mcp set-secret <id> < value            # keychain secret behind `secret:<id>` in hub.toml
 nativemem mcp import [--apply] [--json]          # read the agents' MCP servers into the hub
 nativemem mcp test <name> [--json]               # connect to one server and list its tools
+nativemem mcp login|logout <name> [--json]       # sign in to an OAuth server once, for every agent
+nativemem mcp install|uninstall|status [--agent <id>] [--json]   # the one `nativemem` MCP entry in each agent
 nativemem mcp serve                              # the hub itself: a stdio MCP server for an agent
 nativemem schedule install [--every <minutes>]
 nativemem schedule status [--json]
@@ -250,8 +253,13 @@ their secrets in one place and exposes their tools, named `<server>__<tool>`, be
 connection; `nativemem_status` reports which servers connected. Servers live in
 `<state dir>/hub.toml`; any value can be `secret:<id>`, kept in the OS keychain and never printed.
 `mcp import` reads the four agents' MCP entries (read-only) and moves env and header values into the
-keychain. Registering the hub in the agents and OAuth login are not built yet. Details:
-[wiki/architecture/hub.md](wiki/architecture/hub.md).
+keychain. `mcp login <name>` signs in to an OAuth server once (authorization code with PKCE, loopback
+redirect, browser); the hub keeps and refreshes the tokens for all agents. `mcp install` registers the hub in
+Claude Code, Codex, OpenCode and Pi as one entry named `nativemem` in each agent's own MCP
+configuration (`.claude.json`, `config.toml`, `opencode.json(c)`, `mcp.json`); it edits only that entry,
+keeps every other byte, backs up first and never writes a file that does not parse. `mcp uninstall`
+removes it. While the hub cannot start, the agents have no MCP tools from it. Details:
+[wiki/architecture/hub.md](wiki/architecture/hub.md), [wiki/decisions/mcp-hub.md](wiki/decisions/mcp-hub.md).
 
 #### Compatibility watch (`doctor`)
 
@@ -286,8 +294,8 @@ Re-running `install` updates the job; `uninstall` removes it and leaves the stat
 `--launch-agents-dir` (env `NATIVEMEM_LAUNCH_AGENTS_DIR`) changes the plist location. On other
 platforms these commands fail with `unsupported_platform`.
 
-Writing runs (`sync --apply`, `delete`, `edit`) take an exclusive lock on
-`<state dir>/sync.lock`. If another run holds it, the command fails with code `busy` and
+Writing runs (`sync --apply`, `delete`, `edit`, and the `mcp` commands that write) take an exclusive lock on
+`<state dir>/sync.lock` (`mcp login` and `logout` take `<state dir>/hub-oauth.lock` instead). If another run holds it, the command fails with code `busy` and
 writes nothing. `status`, `items` and dry-run `sync` do not lock.
 
 ### Safety details

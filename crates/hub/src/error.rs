@@ -14,6 +14,8 @@ pub enum HubError {
     Parse(String),
     #[error("secret store: {0}")]
     SecretStore(String),
+    #[error("{0}")]
+    Busy(String),
 }
 
 pub type Result<T> = std::result::Result<T, HubError>;
@@ -29,6 +31,7 @@ impl HubError {
             HubError::Exists(_) => "exists",
             HubError::NotFound(_) => "not_found",
             HubError::SecretStore(_) => "io",
+            HubError::Busy(_) => "busy",
         }
     }
 }

@@ -10,6 +10,9 @@ use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 
+#[path = "../../hub/tests/common/fake_oauth.rs"]
+mod fake_oauth;
+
 /// The fake upstream server. `cargo test -p nativemem-cli` does not build another package's
 /// binary, so it is built here when it is missing next to the CLI binary.
 fn fake_server() -> &'static Path {
@@ -150,11 +153,15 @@ fn add_list_edit_enable_disable_remove() {
 
     let spec = json!({
         "name": "beta", "transport": "http", "url": "https://mcp.example.com/mcp",
-        "headers": { "Authorization": "secret:beta-token", "X-Plain": "plain-header-value" },
+        "headers": { "X-Api-Key": "secret:beta-token", "X-Plain": "plain-header-value" },
         "auth": "oauth",
     });
     let (code, _) = fx.json(&["add", "--json"], &spec.to_string());
     assert_eq!(code, 0);
+    let bearer = json!({ "name": "gamma", "transport": "http", "url": "https://mcp.example.com/mcp",
+        "headers": { "Authorization": "secret:g" }, "auth": "oauth" });
+    let (_, doc) = fx.json(&["add", "--json"], &bearer.to_string());
+    assert_eq!(doc["code"], "invalid", "{doc}");
 
     let (code, doc) = fx.json(&["list", "--json"], "");
     assert_eq!(code, 0);
@@ -165,7 +172,8 @@ fn add_list_edit_enable_disable_remove() {
     assert_eq!(beta["auth"], "oauth");
     assert_eq!(beta["enabled"], true);
     assert_eq!(beta["secrets"], json!(["beta-token"]));
-    assert_eq!(beta["headers"]["Authorization"], "secret:beta-token");
+    assert_eq!(beta["headers"]["X-Api-Key"], "secret:beta-token");
+    assert_eq!(beta["auth_state"], "needs_login");
     // A literal value may be a secret: it is never printed.
     assert_eq!(beta["headers"]["X-Plain"], "<literal>");
     assert!(!doc.to_string().contains("plain-header-value"));
@@ -458,4 +466,274 @@ fn import_previews_then_applies_from_the_four_agents() {
         again["summary"],
         json!({ "add": 0, "present": 2, "conflicts": 1, "skipped": 0 })
     );
+}
+
+/// A browser that follows the authorization URL, redirects included.
+#[cfg(unix)]
+fn fake_browser(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("browser.sh");
+    fs::write(&script, "#!/bin/sh\nexec curl -s -L -o /dev/null \"$1\"\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_logout_list_and_test_work_through_the_cli() {
+    let fake = fake_oauth::FakeOauth::start().await;
+    let fx = Fx::new();
+    let spec = json!({ "name": "remote", "transport": "http", "url": fake.mcp_url(),
+        "auth": "oauth" });
+    fx.json(&["add", "--json"], &spec.to_string());
+    fx.json(&["add", "--json"], &fake_spec("local"));
+
+    let auth_states = |doc: &Value| -> Value {
+        let by_name = |n: &str| {
+            doc["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["name"] == n)
+                .unwrap()["auth_state"]
+                .clone()
+        };
+        json!([by_name("remote"), by_name("local")])
+    };
+    let (_, doc) = fx.json(&["list", "--json"], "");
+    assert_eq!(auth_states(&doc), json!(["needs_login", "none"]));
+    let (code, doc) = fx.json(&["test", "remote", "--json"], "");
+    assert_eq!(code, 2);
+    assert_eq!(doc["error"], "Sign in again: nativemem mcp login remote");
+
+    let browser = fake_browser(&fx.root);
+    let (code, doc) = fx.json(
+        &[
+            "login",
+            "remote",
+            "--browser",
+            browser.to_str().unwrap(),
+            "--json",
+        ],
+        "",
+    );
+    assert_eq!((code, &doc), (0, &json!({ "signed_in": "remote" })));
+    assert_eq!(fake.registrations(), 1);
+    let (_, doc) = fx.json(&["list", "--json"], "");
+    assert_eq!(auth_states(&doc), json!(["signed_in", "none"]));
+    let (code, doc) = fx.json(&["test", "remote", "--json"], "");
+    assert_eq!(code, 0);
+    assert_eq!(doc["tools"], json!(["whoami"]));
+
+    // No token reaches the output or hub.toml.
+    let listing = fx.run(&["list", "--json"], "");
+    let shown = String::from_utf8_lossy(&listing.stdout).to_string() + &fx.hub_toml();
+    for token in fake.bearers() {
+        assert!(!shown.contains(&token), "a token leaked");
+    }
+
+    let (code, doc) = fx.json(&["logout", "remote", "--json"], "");
+    assert_eq!(
+        (code, &doc),
+        (0, &json!({ "signed_out": "remote", "was_signed_in": true }))
+    );
+    let (_, doc) = fx.json(&["list", "--json"], "");
+    assert_eq!(auth_states(&doc), json!(["needs_login", "none"]));
+    let (_, doc) = fx.json(&["logout", "local", "--json"], "");
+    assert_eq!(doc["code"], "invalid", "{doc}");
+    let (_, doc) = fx.json(&["login", "local", "--json"], "");
+    assert_eq!(doc["code"], "invalid", "{doc}");
+}
+
+/// The path agents are told to run: this test binary's `nativemem`, resolved through symlinks.
+fn registered_command() -> String {
+    fs::canonicalize(env!("CARGO_BIN_EXE_nativemem"))
+        .unwrap()
+        .display()
+        .to_string()
+}
+
+#[test]
+fn install_registers_the_hub_in_every_agent_status_checks_it_and_uninstall_removes_it() {
+    let fx = Fx::new();
+    let r = &fx.root;
+    write(
+        &r.join("pi/mcp.json"),
+        r#"{"mcpServers":{"radius":{"url":"https://r"}}}"#,
+    );
+    write(&r.join("codex/config.toml"), "# mine\nmodel = \"gpt\"\n");
+
+    let (code, doc) = fx.json(&["install", "--json"], "");
+    assert_eq!(code, 0, "{doc}");
+    let args: Vec<String> = [
+        "mcp",
+        "serve",
+        "--claude-home",
+        r.join("claude").to_str().unwrap(),
+        "--codex-home",
+        r.join("codex").to_str().unwrap(),
+        "--opencode-home",
+        r.join("opencode").to_str().unwrap(),
+        "--pi-home",
+        r.join("pi").to_str().unwrap(),
+        "--state-dir",
+        fx.state().to_str().unwrap(),
+    ]
+    .map(String::from)
+    .to_vec();
+    assert_eq!(doc["command"], registered_command());
+    assert_eq!(doc["args"], json!(args));
+    let agents = doc["agents"].as_array().unwrap();
+    let statuses: Vec<(&str, &str)> = agents
+        .iter()
+        .map(|a| (a["agent"].as_str().unwrap(), a["status"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            ("claude", "installed"),
+            ("codex", "installed"),
+            ("opencode", "installed"),
+            ("pi", "installed")
+        ]
+    );
+    assert_eq!(agents[3]["path"], r.join("pi/mcp.json").to_str().unwrap());
+
+    // The files hold the entry in each agent's own shape.
+    let pi: Value =
+        serde_json::from_str(&fs::read_to_string(r.join("pi/mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        pi["mcpServers"]["nativemem"]["command"],
+        registered_command()
+    );
+    assert_eq!(pi["mcpServers"]["nativemem"]["args"], json!(args));
+    assert_eq!(pi["mcpServers"]["radius"]["url"], "https://r");
+    let claude: Value =
+        serde_json::from_str(&fs::read_to_string(r.join("claude/.claude.json")).unwrap()).unwrap();
+    assert_eq!(claude["mcpServers"]["nativemem"]["type"], "stdio");
+    let codex = fs::read_to_string(r.join("codex/config.toml")).unwrap();
+    assert!(codex.starts_with("# mine\nmodel = \"gpt\"\n"), "{codex}");
+    assert!(codex.contains("tool_timeout_sec = 1800"), "{codex}");
+    let opencode: Value =
+        serde_json::from_str(&fs::read_to_string(r.join("opencode/opencode.json")).unwrap())
+            .unwrap();
+    assert_eq!(opencode["mcp"]["nativemem"]["command"][1], "mcp");
+
+    let (code, doc) = fx.json(&["status", "--json"], "");
+    assert_eq!(code, 0);
+    assert!(doc["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["status"] == "registered"));
+
+    // A second install changes nothing.
+    let before = fs::read_to_string(r.join("codex/config.toml")).unwrap();
+    let (_, doc) = fx.json(&["install", "--json"], "");
+    assert!(doc["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["status"] == "unchanged"));
+    assert_eq!(
+        fs::read_to_string(r.join("codex/config.toml")).unwrap(),
+        before
+    );
+
+    // Without --json the result is one line per agent.
+    let o = fx.run(&["install", "--agent", "pi"], "");
+    assert!(String::from_utf8_lossy(&o.stdout).contains("pi  unchanged"));
+
+    let (code, doc) = fx.json(&["uninstall", "--json"], "");
+    assert_eq!(code, 0);
+    assert!(doc["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["status"] == "removed"));
+    let pi: Value =
+        serde_json::from_str(&fs::read_to_string(r.join("pi/mcp.json")).unwrap()).unwrap();
+    assert_eq!(pi, json!({"mcpServers": {"radius": {"url": "https://r"}}}));
+    assert_eq!(
+        fs::read_to_string(r.join("codex/config.toml")).unwrap(),
+        "# mine\nmodel = \"gpt\"\n"
+    );
+    let (_, doc) = fx.json(&["status", "--json"], "");
+    assert!(doc["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["status"] == "missing"));
+
+    // The write commands took the state lock and backed up what they replaced.
+    assert!(fx.state().join("sync.lock").is_file());
+    assert!(fs::read_dir(fx.state().join("backups"))
+        .unwrap()
+        .next()
+        .is_some());
+}
+
+#[test]
+fn install_without_explicit_roots_registers_the_bare_command() {
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path().join("home");
+    fs::create_dir_all(home.join(".pi/agent")).unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_nativemem"));
+    c.env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("OPENCODE_CONFIG_DIR")
+        .env_remove("PI_CODING_AGENT_DIR")
+        .env_remove("NATIVEMEM_CLAUDE_HOME")
+        .env_remove("NATIVEMEM_CODEX_HOME")
+        .env_remove("NATIVEMEM_OPENCODE_HOME")
+        .env_remove("NATIVEMEM_PI_HOME")
+        .env_remove("NATIVEMEM_STATE_DIR")
+        .env("HOME", &home)
+        .args(["mcp", "install", "--agent", "pi", "--json"]);
+    let out = c.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["args"], json!(["mcp", "serve"]));
+    let pi: Value =
+        serde_json::from_str(&fs::read_to_string(home.join(".pi/agent/mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        pi["mcpServers"]["nativemem"]["args"],
+        json!(["mcp", "serve"])
+    );
+    // The other agents have no home here and are skipped without being created.
+    assert!(!home.join(".claude").exists() && !home.join(".codex").exists());
+}
+
+#[test]
+fn install_reports_a_file_that_does_not_parse_and_still_installs_the_rest() {
+    let fx = Fx::new();
+    let r = &fx.root;
+    write(&r.join("codex/config.toml"), "[broken\n");
+    let (code, doc) = fx.json(&["install", "--json"], "");
+    assert_eq!(code, 2, "{doc}");
+    let by = |agent: &str| {
+        doc["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["agent"] == agent)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by("codex")["status"], "error");
+    assert_eq!(by("codex")["code"], "parse");
+    assert_eq!(by("pi")["status"], "installed");
+    assert_eq!(
+        fs::read_to_string(r.join("codex/config.toml")).unwrap(),
+        "[broken\n"
+    );
+
+    let (code, doc) = fx.json(&["install", "--agent", "hermes", "--json"], "");
+    assert_eq!(code, 1);
+    assert_eq!(doc["code"], "unknown_agent", "{doc}");
 }

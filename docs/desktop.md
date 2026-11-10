@@ -246,22 +246,25 @@ document) that holds the real MCP servers and their secrets (`wiki/architecture/
 the error codes above, `exists` is returned when a server name is already taken; `invalid` covers a
 bad server spec, name or secret id; `not_found` covers an unknown server or secret. A secret value is
 never printed: `secret:<id>` references are shown, and a literal env or header value is shown as
-`"<literal>"`.
+`"<literal>"`. OAuth tokens are never printed either.
 
 `nativemem mcp list --json`
 ```json
 { "servers": [
     { "name": "github", "transport": "stdio", "enabled": true, "auth": "none",
-      "command": "npx", "args": ["-y", "pkg"], "cwd": "/Users/x/app",
+      "auth_state": "none", "command": "npx", "args": ["-y", "pkg"], "cwd": "/Users/x/app",
       "env": { "GITHUB_TOKEN": "secret:github-GITHUB_TOKEN", "LOG": "<literal>" },
       "headers": {}, "secrets": ["github-GITHUB_TOKEN"] },
     { "name": "docs", "transport": "http", "enabled": false, "auth": "oauth",
+      "auth_state": "needs_login",
       "url": "https://mcp.example.com/mcp", "args": [], "env": {},
-      "headers": { "Authorization": "secret:docs-Authorization" },
-      "secrets": ["docs-Authorization"] } ] }
+      "headers": { "X-Api-Key": "secret:docs-X-Api-Key" },
+      "secrets": ["docs-X-Api-Key"] } ] }
 ```
 `command` and `cwd` appear for stdio servers, `url` for http servers. `transport` is `stdio` or `http`,
-`auth` is `none` or `oauth` (stored only).
+`auth` is `none` or `oauth`. `auth_state` is `none` for a server without OAuth, `signed_in` when an
+`oauth` server has stored tokens and `needs_login` when it has none. An `oauth` server takes no
+`Authorization` header (`invalid`).
 
 `nativemem mcp add --json`, with one server as a JSON document on stdin:
 ```json
@@ -288,7 +291,41 @@ code `not_found`.
 { "ok": true, "tools": ["echo", "env_matches"], "error": null }
 ```
 `tools` are the server's own tool names. On a connection failure `ok` is false, `tools` is empty,
-`error` is a message without secret values, and the exit code is 2.
+`error` is a message without secret values or tokens, and the exit code is 2. An `oauth` server without a
+usable sign-in fails with `error` `Sign in again: nativemem mcp login <name>`.
+
+`nativemem mcp login <name> --json` signs in to an `oauth` server: it opens the authorization page in the
+browser (the URL is also printed to stderr), waits up to 5 minutes for the redirect to
+`http://127.0.0.1:<port>/callback`, stores the registered client and the tokens in the secret store, and
+prints `{ "signed_in": "<name>" }`. A server without `auth` `oauth` fails with code `invalid`; so does a
+sign-in that is refused, times out or cannot reach the server. It does not take the state lock.
+`nativemem mcp logout <name> --json` deletes the tokens, keeps the registered client and prints
+`{ "signed_out": "<name>", "was_signed_in": true }`.
+
+`nativemem mcp install --json`, `nativemem mcp uninstall --json` and `nativemem mcp status --json`, each
+with an optional `--agent claude|codex|opencode|pi`:
+```json
+{ "command": "/Users/x/.cargo/bin/nativemem",
+  "args": ["mcp", "serve", "--state-dir", "/Users/x/state"],
+  "agents": [
+    { "agent": "claude", "status": "installed", "path": "/Users/x/.claude.json", "warnings": [] },
+    { "agent": "codex", "status": "error", "path": "/Users/x/.codex/config.toml", "warnings": [],
+      "code": "parse", "message": "cannot parse /Users/x/.codex/config.toml: ..." },
+    { "agent": "opencode", "status": "not_installed", "path": null, "warnings": [] },
+    { "agent": "pi", "status": "installed", "path": "/Users/x/.pi/agent/mcp.json",
+      "warnings": ["the Pi extension /Users/x/.pi/agent/extensions/mcp.ts registers /mcp and replaces Pi's built-in MCP support: Pi does not read mcp.json while it is installed"] } ] }
+```
+`install` registers one entry named `nativemem` in each agent's own MCP configuration; `uninstall`
+removes it. `command` is the absolute path of the running binary and `args` start with `mcp serve`, then
+`--claude-home`, `--codex-home`, `--opencode-home`, `--pi-home` and `--state-dir` (absolute paths) for the
+roots that were given explicitly. `command` and `args` are present for `install` and `status`, not for
+`uninstall`. `status` per agent is `installed` or `unchanged` (install), `removed` or `absent`
+(uninstall), `registered`, `outdated` (the entry differs from what `install` would write now) or
+`missing` (status), `not_installed` (the agent's home directory does not exist; nothing is written) or
+`error` (with `code` and `message`: `parse` for a file that does not parse, which is never written, `busy`
+when the file kept changing, `io`). `path` is the file holding or receiving the entry. An unknown
+`--agent` fails with code `unknown_agent`. The exit code is 2 when any agent has `error`. `install` and
+`uninstall` take the state lock and back up each file they replace.
 
 `nativemem mcp import --json` (preview) and `nativemem mcp import --apply --json`
 ```json

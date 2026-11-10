@@ -19,7 +19,7 @@ Facts gathered read-only on a development machine running Pi 1.5.0 (session file
 | Instruction sections | Read and write in `AGENTS.md` | `agents_file.rs` through `sections.rs` |
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/pi.rs` |
 | Skills (global) | Read and write in `<pi home>/skills/`; symlinked skills are read through the link and replaced, never written through; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
-| MCP servers | Read by `mcp import`; never written | `crates/hub/src/import.rs` |
+| MCP servers | Read by `mcp import`; `mcp install` and `uninstall` write the one entry `mcpServers.nativemem` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
 ## Native locations
 
@@ -60,6 +60,11 @@ The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`
   file mtime is the original's.
 - The conversation read from a Pi file is the active branch: the path from the last entry to the
   root.
+- `mcp.json`: `mcp install` adds `mcpServers.nativemem` = `{command, args}` (the file is created when
+  missing) and `mcp uninstall` removes it; the rest of the file is kept with its indentation
+  (`crates/hub/src/register.rs`; test `pi_gets_the_entry_in_mcp_json`). When an extension that registers
+  `/mcp` is installed, `mcp install` and `mcp status` warn that Pi ignores `mcp.json`; the check reads
+  `<pi home>/extensions/*` one level deep and the `extensions` of `settings.json`.
 
 ## Sessions: listing and resume
 
@@ -93,7 +98,8 @@ The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`
 - **Provider replay blobs are opaque**: `thinkingSignature` and similar are bound to a provider;
   thinking blocks are dropped on conversion.
 - **Native MCP exists since 1.5.0** (stdio and streamable HTTP; SSE rejected). An installed extension
-  that registers `/mcp` replaces the built-in support and Pi stops reading `mcp.json`.
+  that registers `/mcp` replaces the built-in support and Pi stops reading `mcp.json`; the hub entry has
+  no effect while such an extension is installed (`pi_warnings` in `crates/hub/src/register.rs`).
 - **Reload**: `/reload` after edits made outside the session.
 
 ## Version detection and compatibility probes

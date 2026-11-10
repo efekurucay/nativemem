@@ -30,7 +30,7 @@ agent can act on this repo without re-deriving facts.
 | `wiki/architecture/context-quality.md` | The quality bar every page must meet, evidence levels |
 | `wiki/architecture/file-structure.md` | The real tree and what each crate, module and folder owns |
 | `wiki/architecture/overview.md` | Adapters, neutral model, ledger, three-way decision table, `supports`, writer revisions, policy per kind |
-| `wiki/architecture/hub.md` | The MCP hub: `hub.toml`, secrets, tool naming and forwarding, `nativemem mcp` commands, import of the agents' MCP entries |
+| `wiki/architecture/hub.md` | The MCP hub: `hub.toml`, secrets, tool naming and forwarding, OAuth sign-in, registration in the agents, `nativemem mcp` commands, import of the agents' MCP entries |
 | `wiki/architecture/ci.md` | GitHub Actions workflows, runners, what is best-effort and what runs only locally |
 | `wiki/architecture/compatibility.md` | Compatibility watch: probes, status, `compat.json`, gating, `doctor`, prompt, notifications |
 | `wiki/architecture/safety.md` | Backups, atomic writes, mass-delete guard, lock, no writes in git repos, secrets, test isolation, staged rollout |
@@ -49,7 +49,8 @@ agent can act on this repo without re-deriving facts.
 | `wiki/guides/release.md` | Cutting a release with `scripts/release.sh`: notes, artifacts, versioning, signing, rollback |
 | `wiki/guides/verify-with-real-agents.md` | Staged rollout recipe and rollback from `~/.nativemem/backups` |
 | `wiki/decisions/no-shared-store.md` | Decision: there is no shared store |
-| `wiki/decisions/native-flow-only.md` | Decision: only files and formats the agents already read |
+| `wiki/decisions/native-flow-only.md` | Decision: only files and formats the agents already read, plus one owned MCP entry |
+| `wiki/decisions/mcp-hub.md` | Decision: one MCP hub with one `nativemem` entry per agent instead of copying MCP configs |
 | `wiki/decisions/session-snapshot-policy.md` | Decision: sessions are snapshots, deletes never propagate |
 | `wiki/decisions/skills-mirror-without-shared-store.md` | Decision: skills are mirrored as real copies in each agent's own directory |
 | `wiki/decisions/instruction-sections-as-items.md` | Decision: one `## ` section is one item |

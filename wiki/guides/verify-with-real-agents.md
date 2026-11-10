@@ -21,7 +21,8 @@ does not run `nativemem` against a real home (`wiki/CLAUDE.md`). Paths below use
   --opencode-home /tmp/rehearsal/opencode --pi-home /tmp/rehearsal/pi --state-dir /tmp/rehearsal/state
   sync`. Copies can hold secrets; delete them afterwards.
 - [ ] Take a hash of files that must not change, for example `shasum` of `~/.codex/config.toml`, and
-  compare after each stage.
+  compare after each stage. `sync` never writes that file; only `nativemem mcp install` and `mcp uninstall`
+  do, and only the `nativemem` MCP entry (`wiki/decisions/mcp-hub.md`).
 
 ## Stages
 
@@ -53,7 +54,7 @@ does not run `nativemem` against a real home (`wiki/CLAUDE.md`). Paths below use
 ### Codex
 
 - [ ] `AGENTS.md` carries the instruction region and the routing block; text outside is unchanged.
-- [ ] `shasum` of `config.toml` and the hooks files is unchanged.
+- [ ] `shasum` of `config.toml` and the hooks files is unchanged (after `sync`; `mcp install` changes `config.toml` by one table).
 - [ ] `nativemem doctor --agent codex` passes, then apply a narrow slice (`--session-days 1`) with
   `NATIVEMEM_CODEX_SESSION_WRITES=on`. Run
   `codex resume` in the project folder and confirm the session is listed and opens, and that Codex
@@ -137,4 +138,4 @@ Every run that overwrites or deletes a file first copies it to
 
 ## Last updated
 
-2026-11-10
+2026-11-11

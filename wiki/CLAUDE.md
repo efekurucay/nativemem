@@ -38,7 +38,10 @@ All work in this repo: Rust core and CLI, the macOS app, tests, docs and this wi
 - **Nothing is written inside a git repository.** Only agent home directories and the state
   directory are written.
 - **Agent-owned state is never edited.** Codex SQLite files, `hooks.json`, `config.toml`, generated
-  `memories/MEMORY.md` and `memory_summary.md`, and any file that holds secrets.
+  `memories/MEMORY.md` and `memory_summary.md`, and any file that holds secrets. The one exception is
+  the `nativemem` MCP entry that `nativemem mcp install` adds to each agent's MCP config and
+  `mcp uninstall` removes, written only through `crates/hub/src/register.rs`
+  (`wiki/decisions/mcp-hub.md`).
 - **Secrets are never printed or stored.** The ledger holds ids, hashes and paths, not entry text.
   Do not paste file contents of agent homes into output, logs, tests or wiki pages.
 - **Every delete or overwrite backs up first** to `<state dir>/backups/<UTC stamp>/<agent>/<relative path>`.

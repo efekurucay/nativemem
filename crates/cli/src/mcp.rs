@@ -1,5 +1,5 @@
-//! `nativemem mcp`: the hub's server, its configuration, its secrets and the import of the
-//! agents' own MCP entries.
+//! `nativemem mcp`: the hub's server, its configuration, its secrets, the sign-in to OAuth servers,
+//! the import of the agents' own MCP entries and the hub's registration in the agents.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -11,11 +11,13 @@ use nativemem_core::fsx::BackupSession;
 use nativemem_hub::config::parse_spec_json;
 use nativemem_hub::connect::test_server;
 use nativemem_hub::import::{self, AgentRoots, Status};
+use nativemem_hub::oauth::{self, AuthState, LoginOptions};
+use nativemem_hub::register::{self, AgentOutcome, Backups, Entry};
 use nativemem_hub::secrets::validate_secret_id;
 use nativemem_hub::{FileStore, HubConfig, HubError, KeychainStore, SecretStore, ServerSpec};
 use serde_json::{json, Value};
 
-use crate::{print_json, Failure, Outcome, Roots, EXIT_ATTENTION};
+use crate::{print_json, ExplicitRoots, Failure, Outcome, Roots, AGENT_IDS, EXIT_ATTENTION};
 
 #[derive(clap::Args)]
 pub struct McpArgs {
@@ -91,6 +93,50 @@ pub enum McpCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Sign in to an OAuth server in the browser; the tokens go to the secret store
+    Login {
+        name: String,
+        /// Program that receives the authorization URL instead of the default browser (tests)
+        #[arg(long, hide = true)]
+        browser: Option<PathBuf>,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete an OAuth server's tokens; the registered client stays
+    Logout {
+        name: String,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Register the hub in the agents' own MCP configuration (one entry named "nativemem")
+    Install {
+        /// Only this agent: claude, codex, opencode or pi
+        #[arg(long)]
+        agent: Option<String>,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove the "nativemem" entry from the agents' MCP configuration
+    Uninstall {
+        /// Only this agent: claude, codex, opencode or pi
+        #[arg(long)]
+        agent: Option<String>,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show whether each agent has the "nativemem" entry that `install` would write now
+    Status {
+        /// Only this agent: claude, codex, opencode or pi
+        #[arg(long)]
+        agent: Option<String>,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
     /// Read the agents' MCP servers; with --apply, add them to the hub
     Import {
         #[arg(long)]
@@ -102,12 +148,16 @@ pub enum McpCommand {
 }
 
 impl McpArgs {
-    /// Commands that change `hub.toml` or the secret store run under the state lock.
+    /// Commands that change `hub.toml` or the secret store run under the state lock. Login waits for
+    /// the browser, so it and logout hold only the token lock `hub-oauth.lock`.
     pub fn writes(&self) -> bool {
         match &self.command {
             McpCommand::Serve
             | McpCommand::List { .. }
             | McpCommand::Test { .. }
+            | McpCommand::Login { .. }
+            | McpCommand::Logout { .. }
+            | McpCommand::Status { .. }
             | McpCommand::Import { apply: false, .. } => false,
             McpCommand::Add { .. }
             | McpCommand::Edit { .. }
@@ -116,6 +166,8 @@ impl McpArgs {
             | McpCommand::Disable { .. }
             | McpCommand::SetSecret { .. }
             | McpCommand::DeleteSecret { .. }
+            | McpCommand::Install { .. }
+            | McpCommand::Uninstall { .. }
             | McpCommand::Import { apply: true, .. } => true,
         }
     }
@@ -132,6 +184,11 @@ impl McpArgs {
             | McpCommand::SetSecret { json, .. }
             | McpCommand::DeleteSecret { json, .. }
             | McpCommand::Test { json, .. }
+            | McpCommand::Login { json, .. }
+            | McpCommand::Logout { json, .. }
+            | McpCommand::Install { json, .. }
+            | McpCommand::Uninstall { json, .. }
+            | McpCommand::Status { json, .. }
             | McpCommand::Import { json, .. } => *json,
         }
     }
@@ -168,12 +225,13 @@ fn masked(values: &std::collections::BTreeMap<String, String>) -> Value {
         .into()
 }
 
-fn server_json(name: &str, spec: &ServerSpec) -> Value {
+fn server_json(name: &str, spec: &ServerSpec, auth_state: AuthState) -> Value {
     let mut doc = json!({
         "name": name,
         "transport": spec.transport.as_str(),
         "enabled": spec.enabled,
         "auth": spec.auth.as_str(),
+        "auth_state": auth_state.as_str(),
         "args": spec.args,
         "env": masked(&spec.env),
         "headers": masked(&spec.headers),
@@ -191,31 +249,38 @@ fn server_json(name: &str, spec: &ServerSpec) -> Value {
     doc
 }
 
-fn list(config: &HubConfig, json: bool) {
+fn list(config: &HubConfig, store: &dyn SecretStore, json: bool) -> Outcome<()> {
+    let mut states = Vec::new();
+    for (name, spec) in &config.servers {
+        states.push(oauth::auth_state(name, spec, store)?);
+    }
     if json {
         let servers: Vec<Value> = config
             .servers
             .iter()
-            .map(|(n, s)| server_json(n, s))
+            .zip(&states)
+            .map(|((n, s), state)| server_json(n, s, *state))
             .collect();
         print_json(&json!({ "servers": servers }));
-        return;
+        return Ok(());
     }
     if config.servers.is_empty() {
         println!("no servers configured");
     }
-    for (name, spec) in &config.servers {
+    for ((name, spec), state) in config.servers.iter().zip(&states) {
         println!(
-            "{name}  {}  {}  auth {}  secrets: {}",
+            "{name}  {}  {}  auth {} ({})  secrets: {}",
             spec.transport.as_str(),
             if spec.enabled { "enabled" } else { "disabled" },
             spec.auth.as_str(),
+            state.as_str(),
             match spec.secret_ids().join(", ") {
                 s if s.is_empty() => "none".to_string(),
                 s => s,
             }
         );
     }
+    Ok(())
 }
 
 fn say(json: bool, doc: Value, line: String) {
@@ -226,7 +291,12 @@ fn say(json: bool, doc: Value, line: String) {
     }
 }
 
-pub fn run(args: &McpArgs, roots: &Roots, backups: &BackupSession) -> Outcome<u8> {
+pub fn run(
+    args: &McpArgs,
+    roots: &Roots,
+    explicit: &ExplicitRoots,
+    backups: &BackupSession,
+) -> Outcome<u8> {
     let store: Arc<dyn SecretStore> = match &args.secrets_dir {
         Some(dir) => Arc::new(FileStore::new(dir)),
         None => Arc::new(KeychainStore),
@@ -235,9 +305,9 @@ pub fn run(args: &McpArgs, roots: &Roots, backups: &BackupSession) -> Outcome<u8
     let state = &roots.state;
     match &args.command {
         McpCommand::Serve => {
-            nativemem_hub::serve::run_stdio(HubConfig::load(state)?, store)?;
+            nativemem_hub::serve::run_stdio(HubConfig::load(state)?, store, state.clone())?;
         }
-        McpCommand::List { .. } => list(&HubConfig::load(state)?, json),
+        McpCommand::List { .. } => list(&HubConfig::load(state)?, &*store, json)?,
         McpCommand::Add { .. } => {
             let (name, spec) = parse_spec_json(&read_stdin()?)?;
             let name = name.ok_or_else(|| {
@@ -309,7 +379,7 @@ pub fn run(args: &McpArgs, roots: &Roots, backups: &BackupSession) -> Outcome<u8
         }
         McpCommand::Test { name, .. } => {
             let config = HubConfig::load(state)?;
-            let report = test_server(config.server(name)?, store)?;
+            let report = test_server(name, config.server(name)?, store, state)?;
             say(
                 json,
                 json!({ "ok": report.ok, "tools": report.tools, "error": report.error }),
@@ -324,11 +394,153 @@ pub fn run(args: &McpArgs, roots: &Roots, backups: &BackupSession) -> Outcome<u8
             );
             return Ok(if report.ok { 0 } else { EXIT_ATTENTION });
         }
+        McpCommand::Login { name, browser, .. } => {
+            let config = HubConfig::load(state)?;
+            let url = |u: &str| {
+                eprintln!("If the browser did not open, visit: {u}");
+                oauth::open_browser(u, browser.as_deref());
+            };
+            oauth::login(
+                name,
+                config.server(name)?,
+                store,
+                state,
+                &LoginOptions {
+                    timeout: oauth::LOGIN_TIMEOUT,
+                    open: &url,
+                },
+            )?;
+            say(
+                json,
+                json!({ "signed_in": name }),
+                format!("signed in to {name}"),
+            );
+        }
+        McpCommand::Logout { name, .. } => {
+            let config = HubConfig::load(state)?;
+            let spec = config.server(name)?;
+            if spec.auth != nativemem_hub::Auth::Oauth {
+                return Err(HubError::Invalid(format!(
+                    "server {name:?} does not use auth = \"oauth\""
+                ))
+                .into());
+            }
+            let was_signed_in = oauth::logout(name, &*store, state)?;
+            say(
+                json,
+                json!({ "signed_out": name, "was_signed_in": was_signed_in }),
+                format!("signed out of {name}"),
+            );
+        }
+        McpCommand::Install { agent, .. } => {
+            let entry = registration(explicit)?;
+            let outcomes = register::install(
+                &agent_roots(roots),
+                agent_filter(agent)?,
+                &entry,
+                &Backups {
+                    state,
+                    session: backups,
+                },
+            )?;
+            return Ok(print_registration(Some(&entry), &outcomes, json));
+        }
+        McpCommand::Uninstall { agent, .. } => {
+            let outcomes = register::uninstall(
+                &agent_roots(roots),
+                agent_filter(agent)?,
+                &Backups {
+                    state,
+                    session: backups,
+                },
+            )?;
+            return Ok(print_registration(None, &outcomes, json));
+        }
+        McpCommand::Status { agent, .. } => {
+            let entry = registration(explicit)?;
+            let outcomes = register::status(&agent_roots(roots), agent_filter(agent)?, &entry)?;
+            return Ok(print_registration(Some(&entry), &outcomes, json));
+        }
         McpCommand::Import { apply, .. } => {
             return run_import(roots, backups, &*store, *apply, json)
         }
     }
     Ok(0)
+}
+
+/// The `--agent` value, checked against the agents the CLI knows.
+fn agent_filter(agent: &Option<String>) -> Outcome<Option<&str>> {
+    match agent.as_deref() {
+        Some(a) if !AGENT_IDS.contains(&a) => Err(Failure::UnknownAgent(a.to_string())),
+        other => Ok(other),
+    }
+}
+
+fn agent_roots(roots: &Roots) -> AgentRoots<'_> {
+    AgentRoots {
+        claude: &roots.claude,
+        codex: &roots.codex,
+        opencode: &roots.opencode,
+        pi: &roots.pi,
+    }
+}
+
+/// What the agents run to start the hub: this binary, resolved through symlinks, and `mcp serve`
+/// with the roots the user chose explicitly.
+fn registration(explicit: &ExplicitRoots) -> Outcome<Entry> {
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(Error::from)?;
+    let mut args = vec!["mcp".to_string(), "serve".to_string()];
+    args.extend(explicit.args()?);
+    Ok(Entry {
+        command: exe.display().to_string(),
+        args,
+    })
+}
+
+fn outcome_json(o: &AgentOutcome) -> Value {
+    let mut doc = json!({
+        "agent": o.agent,
+        "status": o.status,
+        "path": o.path.as_ref().map(|p| p.display().to_string()),
+        "warnings": o.warnings,
+    });
+    if let Some((code, message)) = &o.error {
+        doc["code"] = json!(code);
+        doc["message"] = json!(message);
+    }
+    doc
+}
+
+/// Prints the per-agent results; exit code 2 when an agent could not be handled.
+fn print_registration(entry: Option<&Entry>, outcomes: &[AgentOutcome], json: bool) -> u8 {
+    if json {
+        let mut doc = json!({ "agents": outcomes.iter().map(outcome_json).collect::<Vec<_>>() });
+        if let Some(entry) = entry {
+            doc["command"] = json!(entry.command);
+            doc["args"] = json!(entry.args);
+        }
+        print_json(&doc);
+    } else {
+        for o in outcomes {
+            match &o.path {
+                Some(path) => println!("{}  {}  {}", o.agent, o.status, path.display()),
+                None => println!("{}  {}", o.agent, o.status),
+            }
+            if let Some((code, message)) = &o.error {
+                println!("  error ({code}): {message}");
+            }
+            for w in &o.warnings {
+                println!("  warning: {w}");
+            }
+        }
+    }
+    if outcomes.iter().any(|o| o.error.is_some()) {
+        EXIT_ATTENTION
+    } else {
+        0
+    }
 }
 
 fn run_import(

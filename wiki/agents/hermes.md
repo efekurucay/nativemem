@@ -20,7 +20,7 @@ Hermes Agent 0.15.1 (state schema version 14); the agent itself was run at most 
 | Project memory | Not implemented |
 | Instruction sections | Not implemented |
 | Sessions | Not implemented (listed under "Not yet" in `README.md`) |
-| MCP servers, skills | Not implemented |
+| MCP servers, skills | Not implemented; `mcp install` does not register the hub in Hermes |
 
 ## Native locations
 
@@ -184,4 +184,4 @@ database records its layout in the `schema_version` table (14 on the researched 
 
 ## Last updated
 
-2026-11-10
+2026-11-11

@@ -251,6 +251,37 @@ fn key_json(key: &ItemKey) -> Value {
     json!({ "origin": key.origin.as_str(), "native_id": key.native_id })
 }
 
+/// Roots the user chose explicitly, by flag or environment variable. A process that runs without
+/// the user's shell environment (the scheduled job, an agent starting the hub) gets these as
+/// arguments.
+struct ExplicitRoots {
+    claude: Option<PathBuf>,
+    codex: Option<PathBuf>,
+    opencode: Option<PathBuf>,
+    pi: Option<PathBuf>,
+    state: Option<PathBuf>,
+}
+
+impl ExplicitRoots {
+    /// The root flags with absolute paths, for the roots that were given.
+    fn args(&self) -> Result<Vec<String>> {
+        let mut args = Vec::new();
+        for (flag, value) in [
+            ("--claude-home", &self.claude),
+            ("--codex-home", &self.codex),
+            ("--opencode-home", &self.opencode),
+            ("--pi-home", &self.pi),
+            ("--state-dir", &self.state),
+        ] {
+            if let Some(v) = value {
+                args.push(flag.to_string());
+                args.push(std::path::absolute(v)?.display().to_string());
+            }
+        }
+        Ok(args)
+    }
+}
+
 /// Below the user's home; Codex and Pi read skills from it besides their own directories.
 const SHARED_SKILLS: &str = ".agents/skills";
 
@@ -874,9 +905,8 @@ fn sync(
     Ok(plan.needs_attention())
 }
 
-#[cfg(target_os = "macos")]
-fn run_schedule(cli: &Cli, args: &ScheduleArgs, roots: &Roots) -> Outcome<()> {
-    let explicit = schedule::ExplicitRoots {
+fn explicit_roots(cli: &Cli) -> ExplicitRoots {
+    ExplicitRoots {
         claude: cli
             .claude_home
             .clone()
@@ -891,8 +921,12 @@ fn run_schedule(cli: &Cli, args: &ScheduleArgs, roots: &Roots) -> Outcome<()> {
             .clone()
             .or_else(|| env_path("PI_CODING_AGENT_DIR")),
         state: cli.state_dir.clone(),
-    };
-    schedule::run(args, roots, &explicit)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_schedule(cli: &Cli, args: &ScheduleArgs, roots: &Roots) -> Outcome<()> {
+    schedule::run(args, roots, &explicit_roots(cli))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1003,7 +1037,7 @@ fn run(cli: &Cli) -> Outcome<u8> {
         Command::Skill(SkillArgs {
             command: SkillCommand::Show { agent, name, json },
         }) => skill_show(&agents, agent, name, *json).map(|()| 0),
-        Command::Mcp(args) => mcp::run(args, &roots, &backups),
+        Command::Mcp(args) => mcp::run(args, &roots, &explicit_roots(cli), &backups),
         Command::Schedule(args) => run_schedule(cli, args, &roots).map(|()| 0),
     }
 }

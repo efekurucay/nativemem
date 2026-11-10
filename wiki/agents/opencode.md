@@ -20,7 +20,7 @@ sections and project memory are implemented. Sessions are not: no session adapte
 | Instruction sections | Read and write in `AGENTS.md` | `agents_file.rs` through `sections.rs` |
 | Sessions | Not implemented; `supports(Session, ...)` is false | |
 | Skills (global) | Read and write in `<opencode home>/skills/` | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
-| MCP servers | Read by `mcp import` (`mcp.<name>` of `opencode.json` and `opencode.jsonc`); never written | `crates/hub/src/import.rs` |
+| MCP servers | Read by `mcp import` (`mcp.<name>` of `opencode.json` and `opencode.jsonc`); `mcp install` and `uninstall` write the one entry `mcp.nativemem` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
 ## Native locations
 
@@ -68,7 +68,14 @@ else `~/.config/opencode`.
 - Reads `AGENTS.md` sections and the replica store.
 - Writes instruction replicas in the region at the end of `AGENTS.md`, the replica memory store under
   `nativemem/memory/`, and the routing block in `AGENTS.md`.
-- Never touches `opencode.json`, `opencode.jsonc`, the database or the data directory.
+- `opencode.json` / `opencode.jsonc`: `mcp install` adds `mcp.nativemem` = `{type: "local", command: [binary,
+  "mcp", "serve", ...], enabled: true}` (under `mcp.servers` when the file keeps its servers there) and
+  `mcp uninstall` removes it. The file that already holds the entry is used, else `opencode.json` when it
+  exists, else `opencode.jsonc` when it exists, else `opencode.json` is created. The edit is a concrete
+  syntax tree edit (`jsonc-parser`): comments, trailing commas and formatting stay
+  (`crates/hub/src/register.rs`; tests `opencode_gets_the_entry_with_comments_and_formatting_intact`,
+  `opencode_follows_the_servers_layout_and_the_file_that_exists`).
+- Never touches the database or the data directory.
 
 ## Sessions: listing and resume
 
@@ -92,8 +99,9 @@ else `~/.config/opencode`.
   (OBSERVED in binary strings), so the routing block's absolute-path reads work. `~` expansion in the
   `read` tool is `[UNVERIFIED]`, so routing lines use absolute paths.
 - **MCP key layout is ambiguous**: the file uses `mcp.<name>` while the CLI's `mcp add` writes
-  `mcp.servers.<name>` in 2.2.6. Confirm with `opencode mcp list` after a first write
-  (`[UNVERIFIED]`).
+  `mcp.servers.<name>` in 2.2.6. `mcp install` follows the layout the file already has (`mcp.servers` when
+  that object exists and holds no server definition itself, else `mcp`). Confirm with `opencode mcp list`
+  after a first write (`[UNVERIFIED]`).
 - **Schema moves fast**: many database migrations in six months; a session writer must be version
   pinned and re-verified on every upgrade.
 

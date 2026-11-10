@@ -6,6 +6,8 @@ pub mod config;
 pub mod connect;
 pub mod error;
 pub mod import;
+pub mod oauth;
+pub mod register;
 pub mod secrets;
 pub mod serve;
 

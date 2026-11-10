@@ -19,7 +19,7 @@ write safety in `wiki/architecture/safety.md`.
 | Ledger | SQLite file `<state dir>/ledger.db` | `crates/core/src/ledger.rs` |
 | Compatibility watch | Probes per adapter, `compat.json`, status and prompt; pauses the kinds of failing checks | `crates/core/src/compat.rs`, `wiki/architecture/compatibility.md` |
 | Engine | `plan` is pure; `apply` executes and updates the ledger. It knows nothing about formats | `crates/core/src/engine.rs` |
-| MCP hub | One local MCP server (`nativemem mcp serve`) that holds the real MCP servers and their secrets and exposes their tools. Not a sync kind: no adapter, no engine, no ledger | `crates/hub/`, `wiki/architecture/hub.md` |
+| MCP hub | One local MCP server (`nativemem mcp serve`) that holds the real MCP servers and their secrets, signs in to OAuth servers once, and exposes their tools. `nativemem mcp install` registers it in each agent as one `nativemem` entry. Not a sync kind: no adapter, no engine, no ledger | `crates/hub/`, `wiki/architecture/hub.md`, `wiki/decisions/mcp-hub.md` |
 | CLI | Resolves roots, takes the lock, prints text or one JSON document | `crates/cli/src/main.rs`, `crates/cli/src/mcp.rs` |
 | Desktop app | A window onto the CLI; holds no sync logic | `docs/desktop.md`, `apps/macos/Sources/NativememKit/NativememCLI.swift` |
 
@@ -132,7 +132,7 @@ session format changes. Tests: `unmodified_replica_with_an_older_writer_revision
 ## CLI
 
 Commands: `status`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
-`delete`, `edit`, `skill show`, `mcp serve|list|add|edit|remove|enable|disable|set-secret|delete-secret|test|import`
+`delete`, `edit`, `skill show`, `mcp serve|list|add|edit|remove|enable|disable|set-secret|delete-secret|test|login|logout|install|uninstall|status|import`
 (`wiki/architecture/hub.md`), `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
 `--opencode-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
 `NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`), `--session-days`

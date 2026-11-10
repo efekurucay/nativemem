@@ -20,7 +20,7 @@ by versions 2.1.247 to 2.1.322; 376 top-level session files across 63 project di
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/claude_sessions.rs` |
 | Global-scope memory | Not supported (`supports` is false) | |
 | Skills (global) | Read (originals) and write (replicas, edits, deletes) | `crates/core/src/adapters/skills.rs`, `claude.rs` |
-| MCP servers | Read by `mcp import` (global `mcpServers` only); never written | `crates/hub/src/import.rs` |
+| MCP servers | Read by `mcp import` (global `mcpServers` only); `mcp install` and `uninstall` write the one entry `mcpServers.nativemem` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
 ## Native locations
 
@@ -58,11 +58,14 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
   `CLAUDE.md`, and session replicas (marker key `nativemem_origin` on every line).
 - `mcp import` reads the global `mcpServers` of `.claude.json`: `<claude home>/../.claude.json` when the home
   is named `.claude`, else `<claude home>/.claude.json` (`claude_config_path` in
-  `crates/hub/src/import.rs`). Read-only; the file is never written.
+  `crates/hub/src/import.rs`). The import only reads the file. `mcp install` adds `mcpServers.nativemem` =
+  `{type: "stdio", command, args, env: {}}` to the same file and `mcp uninstall` removes it
+  (`crates/hub/src/register.rs`; `wiki/architecture/hub.md`, "Registration"). The rest of the file is kept
+  byte for byte, with its indentation and trailing newline.
 - Creates a project directory with the encoded name plus a helper file `nativemem.jsonl` holding the
   `cwd` when no directory exists for a project (`wiki/kinds/memory.md`).
 - Reads and writes whole skill directories below `skills/` (`wiki/kinds/skills.md`).
-- Never touches `~/.claude.json`, credentials or plugin directories.
+- Never touches credentials or plugin directories, and writes `~/.claude.json` only for the `nativemem` MCP entry.
 
 ## Sessions: listing and resume
 
@@ -101,8 +104,10 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
 - **Claude prunes transcripts.** An original can vanish; session deletes therefore never propagate
   (`wiki/decisions/session-snapshot-policy.md`).
 - **`~/.claude.json` is rewritten constantly** by Claude (write-temp-then-rename, rolling backups).
-  It is the one agent file with real concurrent-writer contention. MCP sync, if ever added, must be an
-  optimistic read-modify-write with a short critical section.
+  It is the one agent file with real concurrent-writer contention. `mcp install` edits it as an optimistic
+  read-modify-write: the file is read again just before the atomic rename and the edit starts over, up to 3
+  times, when it changed; after that the agent fails with code `busy` and nothing is written (test
+  `claude_update_starts_over_when_the_file_changes_under_it`).
 - **`~/.claude/.mcp.json` is not Claude's global MCP file.** Claude reads `.mcp.json` only from the
   session's project directory.
 - **Thinking blocks carry opaque signatures** and are dropped on conversion.
@@ -149,6 +154,8 @@ carries an extra key under `metadata`, which is why those keys are not checked.
 | Claude deletes transcripts by mtime after `cleanupPeriodDays` (default 30) | OBSERVED (the tombstones the engine recorded for replicas of old sessions); the meaning of `0` is `[UNVERIFIED]` | real-data report; tests `a_configured_retention_is_respected_and_needs_no_notice` |
 | MCP server schema, `~/.claude.json` layout | OBSERVED | read-only file and binary-string inspection |
 | Claude Code hot-reloads edits to `mcpServers` | `[UNVERIFIED]` | assume a restart is needed |
+| The `nativemem` entry is written next to the other servers with their bytes kept | VERIFIED | `crates/hub/tests/register.rs` (`claude_gets_the_entry_and_everything_else_stays_byte_for_byte`) |
+| Claude starts the registered hub from that entry | `[UNVERIFIED]` | needs a staged check with `claude mcp list` |
 
 ## Source anchors
 

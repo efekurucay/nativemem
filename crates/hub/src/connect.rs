@@ -1,15 +1,18 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, Tool};
 use rmcp::service::RunningService;
+use rmcp::transport::auth::AuthClient;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 
-use crate::config::{ServerSpec, Transport};
+use crate::config::{Auth, ServerSpec, Transport};
 use crate::error::{HubError, Result};
+use crate::oauth;
 use crate::secrets::{resolve_value, SecretStore};
 
 /// How long one upstream gets to connect and list its tools.
@@ -17,19 +20,38 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub type Client = RunningService<RoleClient, ClientConfig>;
 
-/// A live upstream: the session and the tools it lists.
+/// A live upstream: the session and the tools it lists. `auth` is the token source of an OAuth
+/// server.
 pub struct Connected {
     pub client: Client,
     pub tools: Vec<Tool>,
+    pub auth: Option<AuthClient<reqwest::Client>>,
+}
+
+/// Why an upstream is not connected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectError {
+    /// The OAuth server has no usable sign-in: `nativemem mcp login <name>` fixes it.
+    NeedsLogin(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectError::NeedsLogin(name) => f.write_str(&oauth::sign_in_message(name)),
+            ConnectError::Failed(message) => f.write_str(message),
+        }
+    }
 }
 
 /// A spec with every `secret:<id>` replaced, and the secret values that went in.
-struct Resolved {
-    spec: ServerSpec,
-    secrets: Vec<String>,
+pub(crate) struct Resolved {
+    pub(crate) spec: ServerSpec,
+    pub(crate) secrets: Vec<String>,
 }
 
-fn resolve(spec: &ServerSpec, store: &dyn SecretStore) -> Result<Resolved> {
+pub(crate) fn resolve(spec: &ServerSpec, store: &dyn SecretStore) -> Result<Resolved> {
     let mut secrets = Vec::new();
     let mut one = |v: &str| -> Result<String> {
         let (value, secret) = resolve_value(store, v)?;
@@ -73,7 +95,16 @@ fn invalid(message: impl Into<String>) -> HubError {
     HubError::Invalid(message.into())
 }
 
-async fn open(spec: &ServerSpec) -> std::result::Result<Client, String> {
+/// An open session and, for an OAuth server, the token source behind it.
+type Opened = (Client, Option<AuthClient<reqwest::Client>>);
+
+async fn open(
+    name: &str,
+    spec: &ServerSpec,
+    store: Arc<dyn SecretStore>,
+    state: &Path,
+) -> std::result::Result<Opened, ConnectError> {
+    let failed = |m: String| ConnectError::Failed(m);
     match spec.transport {
         Transport::Stdio => {
             let command = spec.command.as_deref().unwrap_or_default();
@@ -83,11 +114,12 @@ async fn open(spec: &ServerSpec) -> std::result::Result<Client, String> {
                 cmd.current_dir(cwd);
             }
             let transport = TokioChildProcess::new(cmd)
-                .map_err(|e| format!("cannot start {command:?}: {e}"))?;
-            client_config()
+                .map_err(|e| failed(format!("cannot start {command:?}: {e}")))?;
+            let client = client_config()
                 .serve(transport)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| failed(e.to_string()))?;
+            Ok((client, None))
         }
         Transport::Http => {
             let mut config =
@@ -100,53 +132,96 @@ async fn open(spec: &ServerSpec) -> std::result::Result<Client, String> {
                     let token = v
                         .strip_prefix("Bearer ")
                         .or_else(|| v.strip_prefix("bearer "))
-                        .ok_or("the Authorization header must be a Bearer token")?;
+                        .ok_or_else(|| {
+                            failed("the Authorization header must be a Bearer token".into())
+                        })?;
                     config = config.auth_header(token.to_string());
                     continue;
                 }
-                let name = http::HeaderName::from_bytes(k.as_bytes())
-                    .map_err(|_| format!("invalid header name {k:?}"))?;
+                let header = http::HeaderName::from_bytes(k.as_bytes())
+                    .map_err(|_| failed(format!("invalid header name {k:?}")))?;
                 let value = http::HeaderValue::from_str(v)
-                    .map_err(|_| format!("invalid value for header {k:?}"))?;
-                headers.insert(name, value);
+                    .map_err(|_| failed(format!("invalid value for header {k:?}")))?;
+                headers.insert(header, value);
             }
-            let transport =
-                StreamableHttpClientTransport::from_config(config.custom_headers(headers));
-            client_config()
+            let config = config.custom_headers(headers);
+            if spec.auth == Auth::Oauth {
+                let url = spec.url.clone().unwrap_or_default();
+                let auth = oauth::authorized_client(name, &url, store, state)
+                    .await
+                    .map_err(|e| match e {
+                        None => ConnectError::NeedsLogin(name.to_string()),
+                        Some(message) => failed(message),
+                    })?;
+                let transport = StreamableHttpClientTransport::with_client(auth.clone(), config);
+                let client = client_config()
+                    .serve(transport)
+                    .await
+                    .map_err(|e| failed(e.to_string()))?;
+                return Ok((client, Some(auth)));
+            }
+            let transport = StreamableHttpClientTransport::from_config(config);
+            let client = client_config()
                 .serve(transport)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| failed(e.to_string()))?;
+            Ok((client, None))
         }
     }
 }
 
-/// Connect to one upstream and list its tools. The error text never holds a secret value.
+/// Connect to one upstream and list its tools. The error text never holds a secret value or a token.
 pub async fn connect(
+    name: &str,
     spec: &ServerSpec,
     store: Arc<dyn SecretStore>,
-) -> std::result::Result<Connected, String> {
-    let spec = spec.clone();
-    let resolved = tokio::task::spawn_blocking(move || resolve(&spec, store.as_ref()))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    state: &Path,
+) -> std::result::Result<Connected, ConnectError> {
+    let failed = |m: String| ConnectError::Failed(m);
+    let resolved = {
+        let (spec, store) = (spec.clone(), store.clone());
+        tokio::task::spawn_blocking(move || resolve(&spec, store.as_ref()))
+            .await
+            .map_err(|e| failed(e.to_string()))?
+            .map_err(|e| failed(e.to_string()))?
+    };
+    let mut secrets = resolved.secrets.clone();
+    if spec.auth == Auth::Oauth {
+        let (name, store) = (name.to_string(), store.clone());
+        secrets.extend(
+            tokio::task::spawn_blocking(move || oauth::token_values(&name, store.as_ref()))
+                .await
+                .unwrap_or_default(),
+        );
+    }
     let work = async {
-        let client = open(&resolved.spec).await?;
+        let (client, auth) = open(name, &resolved.spec, store, state).await?;
         match client.peer().list_all_tools().await {
-            Ok(tools) => Ok(Connected { client, tools }),
+            Ok(tools) => Ok(Connected {
+                client,
+                tools,
+                auth,
+            }),
             Err(e) => {
                 let _ = client.cancel().await;
-                Err(format!("cannot list tools: {e}"))
+                Err(failed(format!("cannot list tools: {e}")))
             }
         }
     };
-    match tokio::time::timeout(CONNECT_TIMEOUT, work).await {
-        Ok(result) => result.map_err(|m| scrub(m, &resolved.secrets)),
-        Err(_) => Err(format!(
+    let result = match tokio::time::timeout(CONNECT_TIMEOUT, work).await {
+        Ok(result) => result,
+        Err(_) => Err(failed(format!(
             "no answer within {} seconds",
             CONNECT_TIMEOUT.as_secs()
-        )),
-    }
+        ))),
+    };
+    result.map_err(|e| match e {
+        ConnectError::Failed(m) if spec.auth == Auth::Oauth && oauth::is_auth_required(&m) => {
+            ConnectError::NeedsLogin(name.to_string())
+        }
+        ConnectError::Failed(m) => ConnectError::Failed(scrub(m, &secrets)),
+        needs_login => needs_login,
+    })
 }
 
 /// What `mcp test` reports for one server.
@@ -158,13 +233,18 @@ pub struct TestReport {
 }
 
 /// Connect, list the tools, disconnect.
-pub fn test_server(spec: &ServerSpec, store: Arc<dyn SecretStore>) -> Result<TestReport> {
+pub fn test_server(
+    name: &str,
+    spec: &ServerSpec,
+    store: Arc<dyn SecretStore>,
+    state: &Path,
+) -> Result<TestReport> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| invalid(format!("cannot start the async runtime: {e}")))?;
     Ok(runtime.block_on(async {
-        match connect(spec, store).await {
+        match connect(name, spec, store, state).await {
             Ok(c) => {
                 let tools = c.tools.iter().map(|t| t.name.to_string()).collect();
                 let _ = c.client.cancel().await;
@@ -177,7 +257,7 @@ pub fn test_server(spec: &ServerSpec, store: Arc<dyn SecretStore>) -> Result<Tes
             Err(error) => TestReport {
                 ok: false,
                 tools: Vec::new(),
-                error: Some(error),
+                error: Some(error.to_string()),
             },
         }
     }))

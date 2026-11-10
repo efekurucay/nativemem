@@ -22,10 +22,12 @@ fn fake() -> ServerSpec {
 async fn hub(
     config: HubConfig,
     store: Arc<dyn SecretStore>,
+    state: &Path,
 ) -> RunningService<RoleClient, ClientConfig> {
+    let state = state.to_path_buf();
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
-        if let Ok(server) = HubServer::new(config, store).serve(server_io).await {
+        if let Ok(server) = HubServer::new(config, store, state).serve(server_io).await {
             let _ = server.waiting().await;
         }
     });
@@ -69,7 +71,7 @@ async fn tools_are_prefixed_and_calls_are_forwarded_unchanged() {
     let t = tempfile::tempdir().unwrap();
     let mut config = HubConfig::default();
     config.servers.insert("fake".into(), fake());
-    let client = hub(config, store(t.path())).await;
+    let client = hub(config, store(t.path()), t.path()).await;
 
     let tools = client.peer().list_all_tools().await.unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
@@ -106,7 +108,7 @@ async fn failing_and_disabled_upstreams_are_reported_and_left_out() {
     let mut off = fake();
     off.enabled = false;
     config.servers.insert("off".into(), off);
-    let client = hub(config, store(t.path())).await;
+    let client = hub(config, store(t.path()), t.path()).await;
 
     let tools = client.peer().list_all_tools().await.unwrap();
     assert!(tools.iter().all(|t| {
@@ -151,7 +153,7 @@ async fn secret_references_reach_the_child_and_never_the_output() {
     config
         .servers
         .insert("bad".into(), with_missing.servers["bad"].clone());
-    let client = hub(config, secrets).await;
+    let client = hub(config, secrets, t.path()).await;
 
     assert_eq!(
         call_text(
@@ -260,7 +262,7 @@ async fn http_upstream_receives_resolved_headers() {
         .insert("Authorization".into(), "secret:api".into());
     spec.headers
         .insert("X-Api-Key".into(), "secret:custom".into());
-    let connected = nativemem_hub::connect::connect(&spec, secrets)
+    let connected = nativemem_hub::connect::connect("raw", &spec, secrets, t.path())
         .await
         .unwrap_or_else(|e| panic!("connect failed: {e}"));
     let request = seen.lock().unwrap().to_ascii_lowercase();

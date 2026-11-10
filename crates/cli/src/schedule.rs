@@ -9,19 +9,10 @@ use nativemem_core::error::Error;
 use nativemem_core::fsx::atomic_write;
 use serde_json::json;
 
-use crate::{print_json, Failure, Outcome, Roots, ScheduleArgs, ScheduleCommand};
+use crate::{print_json, ExplicitRoots, Failure, Outcome, Roots, ScheduleArgs, ScheduleCommand};
 
 const LABEL: &str = "dev.nativemem.sync";
 const LOG_TAIL_LINES: usize = 5;
-
-/// Roots the user chose explicitly; the job has no shell environment, so these are baked in.
-pub struct ExplicitRoots {
-    pub claude: Option<PathBuf>,
-    pub codex: Option<PathBuf>,
-    pub opencode: Option<PathBuf>,
-    pub pi: Option<PathBuf>,
-    pub state: Option<PathBuf>,
-}
 
 struct Paths {
     plist: PathBuf,
@@ -152,19 +143,9 @@ fn install(
     let p = paths(args, roots)?;
     install_binary(&p.bin)?;
 
+    // The job has no shell environment, so the roots the user chose are baked in.
     let mut program = vec![absolute(&p.bin)?.display().to_string()];
-    for (flag, value) in [
-        ("--claude-home", &explicit.claude),
-        ("--codex-home", &explicit.codex),
-        ("--opencode-home", &explicit.opencode),
-        ("--pi-home", &explicit.pi),
-        ("--state-dir", &explicit.state),
-    ] {
-        if let Some(v) = value {
-            program.push(flag.to_string());
-            program.push(absolute(v)?.display().to_string());
-        }
-    }
+    program.extend(explicit.args()?);
     program.push("sync".into());
     program.push("--apply".into());
     program.push("--notify".into());

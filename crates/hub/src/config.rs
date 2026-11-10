@@ -172,6 +172,14 @@ impl ServerSpec {
                 {
                     return invalid("an http server takes no command, args, env or cwd");
                 }
+                if self.auth == Auth::Oauth
+                    && self
+                        .headers
+                        .keys()
+                        .any(|k| k.eq_ignore_ascii_case("authorization"))
+                {
+                    return invalid("an oauth server takes no Authorization header");
+                }
             }
         }
         for id in self.secret_ids() {
@@ -287,8 +295,7 @@ mod tests {
         stdio.env.insert("TOKEN".into(), "secret:gh-token".into());
         stdio.cwd = Some("/work".into());
         let mut http = ServerSpec::http("https://mcp.example.com/v1");
-        http.headers
-            .insert("Authorization".into(), "secret:api".into());
+        http.headers.insert("X-Api-Key".into(), "secret:api".into());
         http.auth = Auth::Oauth;
         http.enabled = false;
         let mut c = HubConfig::default();
@@ -346,6 +353,10 @@ mod tests {
         assert!(s.validate().is_err());
         let mut s = ServerSpec::stdio("x");
         s.env.insert("K".into(), "secret:bad id".into());
+        assert!(s.validate().is_err());
+        let mut s = ServerSpec::http("https://h/mcp");
+        s.auth = Auth::Oauth;
+        s.headers.insert("authorization".into(), "Bearer x".into());
         assert!(s.validate().is_err());
         assert!(validate_name("nativemem").is_err());
         assert!(validate_name("a b").is_err());
