@@ -41,7 +41,7 @@ scripts/demo-home.sh <tmp dir> [path-to-nativemem]      # synthetic agent homes 
 ```
 
 Binary usage (on temp roots only): `nativemem status`, `items [--kind ...]`, `sync [--apply]`,
-`doctor`, `delete`, `edit`, `schedule install|status|uninstall`. See `README.md`. When `doctor` reports
+`doctor`, `delete`, `edit`, `mcp ...` (use `--secrets-dir <temp dir>`, never the keychain), `schedule install|status|uninstall`. See `README.md`. When `doctor` reports
 an agent that needs action, follow `wiki/runbooks/agent-update-action-required.md`.
 
 ## Related

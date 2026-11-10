@@ -20,7 +20,7 @@ by versions 2.1.247 to 2.1.322; 376 top-level session files across 63 project di
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/claude_sessions.rs` |
 | Global-scope memory | Not supported (`supports` is false) | |
 | Skills (global) | Read (originals) and write (replicas, edits, deletes) | `crates/core/src/adapters/skills.rs`, `claude.rs` |
-| MCP servers | Not implemented | |
+| MCP servers | Read by `mcp import` (global `mcpServers` only); never written | `crates/hub/src/import.rs` |
 
 ## Native locations
 
@@ -47,7 +47,7 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
   One API message is split into one line per content block. Metadata lines (`last-prompt`,
   `ai-title`, `custom-title`, `mode`, `permission-mode`, and others) have no `uuid`. Titles live in
   `custom-title` (user rename), `ai-title` (generated) and `last-prompt`.
-- **MCP entry** (not implemented): `type` `stdio`, `http` or `sse`; `command`, `args`, `env`, `url`,
+- **MCP entry** (`mcp import` reads it): `type` `stdio`, `http` or `sse`; `command`, `args`, `env`, `url`,
   `headers`, `oauth`. Inline secrets can sit in `headers` and `env`.
 
 ## What nativemem reads and writes today
@@ -56,6 +56,9 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
   `projects/<dir>/*.jsonl` sessions.
 - Writes replicas of memory (marker `metadata.nativemem_origin`), an instruction region at the end of
   `CLAUDE.md`, and session replicas (marker key `nativemem_origin` on every line).
+- `mcp import` reads the global `mcpServers` of `.claude.json`: `<claude home>/../.claude.json` when the home
+  is named `.claude`, else `<claude home>/.claude.json` (`claude_config_path` in
+  `crates/hub/src/import.rs`). Read-only; the file is never written.
 - Creates a project directory with the encoded name plus a helper file `nativemem.jsonl` holding the
   `cwd` when no directory exists for a project (`wiki/kinds/memory.md`).
 - Reads and writes whole skill directories below `skills/` (`wiki/kinds/skills.md`).

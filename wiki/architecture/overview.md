@@ -19,7 +19,8 @@ write safety in `wiki/architecture/safety.md`.
 | Ledger | SQLite file `<state dir>/ledger.db` | `crates/core/src/ledger.rs` |
 | Compatibility watch | Probes per adapter, `compat.json`, status and prompt; pauses the kinds of failing checks | `crates/core/src/compat.rs`, `wiki/architecture/compatibility.md` |
 | Engine | `plan` is pure; `apply` executes and updates the ledger. It knows nothing about formats | `crates/core/src/engine.rs` |
-| CLI | Resolves roots, takes the lock, prints text or one JSON document | `crates/cli/src/main.rs` |
+| MCP hub | One local MCP server (`nativemem mcp serve`) that holds the real MCP servers and their secrets and exposes their tools. Not a sync kind: no adapter, no engine, no ledger | `crates/hub/`, `wiki/architecture/hub.md` |
+| CLI | Resolves roots, takes the lock, prints text or one JSON document | `crates/cli/src/main.rs`, `crates/cli/src/mcp.rs` |
 | Desktop app | A window onto the CLI; holds no sync logic | `docs/desktop.md`, `apps/macos/Sources/NativememKit/NativememCLI.swift` |
 
 An agent takes part in a run only when its home directory exists (`Agents::open` in
@@ -131,7 +132,8 @@ session format changes. Tests: `unmodified_replica_with_an_older_writer_revision
 ## CLI
 
 Commands: `status`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
-`delete`, `edit`, `skill show`, `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
+`delete`, `edit`, `skill show`, `mcp serve|list|add|edit|remove|enable|disable|set-secret|delete-secret|test|import`
+(`wiki/architecture/hub.md`), `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
 `--opencode-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
 `NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`), `--session-days`
 (`NATIVEMEM_SESSION_DAYS`), `--exclude-automated-sessions`, `--no-sessions`. Without a flag, a root
@@ -142,7 +144,7 @@ falls back to `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR`, `PI_CODI
 success, 2 when conflicts or skipped writes remain, 3 when `doctor` finds an agent that needs action,
 1 on error. With `--json`, one JSON document is
 printed, and errors are `{"error": ..., "code": ...}` with codes `busy`, `mass_delete`,
-`unsupported`, `invalid`, `not_found`, `unknown_agent`, `not_installed`, `io`, `parse`, `ledger`,
+`unsupported`, `invalid`, `not_found`, `exists`, `unknown_agent`, `not_installed`, `io`, `parse`, `ledger`,
 `unsupported_platform`. The JSON shapes are specified in `docs/desktop.md`. Anchor: `Failure::code`
 in `crates/cli/src/main.rs`.
 
@@ -162,6 +164,8 @@ compatibility notices on the Overview (`wiki/architecture/compatibility.md`).
 - `crates/core/src/engine.rs`
 - `crates/core/src/ledger.rs`
 - `crates/cli/src/main.rs`
+- `crates/cli/src/mcp.rs`
+- `crates/hub/src/lib.rs`
 - `crates/cli/src/doctor.rs`
 - `crates/cli/tests/cli.rs`
 - `docs/design.md`
@@ -185,6 +189,7 @@ compatibility notices on the Overview (`wiki/architecture/compatibility.md`).
 
 - `wiki/architecture/safety.md`
 - `wiki/architecture/compatibility.md`
+- `wiki/architecture/hub.md`
 - `wiki/kinds/memory.md`
 - `wiki/kinds/instruction-sections.md`
 - `wiki/kinds/skills.md`

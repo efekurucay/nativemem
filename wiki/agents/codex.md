@@ -19,7 +19,7 @@ Claude Code). SQLite files were inspected read-only (`immutable=1`, structure an
 | Instruction sections | Read and write in `AGENTS.md` | `codex.rs` through `sections.rs` |
 | Sessions | Originals always read; replicas (with their `threads` row) written only when `NATIVEMEM_CODEX_SESSION_WRITES=on` and the schema probes pass | `codex_sessions.rs`, `codex_rollout.rs`, `codex_imports.rs`, `codex_threads.rs` |
 | Skills (global) | Read and write in `<codex home>/skills/`; `.system` and directories without `SKILL.md` are left alone; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `codex.rs` |
-| MCP servers | Not implemented | |
+| MCP servers | Read by `mcp import`; never written | `crates/hub/src/import.rs` |
 
 ## Native locations
 
@@ -56,7 +56,8 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
   source_modified_at, connector_names, title}], "detected_connector_records": [...]}`.
   `content_sha256` is the SHA-256 of the raw bytes of the source transcript.
 - **MCP entry**: `command`, `args`, `env`, `env_vars`, `cwd`, `url`, `http_headers`,
-  `bearer_token_env_var`, per-tool approval settings (not implemented here).
+  `bearer_token_env_var`, per-tool approval settings. `mcp import` carries `command`, `args`, `env`, `cwd`,
+  `url`, `http_headers` and `enabled`, and names the other keys in a warning.
 
 ## What nativemem reads and writes today
 

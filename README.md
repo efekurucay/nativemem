@@ -216,6 +216,11 @@ nativemem sync --apply                # execute the plan
 nativemem delete --agent claude|codex|opencode|pi --id <native id>
 nativemem edit --agent claude --id <native id> < entry.json
 nativemem doctor [--json] [--agent <id>] [--accept <agent>] [--prompt <agent>]
+nativemem mcp list|add|edit|remove|enable|disable [--json]   # the MCP hub's servers (hub.toml)
+nativemem mcp set-secret <id> < value            # keychain secret behind `secret:<id>` in hub.toml
+nativemem mcp import [--apply] [--json]          # read the agents' MCP servers into the hub
+nativemem mcp test <name> [--json]               # connect to one server and list its tools
+nativemem mcp serve                              # the hub itself: a stdio MCP server for an agent
 nativemem schedule install [--every <minutes>]
 nativemem schedule status [--json]
 nativemem schedule uninstall
@@ -237,6 +242,16 @@ code `unsupported`: skills are edited as files.
 
 Exit codes: 0 success, 2 when conflicts or skipped writes remain, 1 on error. `doctor` exits 3
 when an agent needs action.
+
+#### MCP hub (`mcp`)
+
+`nativemem mcp serve` is one local MCP server that holds the real MCP servers (stdio or HTTP) and
+their secrets in one place and exposes their tools, named `<server>__<tool>`, behind a single
+connection; `nativemem_status` reports which servers connected. Servers live in
+`<state dir>/hub.toml`; any value can be `secret:<id>`, kept in the OS keychain and never printed.
+`mcp import` reads the four agents' MCP entries (read-only) and moves env and header values into the
+keychain. Registering the hub in the agents and OAuth login are not built yet. Details:
+[wiki/architecture/hub.md](wiki/architecture/hub.md).
 
 #### Compatibility watch (`doctor`)
 

@@ -239,6 +239,75 @@ the change to the copies. Editing an entry the agent regenerates itself fails wi
 instruction item only `body` changes; if `name` or `description` differs
 from the current values the command writes nothing and fails with code `invalid`.
 
+### MCP hub
+
+`nativemem mcp ...` manages the hub: one local MCP server (`nativemem mcp serve`, stdio, no JSON
+document) that holds the real MCP servers and their secrets (`wiki/architecture/hub.md`). Besides
+the error codes above, `exists` is returned when a server name is already taken; `invalid` covers a
+bad server spec, name or secret id; `not_found` covers an unknown server or secret. A secret value is
+never printed: `secret:<id>` references are shown, and a literal env or header value is shown as
+`"<literal>"`.
+
+`nativemem mcp list --json`
+```json
+{ "servers": [
+    { "name": "github", "transport": "stdio", "enabled": true, "auth": "none",
+      "command": "npx", "args": ["-y", "pkg"], "cwd": "/Users/x/app",
+      "env": { "GITHUB_TOKEN": "secret:github-GITHUB_TOKEN", "LOG": "<literal>" },
+      "headers": {}, "secrets": ["github-GITHUB_TOKEN"] },
+    { "name": "docs", "transport": "http", "enabled": false, "auth": "oauth",
+      "url": "https://mcp.example.com/mcp", "args": [], "env": {},
+      "headers": { "Authorization": "secret:docs-Authorization" },
+      "secrets": ["docs-Authorization"] } ] }
+```
+`command` and `cwd` appear for stdio servers, `url` for http servers. `transport` is `stdio` or `http`,
+`auth` is `none` or `oauth` (stored only).
+
+`nativemem mcp add --json`, with one server as a JSON document on stdin:
+```json
+{ "name": "github", "transport": "stdio", "command": "npx", "args": ["-y", "pkg"],
+  "env": { "GITHUB_TOKEN": "secret:github-GITHUB_TOKEN" }, "cwd": "/Users/x/app",
+  "auth": "none", "enabled": true }
+```
+or `{"name", "transport": "http", "url", "headers", "auth", "enabled"}`. `auth` defaults to `none` and
+`enabled` to `true`. Output `{ "added": "github" }`. A duplicate name fails with code `exists`.
+
+`nativemem mcp edit <name> --json` replaces the server with the document on stdin (the same fields;
+`name`, when present, must equal `<name>`). Output `{ "edited": "github" }`.
+
+`nativemem mcp remove <name> --json` prints `{ "removed": "github" }`; its secrets are kept.
+`nativemem mcp enable <name> --json` and `disable <name>` print `{ "name": "github", "enabled": true }`.
+
+`nativemem mcp set-secret <id> --json` reads the value from stdin (one trailing newline is dropped; an
+empty value fails with code `invalid`) and prints `{ "secret": "<id>" }`.
+`nativemem mcp delete-secret <id> --json` prints `{ "deleted": "<id>" }`; an unknown id fails with
+code `not_found`.
+
+`nativemem mcp test <name> --json`
+```json
+{ "ok": true, "tools": ["echo", "env_matches"], "error": null }
+```
+`tools` are the server's own tool names. On a connection failure `ok` is false, `tools` is empty,
+`error` is a message without secret values, and the exit code is 2.
+
+`nativemem mcp import --json` (preview) and `nativemem mcp import --apply --json`
+```json
+{ "applied": false,
+  "servers": [
+    { "name": "shared", "transport": "stdio", "status": "add",
+      "agents": ["claude", "codex", "pi"], "secrets": ["shared-API_KEY"] },
+    { "name": "clash", "transport": "stdio", "status": "conflict", "agents": ["claude", "codex"],
+      "secrets": [] } ],
+  "skipped": [ { "agent": "claude", "name": "sse-server", "reason": "sse transport is not supported by the hub" } ],
+  "warnings": ["codex shared: keys not carried over: startup_timeout_sec"],
+  "summary": { "add": 1, "present": 0, "conflicts": 1, "skipped": 1 } }
+```
+`status` is `add`, `present` (the hub already holds this exact entry) or `conflict` (the name has a
+different config in another agent or in the hub; `agents` then includes `hub`). Nothing is imported
+for a conflict. The agents' MCP files are only read. With `--apply`, `applied` is true, the `add`
+entries are written to `hub.toml` and their env and header values are stored as the listed secrets.
+Exit code 2 when a conflict remains.
+
 ## App structure
 
 Swift package at `apps/macos` (SwiftUI app, macOS 14+, Swift 6, no third-party dependencies).

@@ -20,7 +20,7 @@ sections and project memory are implemented. Sessions are not: no session adapte
 | Instruction sections | Read and write in `AGENTS.md` | `agents_file.rs` through `sections.rs` |
 | Sessions | Not implemented; `supports(Session, ...)` is false | |
 | Skills (global) | Read and write in `<opencode home>/skills/` | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
-| MCP servers | Not implemented | |
+| MCP servers | Read by `mcp import` (`mcp.<name>` of `opencode.json` and `opencode.jsonc`); never written | `crates/hub/src/import.rs` |
 
 ## Native locations
 
@@ -42,7 +42,7 @@ else `~/.config/opencode`.
   `wiki/kinds/memory.md`.
 - **Config**: JSON or JSONC with `instructions`, `mcp`, `permissions` and provider keys. Edits made by
   OpenCode's own CLI preserve formatting. The file is watched and hot-reloaded.
-- **MCP entry** (not implemented): `type` `local` with `command` as one array (executable plus args),
+- **MCP entry** (`mcp import` reads it): `type` `local` with `command` as one array (executable plus args),
   `environment`, `cwd`; `type` `remote` with `url`, `headers`; `enabled`, `oauth`, `timeout`.
 - **Session store** (facts for a future adapter, OBSERVED from the live database and binary strings):
   - The session table that owns the `time_suspended` column is the one that lists sessions; a second,

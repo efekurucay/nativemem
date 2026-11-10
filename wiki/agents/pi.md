@@ -19,7 +19,7 @@ Facts gathered read-only on a development machine running Pi 1.5.0 (session file
 | Instruction sections | Read and write in `AGENTS.md` | `agents_file.rs` through `sections.rs` |
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/pi.rs` |
 | Skills (global) | Read and write in `<pi home>/skills/`; symlinked skills are read through the link and replaced, never written through; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
-| MCP servers | Not implemented | |
+| MCP servers | Read by `mcp import`; never written | `crates/hub/src/import.rs` |
 
 ## Native locations
 
@@ -46,7 +46,7 @@ The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`
   and `:` replaced by `-` + `--` (`encode_cwd` in `crates/core/src/adapters/pi.rs`).
 - **Instruction file and memory**: markdown; see `wiki/kinds/instruction-sections.md` and
   `wiki/kinds/memory.md`.
-- **MCP entry** (not implemented): `command`, `args`, `env`, `cwd`, `url`, `headers`, `oauth`,
+- **MCP entry** (`mcp import` reads it): `command`, `args`, `env`, `cwd`, `url`, `headers`, `oauth`,
   `enabled`, `exposure`; values accept `${VAR}` and `!command` forms.
 
 ## What nativemem reads and writes today

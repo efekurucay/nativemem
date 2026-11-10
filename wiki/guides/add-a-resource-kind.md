@@ -8,8 +8,9 @@ flows through the engine with a deliberate policy, safe writes and complete docs
 ## Scope
 
 A new `Kind` variant and the adapters that store it. A new agent is in
-`wiki/guides/add-an-agent.md`. MCP servers are research only today: their locations and
-schemas are on the agent pages, no code exists. Skills are implemented (`wiki/kinds/skills.md`) and
+`wiki/guides/add-an-agent.md`. MCP servers are not a sync kind: their locations and schemas are
+on the agent pages, `nativemem mcp import` reads them (`wiki/architecture/hub.md`) and no code
+writes them. Skills are implemented (`wiki/kinds/skills.md`) and
 are the reference for a kind without a marker and with a directory as its unit.
 
 ## Checklist
@@ -111,6 +112,7 @@ are the reference for a kind without a marker and with a directory as its unit.
 
 - `wiki/guides/add-an-agent.md`
 - `wiki/architecture/overview.md`
+- `wiki/architecture/hub.md`
 - `wiki/decisions/native-flow-only.md`
 - `wiki/WIKI-CREATOR.md`
 

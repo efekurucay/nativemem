@@ -14,7 +14,7 @@ Tracked source, docs, scripts, CI configuration and wiki. Build output (`target/
 
 ```
 nativemem-sync/
-├── Cargo.toml                    workspace: crates/core, crates/cli; version and package metadata
+├── Cargo.toml                    workspace: crates/core, crates/hub, crates/cli; version and package metadata
 ├── LICENSE                       MIT
 ├── CONTRIBUTING.md · SECURITY.md contribution rules; private vulnerability reporting
 ├── CLAUDE.md                     entry point for coding agents (AGENTS.md is a symlink to it)
@@ -64,12 +64,23 @@ nativemem-sync/
 │   │           ├── memory_store.rs     replica store plus routing block, shared by Codex, OpenCode, Pi
 │   │           └── sections.rs   instruction-section parser, managed regions, byte-preserving edits, markers
 │   │   └── tests/                probes.rs (probes, drift, blocked kinds), skills.rs (skill mirroring over four temp homes)
+│   ├── hub/                      library `nativemem-hub`: the MCP hub; not a sync kind, no engine or ledger
+│   │   ├── src/
+│   │   │   ├── lib.rs            module list
+│   │   │   ├── config.rs         `hub.toml`: ServerSpec, HubConfig, validation, load, backed-up atomic save
+│   │   │   ├── secrets.rs        SecretStore trait, KeychainStore, FileStore (tests), `secret:<id>` references
+│   │   │   ├── connect.rs        connect to one upstream (stdio child or streamable HTTP), secret resolution, scrubbing, `mcp test`
+│   │   │   ├── serve.rs          HubServer: tool naming, forwarding, `nativemem_status`, stdio serving
+│   │   │   ├── import.rs         read the agents' MCP entries, plan and apply the import
+│   │   │   └── bin/fake_mcp.rs   `nativemem-fake-mcp`, a tiny stdio MCP server for tests
+│   │   └── tests/                hub.rs (proxy, failures, secrets, HTTP headers), import.rs (four fake agent homes)
 │   └── cli/                      binary `nativemem`
 │       ├── src/
 │       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/edit, JSON output
 │       │   ├── doctor.rs         `doctor`, compatibility reports, warnings, notification delivery
+│       │   ├── mcp.rs            `mcp` subcommands over the hub crate
 │       │   └── schedule.rs       launchd scheduling (macOS only)
-│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications)
+│       └── tests/                cli.rs (end-to-end CLI tests over temp homes), doctor.rs (doctor, gating, notifications), mcp.rs (hub commands and `mcp serve` over temp roots)
 ├── apps/macos/                   Swift package, macOS 14+, no third-party dependencies
 │   ├── Package.swift
 │   ├── Sources/Nativemem/        app entry point (`NativememApp.swift`)
@@ -89,7 +100,7 @@ nativemem-sync/
 │   └── scripts/bundle.sh         builds the app bundle into `apps/macos/build/` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`)
 └── wiki/                         this knowledge base
     ├── README.md · CLAUDE.md · WIKI-CREATOR.md
-    ├── architecture/             ci, compatibility, context-quality, file-structure, overview, safety
+    ├── architecture/             ci, compatibility, context-quality, file-structure, hub, overview, safety
     ├── kinds/                    memory, instruction-sections, sessions, skills
     ├── agents/                   claude-code, codex, pi, opencode, hermes
     ├── runbooks/                 agent-update-action-required
@@ -108,6 +119,7 @@ nativemem-sync/
 | Atomic writes and backups | `crates/core/src/fsx.rs` |
 | Anything that knows an agent's file format | `crates/core/src/adapters/` |
 | Reading roots, flags, environment, the lock, exit codes, JSON output | `crates/cli/src/main.rs` |
+| The MCP hub: `hub.toml`, secrets, proxying, import | `crates/hub/`, `crates/cli/src/mcp.rs`, `wiki/architecture/hub.md` |
 | Compatibility probes, status, state file, prompt | `crates/core/src/compat.rs`, `crates/core/src/adapters/*_probes.rs`, `crates/cli/src/doctor.rs` |
 | Fixture homes for tests | `crates/core/src/testkit.rs` |
 | Releases, release notes, macOS packaging | `scripts/release.sh`, `apps/macos/scripts/bundle.sh`, `wiki/guides/release.md` |
@@ -120,6 +132,7 @@ nativemem-sync/
 - `Cargo.toml`
 - `crates/core/src/lib.rs`
 - `crates/core/src/adapters/mod.rs`
+- `crates/hub/src/lib.rs`
 - `crates/cli/src/doctor.rs`
 - `apps/macos/Package.swift`
 - `scripts/release.sh`
@@ -142,6 +155,7 @@ nativemem-sync/
 ## Related docs
 
 - `wiki/architecture/overview.md`
+- `wiki/architecture/hub.md`
 - `wiki/WIKI-CREATOR.md`
 - `wiki/guides/add-an-agent.md`
 

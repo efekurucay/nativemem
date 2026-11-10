@@ -20,6 +20,7 @@ use nativemem_core::session::{is_session_id, SessionOptions};
 use serde_json::{json, Value};
 
 mod doctor;
+mod mcp;
 #[cfg(target_os = "macos")]
 mod schedule;
 
@@ -130,6 +131,8 @@ enum Command {
     },
     /// Skills of the agents
     Skill(SkillArgs),
+    /// The MCP hub: one local MCP server that holds the real servers and their secrets
+    Mcp(mcp::McpArgs),
     /// Run `sync --apply` on a timer through a launchd agent (macOS)
     Schedule(ScheduleArgs),
 }
@@ -917,6 +920,7 @@ fn run(cli: &Cli) -> Outcome<u8> {
         | Command::Doctor {
             accept: Some(_), ..
         } => Some(lock_state(&roots.state)?),
+        Command::Mcp(args) if args.writes() => Some(lock_state(&roots.state)?),
         _ => None,
     };
     let watches_compat = matches!(
@@ -999,6 +1003,7 @@ fn run(cli: &Cli) -> Outcome<u8> {
         Command::Skill(SkillArgs {
             command: SkillCommand::Show { agent, name, json },
         }) => skill_show(&agents, agent, name, *json).map(|()| 0),
+        Command::Mcp(args) => mcp::run(args, &roots, &backups),
         Command::Schedule(args) => run_schedule(cli, args, &roots).map(|()| 0),
     }
 }
@@ -1018,6 +1023,7 @@ fn wants_json(command: &Command) -> bool {
             command: ScheduleCommand::Status { json },
             ..
         }) => *json,
+        Command::Mcp(args) => args.json(),
         Command::Schedule(_) => false,
     }
 }

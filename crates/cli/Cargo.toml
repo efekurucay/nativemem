@@ -16,6 +16,9 @@ path = "src/main.rs"
 nativemem-core = { path = "../core" }
 clap = { version = "4", features = ["derive", "env"] }
 serde_json = "1.0.154"
+nativemem-hub = { path = "../hub" }
 
 [dev-dependencies]
+rmcp = { version = "3.9", features = ["client", "transport-child-process"] }
 tempfile = "3"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }

@@ -20,10 +20,11 @@ formats are in `wiki/agents/`.
 | Skill backups | Before a skill directory is overwritten or removed the whole tree is copied to the same backup layout; a symlink is recorded as a text file holding its target | `backup_dir` in `crates/core/src/fsx.rs`; tests in `crates/core/tests/skills.rs` |
 | Mass-delete guard | `sync --apply` refuses with error code `mass_delete` when the plan removes more than 10 entries, or more than 3 entries and more than 20% of the ledger's items. Implemented as `removes > 10 \|\| (removes > 3 && removes * 5 > total)`. `total` counts ledger items that are not sessions. `--allow-mass-delete` lifts it. The check runs before anything is written | `exceeds_mass_delete_limit` and `apply` in `crates/core/src/engine.rs`; tests `mass_delete_limit_rule`, `mass_delete_guard_triggers_and_can_be_lifted`, `mass_delete_reports_error_code` |
 | Failed scan aborts | If any adapter's `scan` fails, the run stops before planning, so a failed read never looks like a mass deletion | `plan` in `crates/core/src/engine.rs`; test `failed_scan_plans_nothing` |
-| Single-writer lock | `sync --apply`, `delete`, `edit` and `doctor --accept` take an exclusive lock on `<state dir>/sync.lock` for the whole run. A second writer fails with code `busy` and writes nothing. `status`, `items` and dry-run `sync` do not lock; a plain `doctor` takes the lock only to write `compat.json` and skips that write when it is busy | `lock_state` in `crates/cli/src/main.rs`; test `concurrent_run_is_refused_while_lock_is_held` |
+| Single-writer lock | `sync --apply`, `delete`, `edit`, `doctor --accept` and the `mcp` commands that write (`add`, `edit`, `remove`, `enable`, `disable`, `set-secret`, `delete-secret`, `import --apply`) take an exclusive lock on `<state dir>/sync.lock` for the whole run. A second writer fails with code `busy` and writes nothing. `status`, `items` and dry-run `sync` do not lock; a plain `doctor` takes the lock only to write `compat.json` and skips that write when it is busy | `lock_state` in `crates/cli/src/main.rs`; test `concurrent_run_is_refused_while_lock_is_held` |
 | Nothing inside git repositories | Writes go only to agent home directories and the state directory. Project-level instruction files live in repositories and are never read or written; replicas for agents without native memory go to the agent home plus a marked block in the agent's global instruction file | `crates/core/src/adapters/memory_store.rs`; test `memory_writes_stay_inside_the_declared_paths` |
 | Codex state database | The only write is `codex_threads.rs`: one `threads` row per replica rollout this tool wrote, only while `codex.state_db` and `codex.threads_columns` pass. It opens read-write only when a row is missing or a rollout was rewritten, sets `busy_timeout` to 5 s, takes a consistent copy with SQLite's online backup to `<state dir>/backups/<stamp>/codex/state_<n>.sqlite` (the 5 newest kept, nothing else pruned), writes in one `BEGIN IMMEDIATE` transaction, reads the rows back, and skips a locked database until the next run. It never deletes or changes a row of a thread Codex made, never changes the journal mode and runs no vacuum or checkpoint pragma. The probes read the file with `immutable=1` |
-| Other agent-owned state is untouched | No code reads or writes `hooks.json`, `config.toml`, Claude's `~/.claude.json`, credential or auth files, or generated `memories/MEMORY.md` content. Codex generated memory is read-only | grep of `crates/` finds none of these names outside tests; tests `originals_are_read_only`, `instruction_originals_are_editable_but_memory_originals_are_not` |
+| Other agent-owned state is untouched | No code writes `hooks.json`, `config.toml`, Claude's `~/.claude.json`, credential or auth files, or generated `memories/MEMORY.md` content. Codex generated memory is read-only. The only reads of `config.toml`, `.claude.json`, `opencode.json(c)` and `mcp.json` are in `crates/hub/src/import.rs`, which takes the MCP entries and never writes the files | tests `originals_are_read_only`, `instruction_originals_are_editable_but_memory_originals_are_not`, `import_previews_then_applies_from_the_four_agents` |
+| Hub configuration and secrets | `<state dir>/hub.toml` is written by `HubConfig::save`: previous file backed up to `<state dir>/backups/<stamp>/hub/hub.toml`, atomic write, state lock held. Secret values live in the OS keychain (`FileStore` in a temp directory for tests, never backed up) and never reach `hub.toml`, output, errors, logs or the ledger; errors are scrubbed of resolved values | `crates/hub/src/config.rs`, `crates/hub/src/secrets.rs`; tests `config_round_trips_and_backs_up_the_previous_file`, `secret_references_reach_the_child_and_never_the_output`, `scrub_hides_secret_values` |
 | Secrets are never printed | The ledger stores ids, hashes and paths, not text. `items` prints no session bodies. `status` prints labels and reasons only. Session tool output is cut at 1500 characters and tool input at 600, but a session can still contain secrets the user typed: sessions are copied between the user's own agent homes and never printed or sent anywhere | `crates/core/src/ledger.rs`, `crates/cli/src/main.rs`, `crates/core/src/session.rs` (`TOOL_RESULT_LIMIT`, `TOOL_INPUT_LIMIT`); test `items_leaves_sessions_out_unless_asked_and_never_prints_bodies` |
 | Sessions are not deletable here | `delete` and `edit` refuse session ids with code `unsupported` | `refuse_session` in `crates/cli/src/main.rs`; test `delete_and_edit_refuse_session_ids` |
 | Oversized sources | Session sources larger than 200 MB are skipped and listed by `status` | `MAX_SOURCE_BYTES` in `crates/core/src/session.rs`; test `oversized_sources_are_skipped_and_reported` |
@@ -61,6 +62,7 @@ Rollback from the backup directory is described there too.
 ## Source anchors
 
 - `crates/core/src/fsx.rs`
+- `crates/hub/src/secrets.rs`
 - `crates/core/src/engine.rs`
 - `crates/cli/src/main.rs`
 - `crates/cli/tests/cli.rs`
@@ -77,7 +79,8 @@ Rollback from the backup directory is described there too.
 - MUST: Never write inside a project working directory.
 - MUST: Write Codex's state database only through `codex_threads.rs`; every other Codex file stays read-only.
 - MUST: Never print secrets or session bodies; never store entry text in the ledger.
-- MUST: Take the lock before any write command.
+- MUST: Take the lock before any write command, `mcp` write commands included.
+- MUST: Run hub tests with `nativemem mcp --secrets-dir <temp dir>`; the OS keychain is never used by tests.
 - MUST: Run tests and manual experiments against temp roots only.
 - SHOULD: Verify a new write path with `sync` (dry run) on temp roots before any real apply.
 
@@ -94,6 +97,7 @@ Rollback from the backup directory is described there too.
 - `wiki/guides/verify-with-real-agents.md`
 - `wiki/decisions/native-flow-only.md`
 - `wiki/architecture/compatibility.md`
+- `wiki/architecture/hub.md`
 
 ## Last updated
 

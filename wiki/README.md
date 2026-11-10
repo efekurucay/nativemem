@@ -30,6 +30,7 @@ agent can act on this repo without re-deriving facts.
 | `wiki/architecture/context-quality.md` | The quality bar every page must meet, evidence levels |
 | `wiki/architecture/file-structure.md` | The real tree and what each crate, module and folder owns |
 | `wiki/architecture/overview.md` | Adapters, neutral model, ledger, three-way decision table, `supports`, writer revisions, policy per kind |
+| `wiki/architecture/hub.md` | The MCP hub: `hub.toml`, secrets, tool naming and forwarding, `nativemem mcp` commands, import of the agents' MCP entries |
 | `wiki/architecture/ci.md` | GitHub Actions workflows, runners, what is best-effort and what runs only locally |
 | `wiki/architecture/compatibility.md` | Compatibility watch: probes, status, `compat.json`, gating, `doctor`, prompt, notifications |
 | `wiki/architecture/safety.md` | Backups, atomic writes, mass-delete guard, lock, no writes in git repos, secrets, test isolation, staged rollout |
@@ -64,6 +65,7 @@ agent can act on this repo without re-deriving facts.
 - `docs/desktop.md`
 - `crates/core/src/lib.rs`
 - `crates/cli/src/main.rs`
+- `crates/hub/src/lib.rs`
 - `scripts/release.sh`
 
 ## Rules
