@@ -1,20 +1,36 @@
 #!/bin/bash
 set -euo pipefail
 
+START="$PWD"
 cd "$(dirname "$0")/.."
 
-swift build -c release
+VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' ../../Cargo.toml | head -n 1)}"
+CLI="${NATIVEMEM_CLI:-../../target/release/nativemem}"
+case "$CLI" in
+    /*) ;;
+    *) [ -z "${NATIVEMEM_CLI:-}" ] || CLI="$START/$CLI" ;;
+esac
+SIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+
+ARCHS=()
+if [ "${UNIVERSAL:-0}" = "1" ]; then
+    ARCHS=(--arch arm64 --arch x86_64)
+fi
+
+swift build -c release ${ARCHS[@]+"${ARCHS[@]}"}
 
 APP="build/nativemem.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key><string>dev.nativemem.app</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleName</key><string>nativemem</string>
     <key>CFBundleExecutable</key><string>nativemem</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -26,9 +42,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-cp "$(swift build -c release --show-bin-path)/Nativemem" "$APP/Contents/MacOS/nativemem"
+cp "$(swift build -c release ${ARCHS[@]+"${ARCHS[@]}"} --show-bin-path)/Nativemem" "$APP/Contents/MacOS/nativemem"
 
-CLI="../../target/release/nativemem"
 if [ -f "$CLI" ]; then
     cp "$CLI" "$APP/Contents/MacOS/nativemem-cli"
 fi
@@ -43,5 +58,5 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "$ICONSET"
 
-codesign --force --deep -s - "$APP"
-echo "Built $APP"
+codesign --force --deep -s "$SIGN_IDENTITY" "$APP"
+echo "Built $APP ($VERSION)"
