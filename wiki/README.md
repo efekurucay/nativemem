@@ -35,6 +35,7 @@ agent can act on this repo without re-deriving facts.
 | `wiki/architecture/safety.md` | Backups, atomic writes, mass-delete guard, lock, no writes in git repos, secrets, test isolation, staged rollout |
 | `wiki/kinds/memory.md` | Project memory entries: model, stores, markers, write-back |
 | `wiki/kinds/instruction-sections.md` | Global instruction files as one item per `## ` section |
+| `wiki/kinds/skills.md` | Skills: manifest hash, identity without a marker, adoption, visible roots, atomic directory swap |
 | `wiki/kinds/sessions.md` | Chat sessions: neutral model, snapshot policy, markers, tool rendering, window flags |
 | `wiki/agents/claude-code.md` | Claude Code locations, formats, quirks |
 | `wiki/agents/codex.md` | Codex locations, formats, rollouts, thread rows, quirks |
@@ -49,6 +50,7 @@ agent can act on this repo without re-deriving facts.
 | `wiki/decisions/no-shared-store.md` | Decision: there is no shared store |
 | `wiki/decisions/native-flow-only.md` | Decision: only files and formats the agents already read |
 | `wiki/decisions/session-snapshot-policy.md` | Decision: sessions are snapshots, deletes never propagate |
+| `wiki/decisions/skills-mirror-without-shared-store.md` | Decision: skills are mirrored as real copies in each agent's own directory |
 | `wiki/decisions/instruction-sections-as-items.md` | Decision: one `## ` section is one item |
 | `wiki/decisions/routing-block-for-agents-without-memory.md` | Decision: a marked block in the global instruction file points at per-project indexes |
 | `wiki/decisions/codex-session-writes-gated.md` | Decision: Codex session writes are guarded by the schema probes and always carry a thread row |

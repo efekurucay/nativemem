@@ -9,6 +9,7 @@ use nativemem_core::adapters::agents_file::AgentsFileAdapter;
 use nativemem_core::adapters::claude::ClaudeAdapter;
 use nativemem_core::adapters::codex::CodexAdapter;
 use nativemem_core::adapters::pi::PiAdapter;
+use nativemem_core::adapters::skills::skill_name;
 use nativemem_core::compat::{self, AgentReport, CompatState};
 use nativemem_core::engine::{self, Action, ApplyOptions, Note};
 use nativemem_core::error::{Error, Result};
@@ -97,7 +98,7 @@ enum Command {
     /// List every entry found in the agents' native stores
     Items {
         /// Only entries of this kind; sessions are listed only when asked for
-        #[arg(long, value_parser = ["memory", "instruction", "session"])]
+        #[arg(long, value_parser = ["memory", "instruction", "session", "skill"])]
         kind: Option<String>,
         /// Print one JSON document
         #[arg(long)]
@@ -127,8 +128,32 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Skills of the agents
+    Skill(SkillArgs),
     /// Run `sync --apply` on a timer through a launchd agent (macOS)
     Schedule(ScheduleArgs),
+}
+
+#[derive(clap::Args)]
+struct SkillArgs {
+    #[command(subcommand)]
+    command: SkillCommand,
+}
+
+#[derive(Subcommand)]
+enum SkillCommand {
+    /// Print the SKILL.md of one skill
+    Show {
+        /// claude, codex, opencode or pi
+        #[arg(long)]
+        agent: String,
+        /// The skill's directory name
+        #[arg(long, allow_hyphen_values = true)]
+        name: String,
+        /// Print one JSON document
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -223,6 +248,9 @@ fn key_json(key: &ItemKey) -> Value {
     json!({ "origin": key.origin.as_str(), "native_id": key.native_id })
 }
 
+/// Below the user's home; Codex and Pi read skills from it besides their own directories.
+const SHARED_SKILLS: &str = ".agents/skills";
+
 const AGENT_IDS: [&str; 4] = ["claude", "codex", "opencode", "pi"];
 
 /// The kinds each agent leaves alone because a compatibility check fails.
@@ -234,6 +262,8 @@ struct Roots {
     opencode: PathBuf,
     pi: PathBuf,
     state: PathBuf,
+    /// The shared skills directory Codex and Pi also read: `<user home>/.agents/skills`.
+    shared_skills: Option<PathBuf>,
 }
 
 /// The agents that take part in a run: those whose home directory exists.
@@ -257,6 +287,7 @@ impl Agents {
         let state = || roots.state.clone();
         let present = |dir: &Path| dir.is_dir();
         let paused = |id: &str| blocked.get(id).cloned().unwrap_or_default();
+        let shared = || roots.shared_skills.clone().into_iter().collect::<Vec<_>>();
         Agents {
             claude: present(&roots.claude).then(|| {
                 let a = ClaudeAdapter::new(roots.claude.clone(), state(), backups.clone())
@@ -270,6 +301,7 @@ impl Agents {
                 let a = CodexAdapter::new(roots.codex.clone(), state(), backups.clone())
                     .with_claude_home(roots.claude.clone())
                     .with_session_writes(codex_session_writes)
+                    .with_visible_roots(shared())
                     .with_blocked_kinds(&paused("codex"));
                 match sessions {
                     Some(o) => a.with_sessions(o),
@@ -282,6 +314,7 @@ impl Agents {
             }),
             pi: present(&roots.pi).then(|| {
                 let a = PiAdapter::new(roots.pi.clone(), state(), backups.clone())
+                    .with_visible_roots(shared())
                     .with_blocked_kinds(&paused("pi"));
                 match sessions {
                     Some(o) => a.with_sessions(o),
@@ -342,6 +375,7 @@ fn resolve(cli: &Cli) -> Result<Roots> {
         )?,
         pi: pick(&cli.pi_home, Some("PI_CODING_AGENT_DIR"), ".pi/agent")?,
         state: pick(&cli.state_dir, None, ".nativemem")?,
+        shared_skills: std::env::home_dir().map(|h| h.join(SHARED_SKILLS)),
     })
 }
 
@@ -371,7 +405,15 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
             .iter()
             .filter(|o| o.item.kind == Kind::Session)
             .count();
-        let entries = || observed.iter().filter(|o| o.item.kind != Kind::Session);
+        let skills = observed
+            .iter()
+            .filter(|o| o.item.kind == Kind::Skill)
+            .count();
+        let entries = || {
+            observed
+                .iter()
+                .filter(|o| !matches!(o.item.kind, Kind::Session | Kind::Skill))
+        };
         let replicas = entries().filter(|o| o.replica_of.is_some()).count();
         let originals = entries().count() - replicas;
         // The prefix is only used by the human output.
@@ -401,6 +443,12 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
         {
             skipped.extend(codex.skipped()?.into_iter().map(|(l, r)| ("", l, r)));
         }
+        skipped.extend(
+            a.skill_report()?
+                .skipped
+                .into_iter()
+                .map(|(l, r)| ("skill ", l, r)),
+        );
         let report = match a.id().as_str() {
             "claude" => present.claude.as_ref().map(|c| c.session_report()),
             "codex" => present.codex.as_ref().map(|c| c.session_report()),
@@ -419,6 +467,7 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
                 "originals": originals,
                 "replicas": replicas,
                 "sessions": sessions,
+                "skills": skills,
                 "automated_sessions": automated,
                 "skipped": skipped
                     .iter()
@@ -427,7 +476,7 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
             }));
         } else {
             println!(
-                "{}: {originals} originals, {replicas} replicas, {sessions} sessions, {automated} automated",
+                "{}: {originals} originals, {replicas} replicas, {sessions} sessions, {automated} automated, {skills} skills",
                 a.id()
             );
             for (kind, label, reason) in &skipped {
@@ -462,11 +511,17 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
     Ok(())
 }
 
-fn items(agents: &Agents, kind: Option<Kind>, json: bool) -> Result<()> {
+fn items(roots: &Roots, agents: &Agents, kind: Option<Kind>, json: bool) -> Result<()> {
     let mut observed: Vec<Observed> = Vec::new();
     for a in agents.all() {
         observed.extend(a.scan()?);
     }
+    let ledger = if roots.state.join("ledger.db").is_file() {
+        Ledger::open(&roots.state)?
+    } else {
+        Ledger::in_memory()?
+    };
+    engine::link_skills(&mut observed, &ledger)?;
     observed.retain(|o| match kind {
         Some(k) => o.item.kind == k,
         None => o.item.kind != Kind::Session,
@@ -484,7 +539,7 @@ fn items(agents: &Agents, kind: Option<Kind>, json: bool) -> Result<()> {
                     "name": o.item.name,
                     "description": o.item.description,
                     "category": o.item.category,
-                    "body": if o.item.kind == Kind::Session { "" } else { &o.item.body },
+                    "body": if matches!(o.item.kind, Kind::Session | Kind::Skill) { "" } else { &o.item.body },
                     "replica_of": o.replica_of.as_ref().map(key_json),
                     "hash": content_hash(&o.item),
                 })
@@ -551,6 +606,30 @@ fn refuse_session(id: &str) -> Outcome<()> {
     Ok(())
 }
 
+fn skill_show(agents: &Agents, agent: &str, name: &str, json: bool) -> Outcome<()> {
+    let not_found = || Failure::NotFound {
+        agent: agent.to_string(),
+        id: name.to_string(),
+    };
+    let adapter = agents.named(agent)?.ok_or_else(not_found)?;
+    let id = nativemem_core::adapters::skills::native_id(name);
+    let skill = find_entry(adapter, &id)?.ok_or_else(not_found)?;
+    let file = skill.path.join("SKILL.md");
+    let text = String::from_utf8_lossy(&std::fs::read(&file).map_err(|e| Error::io(&file, e))?)
+        .into_owned();
+    if json {
+        print_json(&json!({
+            "agent": agent,
+            "name": name,
+            "path": file.display().to_string(),
+            "text": text,
+        }));
+    } else {
+        print!("{text}");
+    }
+    Ok(())
+}
+
 fn parse_edit(input: &str) -> Result<(String, String, Option<String>, String)> {
     let doc: Value = serde_json::from_str(input).map_err(|e| Error::Parse(e.to_string()))?;
     let text = |key: &str| -> Result<String> {
@@ -584,6 +663,12 @@ fn edit(
         id: id.to_string(),
     })?;
     refuse_session(id)?;
+    if skill_name(id).is_some() {
+        return Err(Failure::Coded {
+            code: "unsupported",
+            message: "skills are edited as files in their directory, not from here".into(),
+        });
+    }
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)
@@ -615,6 +700,7 @@ fn edit(
         description,
         category,
         body,
+        source_dir: None,
     };
     adapter.write_original(id, &item)?;
     let written = find_entry(adapter, id)?.ok_or_else(|| Failure::NotFound {
@@ -896,17 +982,23 @@ fn run(cli: &Cli) -> Outcome<u8> {
                 json: *json,
             },
         ),
-        Command::Items { kind, json } => {
-            items(&agents, kind.as_deref().and_then(Kind::parse), *json)
-                .map(|()| 0)
-                .map_err(Failure::from)
-        }
+        Command::Items { kind, json } => items(
+            &roots,
+            &agents,
+            kind.as_deref().and_then(Kind::parse),
+            *json,
+        )
+        .map(|()| 0)
+        .map_err(Failure::from),
         Command::Delete { agent, id, json } => {
             delete(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
         Command::Edit { agent, id, json } => {
             edit(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
+        Command::Skill(SkillArgs {
+            command: SkillCommand::Show { agent, name, json },
+        }) => skill_show(&agents, agent, name, *json).map(|()| 0),
         Command::Schedule(args) => run_schedule(cli, args, &roots).map(|()| 0),
     }
 }
@@ -919,6 +1011,9 @@ fn wants_json(command: &Command) -> bool {
         | Command::Items { json, .. }
         | Command::Delete { json, .. }
         | Command::Edit { json, .. }
+        | Command::Skill(SkillArgs {
+            command: SkillCommand::Show { json, .. },
+        })
         | Command::Schedule(ScheduleArgs {
             command: ScheduleCommand::Status { json },
             ..

@@ -65,6 +65,7 @@ fn item(title: &str, first: &str) -> Item {
         description: title.into(),
         category: None,
         body: session.to_body(),
+        source_dir: None,
     }
 }
 

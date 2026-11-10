@@ -326,6 +326,35 @@ fn scan_all(adapters: &[&dyn Adapter]) -> Result<Vec<Observed>> {
     Ok(observed)
 }
 
+/// Skill copies carry no marker, so the copies of one name in several agents are one logical
+/// item. Its origin is the origin the ledger knows, else the first agent in `observed` order
+/// that holds it; every other copy becomes a replica of it.
+pub fn link_skills(observed: &mut [Observed], ledger: &Ledger) -> Result<()> {
+    let known: BTreeMap<String, AgentId> = ledger
+        .list_items()?
+        .into_iter()
+        .filter(|r| r.kind == Kind::Skill)
+        .map(|r| (r.key.native_id, r.key.origin))
+        .collect();
+    let mut origins: BTreeMap<String, AgentId> = BTreeMap::new();
+    for o in observed.iter().filter(|o| o.item.kind == Kind::Skill) {
+        origins.entry(o.native_id.clone()).or_insert_with(|| {
+            known
+                .get(&o.native_id)
+                .cloned()
+                .unwrap_or_else(|| o.agent.clone())
+        });
+    }
+    for o in observed.iter_mut().filter(|o| o.item.kind == Kind::Skill) {
+        let origin = &origins[&o.native_id];
+        o.replica_of = (o.agent != *origin).then(|| ItemKey {
+            origin: origin.clone(),
+            native_id: o.native_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn index(observed: &[Observed]) -> (BTreeMap<ItemKey, &Observed>, Replicas<'_>) {
     let mut originals = BTreeMap::new();
     let mut replicas = BTreeMap::new();
@@ -347,7 +376,8 @@ fn index(observed: &[Observed]) -> (BTreeMap<ItemKey, &Observed>, Replicas<'_>) 
 }
 
 pub fn plan(adapters: &[&dyn Adapter], ledger: &Ledger) -> Result<Plan> {
-    let observed = scan_all(adapters)?;
+    let mut observed = scan_all(adapters)?;
+    link_skills(&mut observed, ledger)?;
     let (originals, replicas) = index(&observed);
 
     let mut keys: BTreeSet<ItemKey> = originals.keys().cloned().collect();
@@ -458,6 +488,28 @@ fn plan_key(
     let base = item_row.map_or_else(|| cur.clone(), |r| r.hash);
     let orig_changed = cur != base;
 
+    // A copy that no ledger row accounts for is adopted only when it equals the original; the
+    // same skill name with other content is left to the user.
+    if kind == Kind::Skill {
+        let divergent: Vec<String> = sides
+            .iter()
+            .filter(|s| s.row.is_none())
+            .filter_map(|s| s.obs)
+            .filter(|o| content_hash(&o.item) != cur)
+            .map(|o| o.agent.to_string())
+            .collect();
+        if !divergent.is_empty() {
+            conflict(
+                plan,
+                &format!(
+                    "same skill with different content in {}",
+                    divergent.join(", ")
+                ),
+            );
+            return Ok(());
+        }
+    }
+
     let mut missing = false;
     let mut changed: Vec<&Side> = Vec::new();
     let mut present: Vec<&Side> = Vec::new();
@@ -521,7 +573,9 @@ fn plan_key(
             .map(|s| s.agent.clone())
             .chain(absent.iter().map(|a| (*a).clone()))
             .collect();
-        targets.push(c.agent.clone());
+        if kind != Kind::Skill {
+            targets.push(c.agent.clone());
+        }
         plan.actions.push(Action::WriteBack {
             key: key.clone(),
             from: c.agent.clone(),
@@ -534,7 +588,7 @@ fn plan_key(
                         description: orig.item.description.clone(),
                         ..o.item.clone()
                     },
-                    Kind::Memory | Kind::Session => o.item.clone(),
+                    Kind::Memory | Kind::Session | Kind::Skill => o.item.clone(),
                 },
             ),
             targets,
@@ -552,6 +606,25 @@ fn plan_key(
         }
     }
     for agent in absent {
+        // A copy the agent reads from outside its own store counts as present when it matches.
+        let visible = (kind == Kind::Skill)
+            .then(|| {
+                adapters
+                    .iter()
+                    .find(|a| a.id() == *agent)
+                    .and_then(|a| a.visible_copy(&key.native_id))
+            })
+            .flatten();
+        if let Some(hash) = visible {
+            if hash != cur {
+                plan.notes.push(Note::Skipped {
+                    agent: agent.clone(),
+                    label: orig.item.name.clone(),
+                    reason: "a copy outside the agent's own skills directory has different content; not written over".to_string(),
+                });
+            }
+            continue;
+        }
         plan.actions.push(Action::Write {
             key: key.clone(),
             target: agent.clone(),
@@ -762,7 +835,8 @@ fn refresh(adapters: &[&dyn Adapter], ledger: &Ledger, touched: &Touched) -> Res
     if touched.keys.is_empty() {
         return Ok(());
     }
-    let observed = scan_all(adapters)?;
+    let mut observed = scan_all(adapters)?;
+    link_skills(&mut observed, ledger)?;
     let (originals, replicas) = index(&observed);
     for key in &touched.keys {
         let Some(mut row) = ledger.get_item(key)? else {

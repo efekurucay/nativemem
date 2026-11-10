@@ -37,9 +37,20 @@ pub fn assess_all(agents: &Agents, state: &mut CompatState) -> Vec<AgentReport> 
 
 const CODEX_WRITES_OFF: &str = "session writes are off; set NATIVEMEM_CODEX_SESSION_WRITES=on to let nativemem write sessions into Codex";
 
-/// Adds the informational notices: Codex session writes being off, and sessions other agents hold
-/// that Claude Code would delete.
+/// Adds the informational notices: Codex session writes being off, skills whose own copy differs
+/// from a copy the agent also reads elsewhere, and sessions other agents hold that Claude Code
+/// would delete.
 pub fn add_notices(agents: &Agents, reports: &mut [AgentReport]) {
+    for a in agents.all() {
+        let Ok(report) = a.skill_report() else {
+            continue;
+        };
+        if let Some(r) = reports.iter_mut().find(|r| r.agent == a.id()) {
+            r.notices.extend(report.shadowed.into_iter().map(|name| {
+                format!("skill {name}: the copy in the shared skills directory has other content than this agent's own copy")
+            }));
+        }
+    }
     if agents
         .codex
         .as_ref()

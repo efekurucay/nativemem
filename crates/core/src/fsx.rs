@@ -118,6 +118,79 @@ pub fn backup(
     Ok(dest)
 }
 
+/// Copy the directory `path` (symlinks inside it stay symlinks) to the same backup layout as
+/// `backup`. A symlink is not followed: a text file records where it points, because the content
+/// lives elsewhere and stays there.
+pub fn backup_dir(
+    session: &BackupSession,
+    state_dir: &Path,
+    agent: &AgentId,
+    root: &Path,
+    path: &Path,
+) -> Result<PathBuf> {
+    let rel = path.strip_prefix(root).map_err(|_| {
+        Error::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("not under root {}", root.display()),
+            ),
+        )
+    })?;
+    let dest = state_dir
+        .join("backups")
+        .join(session.stamp())
+        .join(agent.as_str())
+        .join(rel);
+    if fs::symlink_metadata(&dest).is_ok() {
+        return Ok(dest);
+    }
+    if fs::symlink_metadata(path)
+        .map_err(|e| Error::io(path, e))?
+        .file_type()
+        .is_symlink()
+    {
+        let target = fs::read_link(path).map_err(|e| Error::io(path, e))?;
+        atomic_write(
+            &dest,
+            format!("symlink -> {}\n", target.display()).as_bytes(),
+        )?;
+    } else {
+        copy_tree(path, &dest)?;
+    }
+    Ok(dest)
+}
+
+fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest).map_err(|e| Error::io(dest, e))?;
+    for entry in fs::read_dir(src).map_err(|e| Error::io(src, e))? {
+        let entry = entry.map_err(|e| Error::io(src, e))?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        let kind = entry.file_type().map_err(|e| Error::io(&from, e))?;
+        if kind.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if kind.is_symlink() {
+            copy_symlink(&from, &to)?;
+        } else {
+            fs::copy(&from, &to).map_err(|e| Error::io(&from, e))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(from: &Path, to: &Path) -> Result<()> {
+    let target = fs::read_link(from).map_err(|e| Error::io(from, e))?;
+    std::os::unix::fs::symlink(target, to).map_err(|e| Error::io(to, e))
+}
+
+#[cfg(not(unix))]
+fn copy_symlink(from: &Path, to: &Path) -> Result<()> {
+    let target = fs::read_link(from).map_err(|e| Error::io(from, e))?;
+    atomic_write(to, format!("symlink -> {}\n", target.display()).as_bytes())
+}
+
 /// Back up `path`, then delete it. Returns the backup location.
 pub fn remove_with_backup(
     session: &BackupSession,

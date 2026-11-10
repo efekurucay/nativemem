@@ -25,7 +25,7 @@ nativemem-sync/
 │   └── images/                   screenshots referenced by README.md (overview.png, memory-detail.png)
 ├── scripts/
 │   ├── release.sh                local release: checks, version bump, macOS artifacts, notes, commit, tag
-│   └── demo-home.sh              synthetic agent homes with generic memory items for trying the CLI and app
+│   └── demo-home.sh              synthetic agent homes with generic memory items and skills for trying the CLI and app
 ├── .github/
 │   ├── workflows/                ci.yml (Linux checks), release.yml (Linux binaries, release), portability.yml (manual Windows build)
 │   ├── ISSUE_TEMPLATE/           bug_report, agent_update, config
@@ -38,7 +38,7 @@ nativemem-sync/
 │   │       ├── model.rs          AgentId, Scope, Kind, Item, ItemKey, Observed, the Adapter trait, content_hash
 │   │       ├── engine.rs         plan (pure) and apply: three-way decision, session planner, mass-delete guard
 │   │       ├── ledger.rs         SQLite ledger: items and replicas tables, writer revision column
-│   │       ├── fsx.rs            atomic_write, BackupSession, backup layout
+│   │       ├── fsx.rs            atomic_write, BackupSession, backup layout, backup_dir for skill directories
 │   │       ├── session.rs        neutral session model, tool rendering, titles, window, markers, derived ids
 │   │       ├── compat.rs         Check, AgentReport, Status, compat.json state, assess, prompt, notifications
 │   │       ├── probe.rs          read-only helpers for probes: tails, newest files, executable lookup
@@ -60,9 +60,10 @@ nativemem-sync/
 │   │           ├── opencode_probes.rs  OpenCode probes: config directory and AGENTS.md
 │   │           ├── pi.rs         Pi: AGENTS.md through agents_file, session reader and writer
 │   │           ├── agents_file.rs      generic adapter for agents that only read a global AGENTS.md (OpenCode, Pi)
+│   │           ├── skills.rs     skill directories: manifest hash, atomic tree copy, visible roots, layout probe
 │   │           ├── memory_store.rs     replica store plus routing block, shared by Codex, OpenCode, Pi
 │   │           └── sections.rs   instruction-section parser, managed regions, byte-preserving edits, markers
-│   │   └── tests/probes.rs       probes against testkit fixtures, drift cases, blocked kinds
+│   │   └── tests/                probes.rs (probes, drift, blocked kinds), skills.rs (skill mirroring over four temp homes)
 │   └── cli/                      binary `nativemem`
 │       ├── src/
 │       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/edit, JSON output
@@ -73,6 +74,7 @@ nativemem-sync/
 │   ├── Package.swift
 │   ├── Sources/Nativemem/        app entry point (`NativememApp.swift`)
 │   ├── Sources/NativememKit/     app logic and views
+│   │   ├── SkillTextView.swift   read-only SKILL.md of a skill
 │   │   ├── NativememCLI.swift    finds and runs the binary, decodes JSON
 │   │   ├── Contract.swift        Codable types mirroring the CLI JSON contract
 │   │   ├── AppModel.swift        observable state, grouping, copy folding
@@ -88,7 +90,7 @@ nativemem-sync/
 └── wiki/                         this knowledge base
     ├── README.md · CLAUDE.md · WIKI-CREATOR.md
     ├── architecture/             ci, compatibility, context-quality, file-structure, overview, safety
-    ├── kinds/                    memory, instruction-sections, sessions
+    ├── kinds/                    memory, instruction-sections, sessions, skills
     ├── agents/                   claude-code, codex, pi, opencode, hermes
     ├── runbooks/                 agent-update-action-required
     ├── guides/                   add-an-agent, add-a-resource-kind, release, verify-with-real-agents

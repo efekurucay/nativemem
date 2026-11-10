@@ -61,7 +61,7 @@ fn claude_probes_pass_on_the_fixtures_and_read_the_newest_version() {
     let t = tempfile::tempdir().unwrap();
     let (a, session) = claude(t.path());
     assert_eq!(failing(&a.probes()), Vec::<&str>::new());
-    assert_eq!(a.probes().len(), 5);
+    assert_eq!(a.probes().len(), 6);
     assert_eq!(a.version(), None);
     let mut f = fs::OpenOptions::new().append(true).open(session).unwrap();
     writeln!(f, r#"{{"type":"system","version":"2.1.9"}}"#).unwrap();
@@ -158,7 +158,7 @@ fn codex_probes_pass_on_the_fixtures() {
     let t = tempfile::tempdir().unwrap();
     let (a, h) = codex(t.path());
     assert_eq!(failing(&a.probes()), Vec::<&str>::new());
-    assert_eq!(a.probes().len(), 5);
+    assert_eq!(a.probes().len(), 6);
     assert_eq!(a.version().as_deref(), Some("0.167.0"));
     fs::remove_file(h.root.join("version.json")).unwrap();
     assert_eq!(a.version(), None);
@@ -300,7 +300,7 @@ fn pi_probes_pass_on_the_fixtures_and_read_the_package_version() {
     .unwrap();
     let a = PiAdapter::new(h.root.clone(), t.path().join("state"), stamp()).with_search_path(path);
     assert_eq!(failing(&a.probes()), Vec::<&str>::new());
-    assert_eq!(a.probes().len(), 3);
+    assert_eq!(a.probes().len(), 4);
     assert_eq!(a.version().as_deref(), Some("1.5.0"));
     let without = PiAdapter::new(h.root.clone(), t.path().join("state"), stamp())
         .with_search_path("/nonexistent".into());
@@ -356,5 +356,6 @@ fn opencode_probes_cover_the_config_dir_and_agents_file() {
     let blocked = a.with_blocked_kinds(&[Kind::Instruction, Kind::Memory]);
     assert!(!blocked.supports(Kind::Memory, &Scope::Project("/work/app".into())));
     let pi_like = AgentsFileAdapter::new("pi", home, t.path().join("state"), stamp());
-    assert!(pi_like.probes().is_empty() && pi_like.version().is_none());
+    assert_eq!(pi_like.probes().len(), 1);
+    assert!(pi_like.version().is_none());
 }

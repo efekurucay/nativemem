@@ -34,21 +34,26 @@ struct ItemDetailView: View {
                     Button("Delete…", systemImage: "trash", role: .destructive) {
                         confirmingDelete = true
                     }
-                    .help("Delete this memory")
+                    .help(item.primary.isSkill ? "Delete this skill" : "Delete this memory")
                 }
             }
         }
-        .confirmationDialog("Delete this memory?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+        .confirmationDialog(
+            item.primary.isSkill ? "Delete this skill?" : "Delete this memory?",
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
             Button("Delete", role: .destructive) {
                 Task { await onDelete() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("It will be removed from Claude Code now and from the other agents at the next sync. A backup is kept in ~/.nativemem/backups.")
+            Text("It will be removed from \(agentDisplayName(item.primary.agent)) now and from the other agents at the next sync. A backup is kept in ~/.nativemem/backups.")
         }
     }
 
     private var editBlockedReason: String? {
+        if item.primary.isSkill { return "Skills are edited as files: edit the skill files directly." }
         if item.originalMissing { return "The original is missing, so there is nothing to edit." }
         if model.uneditableItemIDs.contains(item.id) { return "Its agent regenerates this entry, so it cannot be edited." }
         return nil
@@ -84,7 +89,11 @@ struct ItemDetailView: View {
                     }
                 }
 
-                BodyText(blocks: MarkdownBlocks.parse(item.primary.body))
+                if item.primary.isSkill {
+                    SkillTextView(model: model, item: item)
+                } else {
+                    BodyText(blocks: MarkdownBlocks.parse(item.primary.body))
+                }
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)

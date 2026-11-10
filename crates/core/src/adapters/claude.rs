@@ -15,6 +15,7 @@ use crate::slug::slugify;
 use super::claude_probes;
 use super::claude_sessions::{self, ClaudeSessions, MARKER_KEY};
 use super::sections::InstructionFile;
+use super::skills::{skill_name, SkillReport, SkillStore};
 
 const INSTRUCTION_FILE: &str = "CLAUDE.md";
 const INDEX_FILE: &str = "MEMORY.md";
@@ -30,6 +31,7 @@ pub struct ClaudeAdapter {
     backups: BackupSession,
     fs_root: Option<PathBuf>,
     instructions: InstructionFile,
+    skills: SkillStore,
     sessions: Option<ClaudeSessions>,
     blocked: Vec<Kind>,
     retention: Retention,
@@ -84,6 +86,12 @@ impl ClaudeAdapter {
                 backups.clone(),
                 INSTRUCTION_FILE,
             ),
+            skills: SkillStore::new(
+                AgentId::new("claude"),
+                claude_home.clone(),
+                state_dir.clone(),
+                backups.clone(),
+            ),
             claude_home,
             state_dir,
             backups,
@@ -101,6 +109,12 @@ impl ClaudeAdapter {
     /// Kinds this adapter neither reads nor writes while its compatibility checks fail.
     pub fn with_blocked_kinds(mut self, kinds: &[Kind]) -> Self {
         self.blocked = kinds.to_vec();
+        self
+    }
+
+    /// Directories Claude Code also reads skills from; copies there are never written.
+    pub fn with_visible_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.skills = self.skills.with_visible_roots(roots);
         self
     }
 
@@ -227,6 +241,7 @@ impl ClaudeAdapter {
                     category: field(&doc.fm, "type", true)
                         .or_else(|| field(&doc.fm, "type", false)),
                     body: doc.body,
+                    source_dir: None,
                 };
                 scan.items.push(Observed {
                     agent: self.id(),
@@ -418,7 +433,9 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn probes(&self) -> Vec<Check> {
-        claude_probes::probes(&self.claude_home)
+        let mut checks = claude_probes::probes(&self.claude_home);
+        checks.push(self.skills.layout_check());
+        checks
     }
 
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
@@ -426,7 +443,7 @@ impl Adapter for ClaudeAdapter {
             && matches!(
                 (kind, scope),
                 (Kind::Memory | Kind::Session, Scope::Project(_))
-                    | (Kind::Instruction, Scope::Global)
+                    | (Kind::Instruction | Kind::Skill, Scope::Global)
             )
     }
 
@@ -441,10 +458,24 @@ impl Adapter for ClaudeAdapter {
     fn scan(&self) -> Result<Vec<Observed>> {
         let mut out = self.collect()?.items;
         out.extend(self.scan_sessions()?.observed);
+        if !self.blocked.contains(&Kind::Skill) {
+            out.extend(self.skills.scan()?);
+        }
         Ok(out)
     }
 
+    fn visible_copy(&self, native_id: &str) -> Option<String> {
+        self.skills.visible_copy(native_id)
+    }
+
+    fn skill_report(&self) -> Result<SkillReport> {
+        self.skills.report()
+    }
+
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
+        if item.kind == Kind::Skill {
+            return self.skills.write(item);
+        }
         if item.kind == Kind::Instruction {
             return self.instructions.write_replica(key, item);
         }
@@ -506,6 +537,9 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+        if skill_name(native_id).is_some() {
+            return self.skills.write(item).map(|_| ());
+        }
         if is_session_id(native_id) {
             return Err(Error::unsupported("claude", "write_original session"));
         }
@@ -529,6 +563,9 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
+        if let Some(name) = skill_name(native_id) {
+            return self.skills.remove(name);
+        }
         if is_session_id(native_id) {
             return Err(Error::unsupported("claude", "remove session"));
         }
@@ -909,6 +946,7 @@ mod tests {
             description: desc.into(),
             category: cat.map(String::from),
             body: body.into(),
+            source_dir: None,
         }
     }
 
@@ -1499,6 +1537,7 @@ mod tests {
             description: heading.into(),
             category: None,
             body: body.into(),
+            source_dir: None,
         }
     }
 

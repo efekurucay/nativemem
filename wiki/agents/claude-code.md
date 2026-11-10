@@ -19,7 +19,8 @@ by versions 2.1.247 to 2.1.322; 376 top-level session files across 63 project di
 | Instruction sections | Read and write in `CLAUDE.md` | `claude.rs` through `sections.rs` |
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/claude_sessions.rs` |
 | Global-scope memory | Not supported (`supports` is false) | |
-| MCP servers, skills | Not implemented | |
+| Skills (global) | Read (originals) and write (replicas, edits, deletes) | `crates/core/src/adapters/skills.rs`, `claude.rs` |
+| MCP servers | Not implemented | |
 
 ## Native locations
 
@@ -29,7 +30,7 @@ by versions 2.1.247 to 2.1.322; 376 top-level session files across 63 project di
 | Memory | none | `<claude home>/projects/<dir>/memory/*.md` with a `MEMORY.md` index |
 | Sessions | | `<claude home>/projects/<dir>/<session id>.jsonl` |
 | MCP servers | `~/.claude.json` key `mcpServers` | `~/.claude.json` `projects.<path>.mcpServers`, `<repo>/.mcp.json`, plugin `.mcp.json` |
-| Skills | `<claude home>/skills/<name>/SKILL.md` | `<repo>/.claude/skills/`, plugin caches |
+| Skills | `<claude home>/skills/<name>/SKILL.md` (`synced/` is managed by Claude itself and left alone) | `<repo>/.claude/skills/`, plugin caches |
 
 The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_CONFIG_DIR`, else
 `~/.claude`. The agent takes part in a run only when that directory exists.
@@ -57,6 +58,7 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
   `CLAUDE.md`, and session replicas (marker key `nativemem_origin` on every line).
 - Creates a project directory with the encoded name plus a helper file `nativemem.jsonl` holding the
   `cwd` when no directory exists for a project (`wiki/kinds/memory.md`).
+- Reads and writes whole skill directories below `skills/` (`wiki/kinds/skills.md`).
 - Never touches `~/.claude.json`, credentials or plugin directories.
 
 ## Sessions: listing and resume
@@ -120,6 +122,7 @@ counts only.
 | `claude.memory_frontmatter` | memory | `KNOWN_TOP_KEYS`: `name`, `description`, `metadata`, `type`, `originSessionId` at the top level; `name` and `description` on every file; `type` under `metadata` or at the top level; other `metadata` keys are free-form | an unknown top-level key, a file without `name` or `description`, or no file with a `type` |
 | `claude.memory_index` | memory | link lines of `MEMORY.md` are `- [name](file.md) — description` (`INDEX_LINE_SHAPE`) | a link line has another shape |
 | `claude.project_dir_encoding` | memory, session | directory name equals `encode_name(cwd)`, or starts with it plus `-` when the session moved into a subdirectory | a sampled directory (name under 200 characters) matches none of its `cwd` values |
+| `claude.skills_layout` | skill | `LAYOUT_EXPECTED`: the skills directory is absent, empty, or most of its directories hold a top-level `SKILL.md` | it is not a directory, or most directories lack `SKILL.md` |
 
 Evidence (read-only statistics on the development machine, Claude Code 2.1.322, 809 transcripts in
 154 project directories): the newest 60 transcripts held 22 line types and every one of 5058 `user`

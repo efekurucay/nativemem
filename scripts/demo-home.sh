@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds a synthetic agent environment under <dir>: fake homes for Claude Code, Codex, Pi and
-# OpenCode plus a state directory, filled with generic memory items. With a nativemem binary
+# OpenCode plus a state directory, filled with generic memory items and skills. With a nativemem binary
 # it runs `sync --apply` against those roots so the other agents hold replicas.
 # Usage: scripts/demo-home.sh <dir> [path-to-nativemem-binary]
 set -euo pipefail
@@ -269,6 +269,21 @@ Commit messages use `type(scope): summary`. Do not rewrite shared history.
 
 Ask before deleting files or running commands that cannot be undone.
 EOF
+
+# skill <agent home> <name> <description> ; a skill with one reference file and one script
+skill() {
+    local dir="$1/skills/$2"
+    mkdir -p "$dir/references" "$dir/scripts"
+    printf -- '---\nname: %s\ndescription: %s\n---\n\n# %s\n\nFollow the steps in references/steps.md.\n' "$2" "$3" "$2" > "$dir/SKILL.md"
+    printf '1. Read the request.\n2. Apply the %s checklist.\n3. Report the result.\n' "$2" > "$dir/references/steps.md"
+    printf '#!/bin/sh\necho "%s ran"\n' "$2" > "$dir/scripts/run.sh"
+    chmod +x "$dir/scripts/run.sh"
+}
+skill "$CLAUDE" review-checklist "Review a change against the team checklist before it is merged"
+skill "$CLAUDE" release-notes "Draft release notes from merged pull request titles"
+skill "$CLAUDE" bug-triage "Sort incoming bug reports by severity and likely owner"
+skill "$CODEX" test-plan "Write a test plan for a feature before implementation starts"
+skill "$PI" changelog-entry "Write a one-line changelog entry in the project's style"
 
 echo "Created $COUNT memory items in 4 Claude Code projects under $BASE"
 

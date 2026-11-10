@@ -45,6 +45,8 @@ hand-drawn borders, dividers or backgrounds.
   - Top-level folders start expanded; deeper ones start collapsed.
   - The filter keeps folders whose path contains the text, with their ancestors, expanded.
 - A "Global" row above the tree when global items exist.
+- A "Skills" row below it when skills exist, with a count badge. Skills are listed there only,
+  not under "Global" or a project.
 
 **Item list** (a folder is selected)
 - Items of that folder and everything below it. When they come from more than one project, the
@@ -54,6 +56,12 @@ hand-drawn borders, dividers or backgrounds.
 - A search field filters by name, description and body.
 - Each logical item appears once even though it exists in several agents: rows are originals;
   copies are folded into their original.
+
+**Skills** ("Skills" row selected)
+- One row each: name, description and a small label per agent that holds the skill.
+- The detail pane shows the `SKILL.md` text read-only (loaded with `skill show`), "Lives in", and
+  Delete (the skill directory is removed with a backup; the next sync propagates it). Edit is
+  disabled with the tooltip "Skills are edited as files: edit the skill files directly."
 
 **Detail column** (an item is selected)
 - Name as title, description below, category tag.
@@ -147,7 +155,7 @@ either way)
 ```
 One entry per agent in the order claude, codex, opencode, pi (`--agent <id>` keeps one).
 `status` is `ok`, `updated`, `action_required` or `not_installed`; `paused` lists the kinds
-(`memory`, `instruction`, `session`) that failing checks stop. `prompt` is present only for
+(`memory`, `instruction`, `session`, `skill`) that failing checks stop. `prompt` is present only for
 `action_required`. `notices` are informational lines (the app shows them as secondary text in the
 agent's Overview box; Codex carries `session writes are off; set NATIVEMEM_CODEX_SESSION_WRITES=on to let nativemem write sessions into Codex` until that switch is on); they never change `status`. `doctor --accept <agent> --json` records the failing checks' observed values
 as reviewed, returns the document after that and adds
@@ -171,10 +179,27 @@ An agent without a home directory fails with code `not_installed`.
       "replica_of": { "origin": "claude", "native_id": "-Users-x-app/feedback_tests.md" },
       "hash": "ab12…" } ] }
 ```
-`kind` is `memory` or `instruction`. An instruction item is one `## ` section of a global
+`kind` is `memory`, `instruction` or `skill`. A skill item is one directory with a top-level
+`SKILL.md` in an agent's own skills directory: `native_id` is `skill:<directory name>`, `path` is
+the skill directory, `scope` is global, `name` is the directory name, `description` is the
+frontmatter `description` (empty when it cannot be read), `category` is `null` and `body` is always
+`""` (file contents are never listed). The copies of one skill in several agents are linked
+through `replica_of` the same way as memory; the origin is the agent the ledger records, or the
+first of Claude Code, Codex, OpenCode, Pi that holds it. The skills list is also available with
+`items --kind skill --json`. An instruction item is one `## ` section of a global
 instruction file (`CLAUDE.md`, `AGENTS.md`): `native_id` is `<file>#<slug>`, `scope` is global,
 `description` is the heading text and `category` is `null`.
 `scope` is `{ "type": "global" }` for global items. `category` may be `null`.
+
+`nativemem skill show --agent <id> --name <skill> --json`
+```json
+{ "agent": "claude", "name": "demo-skill",
+  "path": "/Users/x/.claude/skills/demo-skill/SKILL.md",
+  "text": "---\nname: demo-skill\ndescription: Does demo-skill\n---\n…" }
+```
+Reads the `SKILL.md` of that skill in that agent's own skills directory. A skill the agent does
+not hold fails with code `not_found`. `status --json` carries `"skills": <count>` per agent beside
+`sessions`; skills are not counted in `originals` and `replicas`.
 
 `nativemem sync --json` (preview) and `nativemem sync --apply --json`
 ```json
@@ -210,7 +235,8 @@ document on stdin:
 ```
 Rewrites that original entry in place (with backup). It does not sync; the next sync carries
 the change to the copies. Editing an entry the agent regenerates itself fails with code
-`unsupported`. For an instruction item only `body` changes; if `name` or `description` differs
+`unsupported`; so does editing a skill (skills are edited as files in their directory). For an
+instruction item only `body` changes; if `name` or `description` differs
 from the current values the command writes nothing and fails with code `invalid`.
 
 ## App structure

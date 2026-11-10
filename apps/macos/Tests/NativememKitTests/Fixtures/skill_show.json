@@ -1,0 +1,3 @@
+{ "agent": "claude", "name": "demo-skill",
+  "path": "/Users/x/.claude/skills/demo-skill/SKILL.md",
+  "text": "---\nname: demo-skill\ndescription: Does demo-skill\n---\nUse it.\n" }

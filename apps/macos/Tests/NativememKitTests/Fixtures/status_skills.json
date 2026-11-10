@@ -1,0 +1,4 @@
+{ "agents": [
+    { "id": "claude", "originals": 1, "replicas": 0, "sessions": 0, "skills": 2, "automated_sessions": 0, "skipped": [ { "label": "demo-skill", "reason": "larger than 50 MB" } ] },
+    { "id": "pi", "originals": 0, "replicas": 1, "sessions": 0, "skills": 2, "automated_sessions": 0, "skipped": [] } ],
+  "ledger_items": 3 }

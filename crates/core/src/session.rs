@@ -152,6 +152,7 @@ impl Session {
             description: self.title.clone(),
             category: None,
             body: self.to_body(),
+            source_dir: None,
         }
     }
 

@@ -73,6 +73,7 @@ adapter) and Claude Code (full adapter with sessions) are the two reference impl
   an agent without a home takes no part in a run, with `.with_blocked_kinds(&paused("<id>"))`. Add it to
   `all()`, `named()` and `AGENT_IDS`.
 - [ ] The `UnknownAgent` message and the `--agent` help text of `delete` and `edit` list the new id.
+- [ ] Skills: an agent with a native `skills/<name>/SKILL.md` directory gets `SkillStore` (`crates/core/src/adapters/skills.rs`) wired into `supports`, `scan`, `write_replica`, `write_original`, `remove`, `visible_copy`, `skill_report` and a `layout_check` probe; `AgentsFileAdapter` already does this. Native read roots outside the agent's own directory are passed with `with_visible_roots` from `Agents::open`.
 - [ ] `status`: add the agent to the session-report match when it has a session reader.
 - [ ] `crates/cli/src/schedule.rs`: add the root to `ExplicitRoots`, to `run_schedule` and to the flag
   list passed to the job, so a scheduled run uses the same root.

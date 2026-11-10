@@ -446,6 +446,7 @@ impl InstructionFile {
             description: heading,
             category: None,
             body,
+            source_dir: None,
         }
     }
 

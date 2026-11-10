@@ -12,6 +12,11 @@ struct SidebarView: View {
                 Label("Global", systemImage: "globe")
                     .tag(SidebarSelection.global)
             }
+            if model.skillCount > 0 {
+                Label("Skills", systemImage: "sparkles")
+                    .badge(model.skillCount)
+                    .tag(SidebarSelection.skills)
+            }
             Section("Projects") {
                 ForEach(model.visibleTree) { node in
                     TreeNodeView(node: node, depth: 0, forceExpanded: model.isFiltering)

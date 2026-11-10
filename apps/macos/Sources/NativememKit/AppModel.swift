@@ -4,6 +4,7 @@ import Observation
 public enum SidebarSelection: Hashable, Sendable {
     case overview
     case global
+    case skills
     case folder(path: String)
     case folderOnly(path: String)
 }
@@ -64,8 +65,10 @@ public final class AppModel {
     }
 
     public var hasGlobalItems: Bool {
-        index.items.contains { $0.project.path == nil }
+        index.items.contains { !$0.primary.isSkill && $0.project.path == nil }
     }
+
+    public var skillCount: Int { index.skills.count }
 
     public var projectTree: [ProjectTree.Node] {
         let entries = index.projects.compactMap { project -> (path: String, count: Int)? in
@@ -143,6 +146,11 @@ public final class AppModel {
             errorMessage = error.localizedDescription
         }
         await reload()
+    }
+
+    public func skillText(of item: LogicalItem) async throws -> String {
+        guard let cli else { throw CLIError.notFound }
+        return try await cli.skillShow(agent: item.primary.agent, name: item.primary.name).text
     }
 
     public func markReviewed(_ agent: String) async {

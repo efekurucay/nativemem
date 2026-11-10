@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
+use crate::adapters::skills::SkillReport;
 use crate::error::Result;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -35,6 +36,7 @@ pub enum Kind {
     Memory,
     Instruction,
     Session,
+    Skill,
 }
 
 impl Kind {
@@ -43,6 +45,7 @@ impl Kind {
             Kind::Memory => "memory",
             Kind::Instruction => "instruction",
             Kind::Session => "session",
+            Kind::Skill => "skill",
         }
     }
 
@@ -51,6 +54,7 @@ impl Kind {
             "memory" => Some(Kind::Memory),
             "instruction" => Some(Kind::Instruction),
             "session" => Some(Kind::Session),
+            "skill" => Some(Kind::Skill),
             _ => None,
         }
     }
@@ -64,6 +68,9 @@ pub struct Item {
     pub description: String,
     pub category: Option<String>,
     pub body: String,
+    /// The directory a skill's files are copied from; the body of a skill is only a manifest.
+    /// Not part of the content hash.
+    pub source_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -120,6 +127,17 @@ pub trait Adapter {
     fn finish(&self) -> Result<Vec<(String, String)>> {
         Ok(Vec::new())
     }
+    /// Hash of a copy of the skill `native_id` that this agent reads from a location outside its
+    /// own skills directory, when there is one. The engine writes nothing into an agent whose
+    /// visible copy already matches.
+    fn visible_copy(&self, _native_id: &str) -> Option<String> {
+        None
+    }
+    /// Skills this agent cannot take part with and copies that shadow or are shadowed by a
+    /// visible copy with other content.
+    fn skill_report(&self) -> Result<SkillReport> {
+        Ok(SkillReport::default())
+    }
     fn scan(&self) -> Result<Vec<Observed>>;
     /// Create or update the replica of `key` in this agent. Returns its native_id and path.
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)>;
@@ -173,12 +191,13 @@ mod tests {
             description: "d".into(),
             category: Some("user".into()),
             body: "line1\nline2".into(),
+            source_dir: None,
         }
     }
 
     #[test]
     fn kind_text_round_trips() {
-        for k in [Kind::Memory, Kind::Instruction, Kind::Session] {
+        for k in [Kind::Memory, Kind::Instruction, Kind::Session, Kind::Skill] {
             assert_eq!(Kind::parse(k.as_str()), Some(k));
         }
         assert_eq!(Kind::parse("other"), None);

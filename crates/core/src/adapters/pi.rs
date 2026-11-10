@@ -19,6 +19,7 @@ use crate::session::{
 
 use super::agents_file::AgentsFileAdapter;
 use super::pi_probes;
+use super::skills::{skill_name, SkillReport};
 
 const AGENT: &str = "pi";
 /// `customType` of the entry that marks a session as a replica. Pi keeps custom entries out of
@@ -333,6 +334,12 @@ impl PiAdapter {
         self
     }
 
+    /// Directories Pi also reads skills from; copies there are never written.
+    pub fn with_visible_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.instructions = self.instructions.with_visible_roots(roots);
+        self
+    }
+
     /// Where the version probe looks for the `pi` executable [default: `PATH`].
     pub fn with_search_path(mut self, path: std::ffi::OsString) -> Self {
         self.search_path = Some(path);
@@ -450,7 +457,9 @@ impl Adapter for PiAdapter {
     }
 
     fn probes(&self) -> Vec<Check> {
-        pi_probes::probes(&self.home)
+        let mut checks = pi_probes::probes(&self.home);
+        checks.push(self.instructions.skills_check());
+        checks
     }
 
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
@@ -474,6 +483,14 @@ impl Adapter for PiAdapter {
         Ok(out)
     }
 
+    fn visible_copy(&self, native_id: &str) -> Option<String> {
+        self.instructions.visible_copy(native_id)
+    }
+
+    fn skill_report(&self) -> Result<SkillReport> {
+        self.instructions.skill_report()
+    }
+
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
         if item.kind == Kind::Session {
             return self.write_session_replica(key, item);
@@ -482,6 +499,9 @@ impl Adapter for PiAdapter {
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+        if skill_name(native_id).is_some() {
+            return self.instructions.write_original(native_id, item);
+        }
         if is_session_id(native_id) {
             return Err(Error::unsupported(AGENT, "write_original session"));
         }
@@ -489,6 +509,9 @@ impl Adapter for PiAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
+        if skill_name(native_id).is_some() {
+            return self.instructions.remove(native_id);
+        }
         if is_session_id(native_id) {
             return Err(Error::unsupported(AGENT, "remove session"));
         }

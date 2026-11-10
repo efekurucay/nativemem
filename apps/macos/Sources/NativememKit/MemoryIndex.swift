@@ -88,9 +88,14 @@ public struct MemoryIndex: Sendable {
         items = logical
     }
 
+    /// Skills are listed under their own sidebar row, not under Global.
+    public var skills: [LogicalItem] {
+        items.filter { $0.primary.isSkill }
+    }
+
     /// Largest first; ties by path so the order is stable.
     public var projects: [Project] {
-        Dictionary(grouping: items, by: \.project)
+        Dictionary(grouping: items.filter { !$0.primary.isSkill }, by: \.project)
             .map { Project(key: $0.key, count: $0.value.count) }
             .sorted { ($0.count, $1.key.path ?? "") > ($1.count, $0.key.path ?? "") }
     }
@@ -98,7 +103,7 @@ public struct MemoryIndex: Sendable {
     /// Items of a sidebar selection; a folder includes everything below it.
     public func items(in selection: SidebarSelection, matching query: String = "") -> [LogicalItem] {
         items
-            .filter { Self.contains($0.project.path, in: selection) && $0.matches(query) }
+            .filter { Self.holds($0, in: selection) && $0.matches(query) }
             .sorted { $0.primary.name.localizedStandardCompare($1.primary.name) == .orderedAscending }
     }
 
@@ -122,9 +127,14 @@ public struct MemoryIndex: Sendable {
         items.first { $0.id == id }
     }
 
+    private static func holds(_ item: LogicalItem, in selection: SidebarSelection) -> Bool {
+        if selection == .skills { return item.primary.isSkill }
+        return !item.primary.isSkill && contains(item.project.path, in: selection)
+    }
+
     private static func contains(_ path: String?, in selection: SidebarSelection) -> Bool {
         switch selection {
-        case .overview: false
+        case .overview, .skills: false
         case .global: path == nil
         case .folderOnly(let root): path == root
         case .folder(let root):

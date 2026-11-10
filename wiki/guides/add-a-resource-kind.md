@@ -8,8 +8,9 @@ flows through the engine with a deliberate policy, safe writes and complete docs
 ## Scope
 
 A new `Kind` variant and the adapters that store it. A new agent is in
-`wiki/guides/add-an-agent.md`. MCP servers and skills are research only today: their locations and
-schemas are on the agent pages, no code exists.
+`wiki/guides/add-an-agent.md`. MCP servers are research only today: their locations and
+schemas are on the agent pages, no code exists. Skills are implemented (`wiki/kinds/skills.md`) and
+are the reference for a kind without a marker and with a directory as its unit.
 
 ## Checklist
 
@@ -115,4 +116,4 @@ schemas are on the agent pages, no code exists.
 
 ## Last updated
 
-2026-11-10
+2026-11-11

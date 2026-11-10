@@ -169,6 +169,7 @@ pub fn kinds_text(kinds: &[Kind]) -> String {
             Kind::Memory => "memory",
             Kind::Instruction => "instructions",
             Kind::Session => "sessions",
+            Kind::Skill => "skills",
         })
         .collect::<Vec<_>>()
         .join(", ")

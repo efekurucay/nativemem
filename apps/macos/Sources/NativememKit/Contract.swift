@@ -19,6 +19,7 @@ public struct Item: Codable, Hashable, Sendable {
     public static let memoryKind = "memory"
     public static let instructionKind = "instruction"
     public static let sessionKind = "session"
+    public static let skillKind = "skill"
 
     public var agent: String
     public var nativeId: String
@@ -33,6 +34,7 @@ public struct Item: Codable, Hashable, Sendable {
     public var hash: String
 
     public var isInstruction: Bool { kind == Item.instructionKind }
+    public var isSkill: Bool { kind == Item.skillKind }
 
     public init(
         agent: String, nativeId: String, kind: String = Item.memoryKind, path: String, scope: Scope,
@@ -84,6 +86,8 @@ public struct AgentStatus: Codable, Hashable, Sendable {
     public var replicas: Int
     /// Chat sessions, counted apart from memory and instruction entries.
     public var sessions: Int
+    /// Skills, counted apart from memory and instruction entries.
+    public var skills: Int
     public var skipped: [SkippedEntry]
 
     public init(from decoder: Decoder) throws {
@@ -92,6 +96,7 @@ public struct AgentStatus: Codable, Hashable, Sendable {
         originals = try container.decode(Int.self, forKey: .originals)
         replicas = try container.decode(Int.self, forKey: .replicas)
         sessions = try container.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
+        skills = try container.decodeIfPresent(Int.self, forKey: .skills) ?? 0
         skipped = try container.decode([SkippedEntry].self, forKey: .skipped)
     }
 }
@@ -145,6 +150,14 @@ public struct SyncPlan: Codable, Sendable {
     public var actions: [SyncAction]
     public var notes: [SyncNote]
     public var summary: SyncSummary
+}
+
+/// The SKILL.md of one skill, as `skill show --json` prints it.
+public struct SkillText: Codable, Hashable, Sendable {
+    public var agent: String
+    public var name: String
+    public var path: String
+    public var text: String
 }
 
 public struct EntryRef: Codable, Hashable, Sendable {
@@ -231,7 +244,7 @@ public struct DoctorAgent: Codable, Hashable, Sendable, Identifiable {
     public var version: String?
     public var previousVersion: String?
     public var status: CompatStatus
-    /// Kinds of entries (`memory`, `instruction`, `session`) that are left alone for this agent.
+    /// Kinds of entries (`memory`, `instruction`, `session`, `skill`) that are left alone for this agent.
     public var paused: [String]
     public var checks: [DoctorCheck]
     /// Present for agents that need action: a prompt for a coding agent working in the repo.
@@ -252,6 +265,7 @@ public struct DoctorAgent: Codable, Hashable, Sendable, Identifiable {
             case Item.memoryKind: "memory"
             case Item.instructionKind: "instructions"
             case Item.sessionKind: "chat sessions"
+            case Item.skillKind: "skills"
             default: kind
             }
         }.joined(separator: ", ")

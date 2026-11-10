@@ -172,8 +172,8 @@ fn status_json_shape() {
     assert_eq!(
         doc,
         json!({ "agents": [
-            { "id": "claude", "originals": 1, "replicas": 0, "sessions": 0, "automated_sessions": 0, "skipped": [] },
-            { "id": "codex", "originals": 0, "replicas": 0, "sessions": 0, "automated_sessions": 0, "skipped": [] } ],
+            { "id": "claude", "originals": 1, "replicas": 0, "sessions": 0, "skills": 0, "automated_sessions": 0, "skipped": [] },
+            { "id": "codex", "originals": 0, "replicas": 0, "sessions": 0, "skills": 0, "automated_sessions": 0, "skipped": [] } ],
           "ledger_items": 0,
           "compat": { "action_required": 0, "updated": 0, "agents": [
             { "id": "claude", "status": "ok", "notices": [] }, { "id": "codex", "status": "ok", "notices": [] },
@@ -1074,4 +1074,252 @@ fn session_days_is_an_opt_in_limit() {
     };
     assert_eq!(sessions(&[]), 1);
     assert_eq!(sessions(&["--session-days", "14"]), 0);
+}
+
+fn skill_dir(root: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    let d = root.join(name);
+    fs::create_dir_all(&d).unwrap();
+    fs::write(
+        d.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: Does {name}\n---\n{body}\n"),
+    )
+    .unwrap();
+    d
+}
+
+fn skills_of(f: &Fx, agent: &str) -> std::path::PathBuf {
+    let home = match agent {
+        "claude" => f.claude.clone(),
+        "codex" => f.codex.clone(),
+        other => f.state.with_file_name(other),
+    };
+    home.join("skills")
+}
+
+#[test]
+fn skills_sync_through_the_cli_and_items_status_and_show_report_them() {
+    let f = four_agents();
+    let d = skill_dir(&skills_of(&f, "claude"), "demo-skill", "the text");
+    fs::write(d.join("run.sh"), "echo secret-looking-content").unwrap();
+
+    let (_, before) = f.json(&["items", "--kind", "skill", "--json"]);
+    assert_eq!(before["items"].as_array().unwrap().len(), 1);
+
+    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{doc}");
+    assert_eq!(doc["notes"], json!([]));
+    for agent in ["codex", "opencode", "pi"] {
+        assert!(
+            skills_of(&f, agent).join("demo-skill/run.sh").is_file(),
+            "{agent}"
+        );
+    }
+
+    let (_, items) = f.json(&["items", "--kind", "skill", "--json"]);
+    let list = items["items"].as_array().unwrap();
+    assert_eq!(list.len(), 4);
+    for i in list {
+        assert_eq!(i["kind"], "skill");
+        assert_eq!(i["name"], "demo-skill");
+        assert_eq!(i["native_id"], "skill:demo-skill");
+        assert_eq!(i["description"], "Does demo-skill");
+        assert_eq!(i["body"], "");
+        assert!(!i.to_string().contains("secret-looking-content"));
+    }
+    assert!(find(&items, "claude")["replica_of"].is_null());
+    assert_eq!(find(&items, "pi")["replica_of"]["origin"], "claude");
+    let (_, all) = f.json(&["items", "--json"]);
+    assert!(all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["kind"] == "skill"));
+
+    let (_, status) = f.json(&["status", "--json"]);
+    for a in status["agents"].as_array().unwrap() {
+        assert_eq!(a["skills"], 1, "{a}");
+    }
+    assert!(text(&run(&f.claude, &f.codex, &f.state, &["status"])).contains("1 skills"));
+
+    let (code, shown) = f.json(&[
+        "skill",
+        "show",
+        "--agent",
+        "pi",
+        "--name",
+        "demo-skill",
+        "--json",
+    ]);
+    assert_eq!(code, Some(0));
+    assert_eq!(shown["name"], "demo-skill");
+    assert!(shown["text"].as_str().unwrap().contains("the text"));
+    let o = run(
+        &f.claude,
+        &f.codex,
+        &f.state,
+        &["skill", "show", "--agent", "claude", "--name", "demo-skill"],
+    );
+    assert!(text(&o).starts_with("---\nname: demo-skill"));
+    let (code, missing) = f.json(&["skill", "show", "--agent", "pi", "--name", "nope", "--json"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(missing["code"], "not_found");
+
+    let (code, doc) = f.json(&["sync", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(doc["actions"], json!([]));
+}
+
+#[test]
+fn skill_delete_backs_up_and_the_next_sync_propagates_it() {
+    let f = four_agents();
+    skill_dir(&skills_of(&f, "claude"), "demo-skill", "text");
+    f.json(&["sync", "--apply", "--json"]);
+    let (code, doc) = f.json(&[
+        "delete",
+        "--agent",
+        "codex",
+        "--id",
+        "skill:demo-skill",
+        "--json",
+    ]);
+    assert_eq!(code, Some(0), "{doc}");
+    let backup = Path::new(doc["backup_dir"].as_str().unwrap());
+    assert!(backup.join("codex/skills/demo-skill/SKILL.md").is_file());
+    assert!(!skills_of(&f, "codex").join("demo-skill").exists());
+    assert!(skills_of(&f, "claude").join("demo-skill").exists());
+
+    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{doc}");
+    for agent in ["claude", "opencode", "pi"] {
+        assert!(!skills_of(&f, agent).join("demo-skill").exists(), "{agent}");
+    }
+}
+
+#[test]
+fn skill_edit_is_unsupported() {
+    let f = four_agents();
+    skill_dir(&skills_of(&f, "claude"), "demo-skill", "text");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nativemem"))
+        .env("HOME", f.state.with_file_name("home"))
+        .args(["--claude-home"])
+        .arg(&f.claude)
+        .arg("--codex-home")
+        .arg(&f.codex)
+        .arg("--state-dir")
+        .arg(&f.state)
+        .args([
+            "edit",
+            "--agent",
+            "claude",
+            "--id",
+            "skill:demo-skill",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"name":"demo-skill","description":"d","category":null,"body":"x"}"#)
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(doc["code"], "unsupported");
+}
+
+#[test]
+fn skills_visible_in_the_shared_directory_are_not_copied_and_differences_are_reported() {
+    let f = four_agents();
+    let shared = f.state.with_file_name("home").join(".agents/skills");
+    skill_dir(&shared, "same-skill", "same");
+    skill_dir(&shared, "other-skill", "shared text");
+    skill_dir(&skills_of(&f, "claude"), "same-skill", "same");
+    skill_dir(&skills_of(&f, "claude"), "other-skill", "claude text");
+
+    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(2), "{doc}");
+    assert_eq!(doc["notes"].as_array().unwrap().len(), 2);
+    for agent in ["codex", "pi"] {
+        assert!(!skills_of(&f, agent).join("same-skill").exists(), "{agent}");
+        assert!(
+            !skills_of(&f, agent).join("other-skill").exists(),
+            "{agent}"
+        );
+    }
+    assert!(skills_of(&f, "opencode").join("same-skill").is_dir());
+    assert!(shared.join("other-skill/SKILL.md").is_file());
+}
+
+#[test]
+fn doctor_probes_the_skills_directory_and_names_shadowed_copies() {
+    let f = four_agents();
+    let shared = f.state.with_file_name("home").join(".agents/skills");
+    skill_dir(&shared, "demo-skill", "shared text");
+    skill_dir(&skills_of(&f, "codex"), "demo-skill", "own text");
+    let (code, doc) = f.json(&["doctor", "--json"]);
+    assert_eq!(code, Some(0), "{doc}");
+    for a in doc["agents"].as_array().unwrap() {
+        let id = a["id"].as_str().unwrap();
+        if a["installed"] == true {
+            let ids: Vec<&str> = a["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["id"].as_str().unwrap())
+                .collect();
+            assert!(
+                ids.contains(&format!("{id}.skills_layout").as_str()),
+                "{id}"
+            );
+        }
+    }
+    let codex = doc["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "codex")
+        .unwrap();
+    assert!(codex["notices"][0].as_str().unwrap().contains("demo-skill"));
+}
+
+#[test]
+fn identical_skills_in_every_agent_are_adopted_without_writes() {
+    let f = four_agents();
+    for agent in ["claude", "codex", "opencode", "pi"] {
+        skill_dir(&skills_of(&f, agent), "demo-skill", "same");
+    }
+    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{doc}");
+    assert!(doc["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| !a["origin"]["native_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("skill:")));
+}
+
+#[test]
+fn a_skills_directory_that_stops_looking_like_one_pauses_skills_for_that_agent() {
+    let f = four_agents();
+    for n in ["a", "b", "c"] {
+        fs::create_dir_all(skills_of(&f, "claude").join(n)).unwrap();
+    }
+    skill_dir(&skills_of(&f, "claude"), "demo-skill", "text");
+    let (code, doc) = f.json(&["doctor", "--json"]);
+    assert_eq!(code, Some(3), "{doc}");
+    let claude = &doc["agents"][0];
+    assert_eq!(claude["paused"], json!(["skill"]));
+    let (_, plan) = f.json(&["sync", "--apply", "--json"]);
+    assert!(plan["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["name"] != "demo-skill"));
+    assert!(!skills_of(&f, "codex").join("demo-skill").exists());
 }

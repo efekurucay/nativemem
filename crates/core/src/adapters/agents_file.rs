@@ -12,6 +12,7 @@ use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 use super::memory_store::MemoryStore;
 use super::opencode_probes;
 use super::sections::InstructionFile;
+use super::skills::{skill_name, SkillReport, SkillStore};
 
 const INSTRUCTION_FILE: &str = "AGENTS.md";
 const MEMORY_DIR: &str = "nativemem/memory";
@@ -23,6 +24,7 @@ pub struct AgentsFileAdapter {
     blocked: Vec<Kind>,
     instructions: InstructionFile,
     memory: MemoryStore,
+    skills: SkillStore,
 }
 
 impl AgentsFileAdapter {
@@ -42,6 +44,12 @@ impl AgentsFileAdapter {
                 dir.clone(),
                 dir.join(INSTRUCTION_FILE),
             ),
+            skills: SkillStore::new(
+                agent.clone(),
+                dir.clone(),
+                state_dir.clone(),
+                backups.clone(),
+            ),
             instructions: InstructionFile::new(
                 agent.clone(),
                 dir,
@@ -51,6 +59,17 @@ impl AgentsFileAdapter {
             ),
             agent,
         }
+    }
+
+    /// Directories the agent also reads skills from; copies there are never written.
+    pub fn with_visible_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.skills = self.skills.with_visible_roots(roots);
+        self
+    }
+
+    /// The probe of the skills directory layout.
+    pub fn skills_check(&self) -> Check {
+        self.skills.layout_check()
     }
 
     /// Kinds this adapter neither reads nor writes while its compatibility checks fail.
@@ -83,17 +102,20 @@ impl Adapter for AgentsFileAdapter {
     }
 
     fn probes(&self) -> Vec<Check> {
-        match self.agent.as_str() {
+        let mut checks = match self.agent.as_str() {
             "opencode" => opencode_probes::probes(&self.home),
             _ => Vec::new(),
-        }
+        };
+        checks.push(self.skills_check());
+        checks
     }
 
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
         !self.blocked.contains(&kind)
             && matches!(
                 (kind, scope),
-                (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global)
+                (Kind::Memory, Scope::Project(_))
+                    | (Kind::Instruction | Kind::Skill, Scope::Global)
             )
     }
 
@@ -105,18 +127,33 @@ impl Adapter for AgentsFileAdapter {
         if !self.blocked.contains(&Kind::Memory) {
             out.extend(self.memory.scan()?);
         }
+        if !self.blocked.contains(&Kind::Skill) {
+            out.extend(self.skills.scan()?);
+        }
         Ok(out)
+    }
+
+    fn visible_copy(&self, native_id: &str) -> Option<String> {
+        self.skills.visible_copy(native_id)
+    }
+
+    fn skill_report(&self) -> Result<SkillReport> {
+        self.skills.report()
     }
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
         match item.kind {
             Kind::Instruction => self.instructions.write_replica(key, item),
             Kind::Memory => self.memory.write_replica(key, item),
+            Kind::Skill => self.skills.write(item),
             Kind::Session => Err(self.unsupported("write_replica session")),
         }
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+        if skill_name(native_id).is_some() {
+            return self.skills.write(item).map(|_| ());
+        }
         if !self.instructions.owns(native_id) {
             return Err(self.unsupported("write_original"));
         }
@@ -124,6 +161,9 @@ impl Adapter for AgentsFileAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
+        if let Some(name) = skill_name(native_id) {
+            return self.skills.remove(name);
+        }
         if self.instructions.owns(native_id) {
             return self.instructions.remove(native_id);
         }
@@ -172,6 +212,7 @@ mod tests {
             description: heading.into(),
             category: None,
             body: body.into(),
+            source_dir: None,
         }
     }
 
@@ -255,6 +296,7 @@ mod tests {
             description: format!("about {name}"),
             category: Some("user".into()),
             body: "b".into(),
+            source_dir: None,
         }
     }
 

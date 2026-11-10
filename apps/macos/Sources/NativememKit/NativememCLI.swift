@@ -91,6 +91,11 @@ public struct NativememCLI: Sendable {
         return try await run(arguments)
     }
 
+    /// The SKILL.md text of a skill in one agent's own skills directory.
+    public func skillShow(agent: String, name: String) async throws -> SkillText {
+        try await run(["skill", "show", "--agent", agent, "--name=\(name)", "--json"])
+    }
+
     /// Native ids often begin with "-", so the value is attached with "=" to stay one option argument.
     public func delete(agent: String, nativeId: String) async throws -> DeleteResult {
         try await run(["delete", "--agent", agent, "--id=\(nativeId)", "--json"])

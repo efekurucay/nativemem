@@ -67,13 +67,21 @@ through behind the first. Probe observed values for failures are therefore built
 
 ## Notices
 
-`AgentReport.notices` carries informational lines that never change the status or the exit code. Two
+`AgentReport.notices` carries informational lines that never change the status or the exit code. Three
 notices: while Codex session writes are off (`NATIVEMEM_CODEX_SESSION_WRITES` is not `on`), `codex: session writes are off; set NATIVEMEM_CODEX_SESSION_WRITES=on to let nativemem write sessions into Codex`; and while Claude Code's retention is the default 30 days (`cleanupPeriodDays` absent from its
 settings), `doctor` and `status` say `transcripts older than 30 days are deleted by Claude itself; set
 cleanupPeriodDays in Claude's settings to keep older sessions` when another agent holds a session
 Claude would delete (`add_notices` in `crates/cli/src/doctor.rs`, which scans those agents). It is the
 `notices` array of each agent in `doctor --json` and `status --json` and secondary text in the agent's
 Overview box. The settings file is never edited.
+
+Every agent also has one skills probe, `<agent>.skills_layout` (protects `skill`): the skills directory is
+absent, empty, or most of its directories (dot-directories and `synced` left out) hold a top-level
+`SKILL.md` (`LAYOUT_EXPECTED` in `crates/core/src/adapters/skills.rs`); the observed value is a bucket, not
+a count. A third notice, `skill <name>: the copy in the shared skills directory has other content than
+this agent's own copy`, comes from `Adapter::skill_report` for Codex and Pi. Tests:
+`doctor_probes_the_skills_directory_and_names_shadowed_copies` and
+`a_skills_directory_that_stops_looking_like_one_pauses_skills_for_that_agent` in `crates/cli/tests/cli.rs`.
 
 ## Gating
 

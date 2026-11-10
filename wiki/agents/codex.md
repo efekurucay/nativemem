@@ -18,7 +18,8 @@ Claude Code). SQLite files were inspected read-only (`immutable=1`, structure an
 | Project memory | Originals read from generated `memories/MEMORY.md` (read-only, never edited or deleted); replicas written to a nativemem-owned store plus a routing block | `crates/core/src/adapters/codex.rs`, `memory_store.rs` |
 | Instruction sections | Read and write in `AGENTS.md` | `codex.rs` through `sections.rs` |
 | Sessions | Originals always read; replicas (with their `threads` row) written only when `NATIVEMEM_CODEX_SESSION_WRITES=on` and the schema probes pass | `codex_sessions.rs`, `codex_rollout.rs`, `codex_imports.rs`, `codex_threads.rs` |
-| MCP servers, skills | Not implemented | |
+| Skills (global) | Read and write in `<codex home>/skills/`; `.system` and directories without `SKILL.md` are left alone; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `codex.rs` |
+| MCP servers | Not implemented | |
 
 ## Native locations
 
@@ -30,7 +31,7 @@ Claude Code). SQLite files were inspected read-only (`immutable=1`, structure an
 | Session catalogue | `<codex home>/state_5.sqlite` table `threads` | |
 | Import ledger | `<codex home>/external_agent_session_imports.json` | |
 | MCP servers | `<codex home>/config.toml` tables `[mcp_servers.<name>]` | |
-| Skills | `<codex home>/skills/<name>/`, `~/.agents/skills`, plugin caches | `<repo>/.agents/skills` |
+| Skills | `<codex home>/skills/<name>/` (`.system/` and container directories without `SKILL.md` are left alone), `~/.agents/skills` (read, never written), plugin caches | `<repo>/.agents/skills` |
 
 The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`, else `~/.codex`.
 
@@ -174,6 +175,7 @@ these checks.
 | `codex.session_meta_keys` | session | `REQUIRED_META_KEYS`: the newest rollout's first line is `session_meta` with `cwd`, `id`, `source`, `timestamp` | the first line is another type or a key is missing |
 | `codex.import_ledger_keys` | session | `LEDGER_RECORD_KEYS`: every `records[]` entry has exactly `connector_names`, `content_sha256`, `imported_at`, `imported_thread_id`, `source_modified_at`, `source_path`, `title` | a key is added or missing, or `records` is not an array |
 | `codex.rollout_layout` | session | `ROLLOUT_LAYOUT`: `sessions/YYYY/MM/DD/rollout-YYYY-MM-DDTHH-MM-SS-<36 character id>.jsonl` | a sampled rollout path differs |
+| `codex.skills_layout` | skill | `LAYOUT_EXPECTED`: the skills directory is absent, empty, or most of its directories hold a top-level `SKILL.md` | it is not a directory, or most directories lack `SKILL.md` |
 
 Evidence (read-only statistics on the development machine, Codex 0.167.0): `state_5.sqlite` holds
 the 43-column `threads` table; every one of the newest 40 rollouts starts with `session_meta` and the

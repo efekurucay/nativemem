@@ -26,7 +26,7 @@ struct ItemListView: View {
         Group {
             if sections.isEmpty {
                 if model.itemSearch.isEmpty {
-                    ContentUnavailableView("No memories", systemImage: "tray")
+                    ContentUnavailableView(isSkills ? "No skills" : "No memories", systemImage: "tray")
                 } else {
                     ContentUnavailableView.search(text: model.itemSearch)
                 }
@@ -50,8 +50,10 @@ struct ItemListView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .searchable(text: $model.itemSearch, prompt: "Search memories")
+        .searchable(text: $model.itemSearch, prompt: isSkills ? "Search skills" : "Search memories")
     }
+
+    private var isSkills: Bool { model.sidebar == .skills }
 
     private func row(_ item: LogicalItem) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -66,6 +68,15 @@ struct ItemListView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+            }
+            if item.primary.isSkill {
+                HStack(spacing: 8) {
+                    ForEach(item.livesIn, id: \.self) { residence in
+                        Text(agentDisplayName(residence.agent))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .tag(item.id)

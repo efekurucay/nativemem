@@ -19,7 +19,8 @@ sections and project memory are implemented. Sessions are not: no session adapte
 | Project memory | Replicas only (OpenCode has no native memory): store plus routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
 | Instruction sections | Read and write in `AGENTS.md` | `agents_file.rs` through `sections.rs` |
 | Sessions | Not implemented; `supports(Session, ...)` is false | |
-| MCP servers, skills | Not implemented | |
+| Skills (global) | Read and write in `<opencode home>/skills/` | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
+| MCP servers | Not implemented | |
 
 ## Native locations
 
@@ -85,7 +86,7 @@ else `~/.config/opencode`.
   This is why the instruction replicas matter for OpenCode.
 - **Skills are read from several roots**, including `~/.claude/skills` and `~/.agents/skills`, so
   skills copied into several directories appear more than once (duplicate-name policy
-  `[UNVERIFIED]`).
+  `[UNVERIFIED]`). `nativemem` writes only `<opencode home>/skills/`.
 - **Hot reload**: config documents and local instruction files are watched; no restart is needed.
 - **The default read permission is allow for files outside the project** except `.env` patterns
   (OBSERVED in binary strings), so the routing block's absolute-path reads work. `~` expansion in the
@@ -111,6 +112,7 @@ only; there is no database access. They are created by `AgentsFileAdapter` for t
 |---|---|---|---|
 | `opencode.config_dir` | instruction, memory | the OpenCode home is a directory | it is not |
 | `opencode.agents_md` | instruction, memory | `AGENTS.md` in the home is absent or a UTF-8 text file | it is a directory, another non-file, or not UTF-8 |
+| `opencode.skills_layout` | skill | `LAYOUT_EXPECTED`: the skills directory is absent, empty, or most of its directories hold a top-level `SKILL.md` | it is not a directory, or most directories lack `SKILL.md` |
 
 Evidence: the two checks restate what `crates/core/src/adapters/sections.rs` and `memory_store.rs`
 need to read and write `AGENTS.md` (test `opencode_probes_cover_the_config_dir_and_agents_file`).

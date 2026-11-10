@@ -13,3 +13,4 @@ pub mod opencode_probes;
 pub mod pi;
 pub mod pi_probes;
 pub mod sections;
+pub mod skills;

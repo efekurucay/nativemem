@@ -15,7 +15,7 @@ write safety in `wiki/architecture/safety.md`.
 | Piece | Role | Anchor |
 |---|---|---|
 | Adapter | One per agent (OpenCode and Pi share a generic one for `AGENTS.md`). Scans the agent's native store and writes, updates and removes entries in the agent's own format | `crates/core/src/model.rs` (`Adapter`), `crates/core/src/adapters/` |
-| Neutral model | `Item { kind, scope, name, description, category, body }` and `Observed` (an item found on disk, with `replica_of` when it carries a marker) | `crates/core/src/model.rs` |
+| Neutral model | `Item { kind, scope, name, description, category, body, source_dir }` and `Observed` (an item found on disk, with `replica_of` when it carries a marker) | `crates/core/src/model.rs` |
 | Ledger | SQLite file `<state dir>/ledger.db` | `crates/core/src/ledger.rs` |
 | Compatibility watch | Probes per adapter, `compat.json`, status and prompt; pauses the kinds of failing checks | `crates/core/src/compat.rs`, `wiki/architecture/compatibility.md` |
 | Engine | `plan` is pure; `apply` executes and updates the ledger. It knows nothing about formats | `crates/core/src/engine.rs` |
@@ -29,14 +29,16 @@ An agent takes part in a run only when its home directory exists (`Agents::open`
 
 - `AgentId` is the agent name: `claude`, `codex`, `opencode`, `pi`.
 - `Scope` is `Global` or `Project(<absolute working directory>)`.
-- `Kind` is `Memory`, `Instruction` or `Session` (`as_str`: `memory`, `instruction`, `session`).
+- `Kind` is `Memory`, `Instruction`, `Session` or `Skill` (`as_str`: `memory`, `instruction`, `session`, `skill`).
 - `ItemKey { origin, native_id }` identifies an original. `native_id` is stable inside one agent.
 - `content_hash(item)` is SHA-256 over `name`, `description`, `category` and `body`, each
   length-prefixed, after CRLF becomes LF and trailing whitespace is trimmed. Scope is identity, not
   content, so it is not hashed. A session hashes its content only (working directory, title, each
   turn's role and text), so a replica hashes like its original (tests `scope_is_not_hashed`,
   `hash_covers_content_but_not_ids_or_times` in `crates/core/src/model.rs` and
-  `crates/core/src/session.rs`).
+  `crates/core/src/session.rs`). A skill's body is a manifest of its files (path, executable bit,
+  size, SHA-256); `source_dir`, which is not hashed, points the writers at the directory
+  (`wiki/kinds/skills.md`).
 
 ## Ledger with per-side hashes
 
@@ -52,7 +54,7 @@ replica (a tombstone, or a replica another program wrote). The `revision` column
 when it is missing, and rows without it read as revision 0 (test
 `ledger_without_revision_column_migrates_and_reads_revision_zero`).
 
-## Three-way decision table (memory and instruction items)
+## Three-way decision table (memory, instruction and skill items)
 
 Implemented in `plan_key` in `crates/core/src/engine.rs`. "Changed" means the current hash differs
 from the ledger hash of that side.
@@ -80,6 +82,8 @@ before planning (test `failed_scan_plans_nothing`).
 the `threads` rows of its replica rollouts; what an adapter had to leave for the next run comes back as a
 `skipped` note (`finish_all` in `crates/core/src/engine.rs`).
 
+Skills reuse `plan_key` after `link_skills` (in `crates/core/src/engine.rs`) turns the copies of one name into an origin and replicas. A copy no ledger row accounts for is adopted only when it matches the original, and an agent whose native read root holds a matching copy is left out of the targets (`Adapter::visible_copy`). Tests: `crates/core/tests/skills.rs`.
+
 Sessions use a different planner (`plan_session`), described in `wiki/kinds/sessions.md`.
 
 ## Capability negotiation: `supports`
@@ -89,12 +93,12 @@ support an item out of its replica targets, write-back targets, absent sets and 
 produce no actions, skipped notes or counts for it. `Error::Unsupported` stays as a runtime
 fallback. Test: `memory_is_planned_only_for_agents_that_support_it`.
 
-| Agent | Memory (Project) | Instruction (Global) | Session (Project) |
-|---|---|---|---|
-| Claude Code | yes, originals and replicas | yes | yes |
-| Codex | yes; originals are generated and read-only, replicas are written | yes | only with `NATIVEMEM_CODEX_SESSION_WRITES=on` while the Codex schema probes pass; each written replica also gets a `threads` row |
-| OpenCode | replicas only | yes | no |
-| Pi | replicas only | yes | yes |
+| Agent | Memory (Project) | Instruction (Global) | Skill (Global) | Session (Project) |
+|---|---|---|---|---|
+| Claude Code | yes, originals and replicas | yes | yes | yes |
+| Codex | yes; originals are generated and read-only, replicas are written | yes | yes | only with `NATIVEMEM_CODEX_SESSION_WRITES=on` while the Codex schema probes pass; each written replica also gets a `threads` row |
+| OpenCode | replicas only | yes | yes | no |
+| Pi | replicas only | yes | yes | yes |
 
 `Adapter::accepts(item)` (default true) is a second gate for one item: the engine plans nothing for a
 session a target does not accept, as Claude Code does for sessions older than its retention. Every
@@ -121,12 +125,13 @@ session format changes. Tests: `unmodified_replica_with_an_older_writer_revision
 |---|---|---|---|---|
 | Memory | Faithful replication in both directions | Propagate, with backup | Written back to the original | `wiki/kinds/memory.md` |
 | Instruction | Faithful replication, one `## ` section per item | Propagate, with backup | Body written back; the heading is identity | `wiki/kinds/instruction-sections.md` |
+| Skill | Faithful replication of whole directories, no marker | Propagate, with backup of the directory | Written back to the origin and the others | `wiki/kinds/skills.md` |
 | Session | Snapshot: copy once, refresh while untouched | Never propagate | Never flow back | `wiki/kinds/sessions.md` |
 
 ## CLI
 
 Commands: `status`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
-`delete`, `edit`, `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
+`delete`, `edit`, `skill show`, `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
 `--opencode-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
 `NATIVEMEM_OPENCODE_HOME`, `NATIVEMEM_PI_HOME`, `NATIVEMEM_STATE_DIR`), `--session-days`
 (`NATIVEMEM_SESSION_DAYS`), `--exclude-automated-sessions`, `--no-sessions`. Without a flag, a root
@@ -144,7 +149,7 @@ in `crates/cli/src/main.rs`.
 ## Desktop app
 
 `apps/macos` runs CLI commands with `--json` and renders the result. Display names come from
-`agentDisplayName` in `apps/macos/Sources/NativememKit/MemoryIndex.swift`. Chat sessions are
+`agentDisplayName` in `apps/macos/Sources/NativememKit/MemoryIndex.swift`. Skills are listed on their own "Skills" sidebar row, with `SKILL.md` read through `nativemem skill show`. Chat sessions are
 filtered out of the item views (`all.filter { $0.kind != Item.sessionKind }` in the same file);
 `status` counts them separately. The app finds the binary through app settings, `NATIVEMEM_BIN`, a
 file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebrew/bin`
@@ -182,6 +187,7 @@ compatibility notices on the Overview (`wiki/architecture/compatibility.md`).
 - `wiki/architecture/compatibility.md`
 - `wiki/kinds/memory.md`
 - `wiki/kinds/instruction-sections.md`
+- `wiki/kinds/skills.md`
 - `wiki/kinds/sessions.md`
 - `wiki/guides/add-an-agent.md`
 

@@ -178,7 +178,7 @@ fn doctor_passes_on_the_fixtures_and_writes_only_its_state_file() {
         assert!(a.get("prompt").is_none());
         assert_eq!(a["paused"], serde_json::json!([]));
     }
-    assert_eq!(agent(&doc, "claude")["checks"].as_array().unwrap().len(), 5);
+    assert_eq!(agent(&doc, "claude")["checks"].as_array().unwrap().len(), 6);
     assert_eq!(agent(&doc, "codex")["version"], "0.167.0");
     assert_eq!(agent(&doc, "pi")["version"], Value::Null);
     let check = &agent(&doc, "codex")["checks"][1];

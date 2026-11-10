@@ -18,7 +18,8 @@ Facts gathered read-only on a development machine running Pi 1.5.0 (session file
 | Project memory | Replicas only (Pi has no native memory): store plus routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
 | Instruction sections | Read and write in `AGENTS.md` | `agents_file.rs` through `sections.rs` |
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/pi.rs` |
-| MCP servers, skills | Not implemented | |
+| Skills (global) | Read and write in `<pi home>/skills/`; symlinked skills are read through the link and replaced, never written through; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
+| MCP servers | Not implemented | |
 
 ## Native locations
 
@@ -28,7 +29,7 @@ Facts gathered read-only on a development machine running Pi 1.5.0 (session file
 | Memory | none native; replica store `<pi home>/nativemem/memory/<project key>/` | |
 | Sessions | `<pi home>/sessions/--<cwd>--/<ISO ts>_<session id>.jsonl` | |
 | MCP servers | `<pi home>/mcp.json` key `mcpServers` | `.pi/mcp.json` (only after project trust) |
-| Skills | `<pi home>/skills/`, `~/.agents/skills/`, paths listed in `settings.json` `skills[]` | `.pi/skills/`, `.agents/skills/` (only after project trust) |
+| Skills | `<pi home>/skills/` (entries may be symlinks into `~/.agents/skills`), `~/.agents/skills/` (read, never written), paths listed in `settings.json` `skills[]` | `.pi/skills/`, `.agents/skills/` (only after project trust) |
 
 The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
 
@@ -111,6 +112,7 @@ newest 3 sessions (last 1 MiB each) for entry types.
 | `pi.session_header` | session | `HEADER_TYPE` `session`, `HEADER_VERSION` `3`, keys `cwd`, `id`, `timestamp` | the header has another `type` or `version`, or lacks a key |
 | `pi.entry_types` | session | `KNOWN_ENTRY_TYPES`: `message`, `session_info`, `custom`, `custom_message`, `model_change`, `thinking_level_change`, `compaction`, `branch_summary`, `label` | an entry has another `type` |
 | `pi.cwd_encoding` | session | the directory name equals `encode_cwd(header cwd)` | a sampled session (newest 8) sits in another directory |
+| `pi.skills_layout` | skill | `LAYOUT_EXPECTED`: the skills directory is absent, empty, or most of its directories hold a top-level `SKILL.md` | it is not a directory, or most directories lack `SKILL.md` |
 
 Evidence (read-only statistics on the development machine, Pi 1.5.0): the headers of the newest 30
 sessions all read `type: session`, `version: 3` with the keys above; those sessions held 6 entry

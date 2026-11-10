@@ -22,6 +22,7 @@ use super::memory_store::{read_opt, MemoryStore};
 use super::sections::InstructionFile;
 #[cfg(test)]
 use super::sections::{BLOCK_BEGIN, BLOCK_END};
+use super::skills::{skill_name, SkillReport, SkillStore};
 
 const AGENT: &str = "codex";
 const INSTRUCTION_FILE: &str = "AGENTS.md";
@@ -55,6 +56,7 @@ pub struct CodexAdapter {
     backups: BackupSession,
     instructions: InstructionFile,
     memory: MemoryStore,
+    skills: SkillStore,
     sessions: Option<CodexSessions>,
     claude_home: Option<PathBuf>,
     session_writes: bool,
@@ -140,6 +142,12 @@ impl CodexAdapter {
                 layout::resources(&codex_home),
                 codex_home.join(INSTRUCTION_FILE),
             ),
+            skills: SkillStore::new(
+                Self::agent(),
+                codex_home.clone(),
+                state_dir.clone(),
+                backups.clone(),
+            ),
             home: codex_home,
             state_dir,
             backups,
@@ -149,6 +157,12 @@ impl CodexAdapter {
             written: RefCell::new(Vec::new()),
             blocked: Vec::new(),
         }
+    }
+
+    /// Directories Codex also reads skills from; copies there are never written.
+    pub fn with_visible_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.skills = self.skills.with_visible_roots(roots);
+        self
     }
 
     /// Kinds this adapter neither reads nor writes while its compatibility checks fail.
@@ -276,7 +290,9 @@ impl Adapter for CodexAdapter {
     }
 
     fn probes(&self) -> Vec<Check> {
-        codex_probes::probes(&self.home)
+        let mut checks = codex_probes::probes(&self.home);
+        checks.push(self.skills.layout_check());
+        checks
     }
 
     fn supports(&self, kind: Kind, scope: &Scope) -> bool {
@@ -285,7 +301,8 @@ impl Adapter for CodexAdapter {
         }
         match (kind, scope) {
             (Kind::Session, Scope::Project(_)) => self.session_writes,
-            (Kind::Memory, Scope::Project(_)) | (Kind::Instruction, Scope::Global) => true,
+            (Kind::Memory, Scope::Project(_))
+            | (Kind::Instruction | Kind::Skill, Scope::Global) => true,
             _ => false,
         }
     }
@@ -363,6 +380,7 @@ impl Adapter for CodexAdapter {
                     description: b.title,
                     category: None,
                     body: b.text,
+                    source_dir: None,
                 },
                 replica_of: None,
             });
@@ -371,10 +389,24 @@ impl Adapter for CodexAdapter {
             out.extend(self.instructions.scan()?);
         }
         out.extend(self.scan_sessions()?.observed);
+        if !self.blocked.contains(&Kind::Skill) {
+            out.extend(self.skills.scan()?);
+        }
         Ok(out)
     }
 
+    fn visible_copy(&self, native_id: &str) -> Option<String> {
+        self.skills.visible_copy(native_id)
+    }
+
+    fn skill_report(&self) -> Result<SkillReport> {
+        self.skills.report()
+    }
+
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
+        if item.kind == Kind::Skill {
+            return self.skills.write(item);
+        }
         if item.kind == Kind::Instruction {
             return self.instructions.write_replica(key, item);
         }
@@ -385,6 +417,9 @@ impl Adapter for CodexAdapter {
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
+        if skill_name(native_id).is_some() {
+            return self.skills.write(item).map(|_| ());
+        }
         if is_session_id(native_id) {
             return Err(Error::unsupported(AGENT, "write_original session"));
         }
@@ -395,6 +430,9 @@ impl Adapter for CodexAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
+        if let Some(name) = skill_name(native_id) {
+            return self.skills.remove(name);
+        }
         if is_session_id(native_id) {
             return Err(Error::unsupported(AGENT, "remove session"));
         }
@@ -443,6 +481,7 @@ mod tests {
             description: format!("about {name}"),
             category: category.map(String::from),
             body: body.into(),
+            source_dir: None,
         }
     }
 
@@ -508,6 +547,7 @@ mod tests {
             description: "first line\nsecond line".into(),
             category: None,
             body: "body".into(),
+            source_dir: None,
         };
         f.a.write_replica(&key("k"), &it).unwrap();
         let got =
@@ -805,6 +845,7 @@ mod tests {
             description: heading.into(),
             category: None,
             body: body.into(),
+            source_dir: None,
         }
     }
 

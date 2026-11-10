@@ -309,6 +309,7 @@ impl MemoryStore {
                         description: r.description,
                         category: r.category,
                         body: r.body,
+                        source_dir: None,
                     },
                     replica_of: Some(ItemKey {
                         origin: AgentId::new(r.origin),

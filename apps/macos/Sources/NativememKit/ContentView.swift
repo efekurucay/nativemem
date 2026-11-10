@@ -65,7 +65,7 @@ public struct ContentView: View {
         switch model.sidebar {
         case .overview, nil:
             OverviewView(model: model)
-        case .global, .folder, .folderOnly:
+        case .global, .skills, .folder, .folderOnly:
             HSplitView {
                 ItemListView(model: model)
                     .frame(minWidth: 260, idealWidth: 340, maxWidth: 520)
@@ -75,7 +75,10 @@ public struct ContentView: View {
                         .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
                         .layoutPriority(1)
                 } else {
-                    ContentUnavailableView("No memory selected", systemImage: "doc.text")
+                    ContentUnavailableView(
+                        model.sidebar == .skills ? "No skill selected" : "No memory selected",
+                        systemImage: "doc.text"
+                    )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
