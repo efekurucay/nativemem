@@ -51,6 +51,11 @@ The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`
 
 ## What nativemem reads and writes today
 
+- Global skills live in `<pi home>/skills/`; project skills live in `<project>/.pi/skills/`.
+  Projects are discovered from memory, scanned sessions and the path-only
+  `<pi home>/nativemem/skill-projects.json` index retained when writing project copies.
+  `skill show --id` selects the exact global or project skill (`wiki/kinds/skills.md`).
+
 - Reads `AGENTS.md` sections and `sessions/**/*.jsonl`.
 - Writes instruction replicas in the region at the end of `AGENTS.md`, the replica memory store under
   `nativemem/memory/`, the routing block in `AGENTS.md`, and session replicas.

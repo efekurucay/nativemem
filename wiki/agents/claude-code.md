@@ -19,7 +19,7 @@ by versions 2.1.247 to 2.1.322; 376 top-level session files across 63 project di
 | Instruction sections | Read and write in `CLAUDE.md`, including a new section through `add` | `claude.rs` through `sections.rs` |
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/claude_sessions.rs` |
 | Global-scope memory | Not supported (`supports` is false) | |
-| Skills (global) | Read (originals) and write (replicas, edits, deletes) | `crates/core/src/adapters/skills.rs`, `claude.rs` |
+| Skills (global and project) | Read (originals) and write (replicas, edits, deletes) | `crates/core/src/adapters/skills.rs`, `claude.rs` |
 | MCP servers | Read by `mcp import` (global `mcpServers` only); `mcp install` and `uninstall` write the one entry `mcpServers.nativemem` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
 ## Native locations
@@ -51,6 +51,11 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
   `headers`, `oauth`. Inline secrets can sit in `headers` and `env`.
 
 ## What nativemem reads and writes today
+
+- Global skills live in `<claude home>/skills/`; project skills live in `<project>/.claude/skills/`.
+  Known Claude project folders are scanned even with no memory entries. Project paths of written
+  skills are retained in `<claude home>/nativemem/skill-projects.json` (paths only); copies can be
+  read with `skill show --id` and appear under their project in the app (`wiki/kinds/skills.md`).
 
 - Reads `projects/<dir>/memory/*.md` (not `MEMORY.md`), `CLAUDE.md` sections and
   `projects/<dir>/*.jsonl` sessions.

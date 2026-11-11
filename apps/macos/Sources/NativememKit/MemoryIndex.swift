@@ -92,14 +92,14 @@ public struct MemoryIndex: Sendable {
         items = LogicalItem.fold(all.filter { $0.kind != Item.sessionKind })
     }
 
-    /// Skills are listed under their own sidebar row, not under Global.
+    /// Skills are listed under their own sidebar row (global only) and under their project folder.
     public var skills: [LogicalItem] {
-        items.filter { $0.primary.isSkill }
+        items.filter { $0.primary.isSkill && $0.project.path == nil }
     }
 
     /// Largest first; ties by path so the order is stable.
     public var projects: [Project] {
-        Dictionary(grouping: items.filter { !$0.primary.isSkill }, by: \.project)
+        Dictionary(grouping: items.filter { !$0.primary.isSkill || $0.project.path != nil }, by: \.project)
             .map { Project(key: $0.key, count: $0.value.count) }
             .sorted { ($0.count, $1.key.path ?? "") > ($1.count, $0.key.path ?? "") }
     }
@@ -121,8 +121,9 @@ public struct MemoryIndex: Sendable {
     }
 
     private static func holds(_ item: LogicalItem, in selection: SidebarSelection) -> Bool {
-        if selection == .skills { return item.primary.isSkill }
-        return !item.primary.isSkill && contains(item.project.path, in: selection)
+        if selection == .skills { return item.primary.isSkill && item.project.path == nil }
+        if selection == .global && item.primary.isSkill { return false }
+        return contains(item.project.path, in: selection)
     }
 
     static func contains(_ path: String?, in selection: SidebarSelection) -> Bool {

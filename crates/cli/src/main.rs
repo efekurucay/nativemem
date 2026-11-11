@@ -176,9 +176,17 @@ enum SkillCommand {
         /// claude, codex, opencode or pi
         #[arg(long)]
         agent: String,
-        /// The skill's directory name
+        /// The global skill's directory name
+        #[arg(
+            long,
+            allow_hyphen_values = true,
+            required_unless_present = "id",
+            conflicts_with = "id"
+        )]
+        name: Option<String>,
+        /// The skill's native id from items (global or project)
         #[arg(long, allow_hyphen_values = true)]
-        name: String,
+        id: Option<String>,
         /// Print one JSON document
         #[arg(long)]
         json: bool,
@@ -760,21 +768,26 @@ fn session_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<(
     Ok(())
 }
 
-fn skill_show(agents: &Agents, agent: &str, name: &str, json: bool) -> Outcome<()> {
+fn skill_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<()> {
+    if skill_name(id).is_none() {
+        return Err(Failure::Coded {
+            code: "invalid",
+            message: "expected a skill native id".into(),
+        });
+    }
     let not_found = || Failure::NotFound {
         agent: agent.to_string(),
-        id: name.to_string(),
+        id: id.to_string(),
     };
     let adapter = agents.named(agent)?.ok_or_else(not_found)?;
-    let id = nativemem_core::adapters::skills::native_id(name);
-    let skill = find_entry(adapter, &id)?.ok_or_else(not_found)?;
+    let skill = find_entry(adapter, id)?.ok_or_else(not_found)?;
     let file = skill.path.join("SKILL.md");
     let text = String::from_utf8_lossy(&std::fs::read(&file).map_err(|e| Error::io(&file, e))?)
         .into_owned();
     if json {
         print_json(&json!({
             "agent": agent,
-            "name": name,
+            "name": skill.item.name,
             "path": file.display().to_string(),
             "text": text,
         }));
@@ -1274,8 +1287,19 @@ fn run(cli: &Cli) -> Outcome<u8> {
             edit(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
         Command::Skill(SkillArgs {
-            command: SkillCommand::Show { agent, name, json },
-        }) => skill_show(&agents, agent, name, *json).map(|()| 0),
+            command:
+                SkillCommand::Show {
+                    agent,
+                    name,
+                    id,
+                    json,
+                },
+        }) => {
+            let id = id.clone().unwrap_or_else(|| {
+                nativemem_core::adapters::skills::native_id(name.as_deref().unwrap_or_default())
+            });
+            skill_show(&agents, agent, &id, *json).map(|()| 0)
+        }
         Command::Mcp(args) => mcp::run(args, &roots, &explicit_roots(cli), &backups),
         Command::Subagent(args) => subagent::run(args, &roots, &backups),
         Command::Session(SessionArgs {

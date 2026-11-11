@@ -18,7 +18,8 @@ Code, Codex, OpenCode, Pi. Hermes has research notes only and no adapter.
   `~/.codex`, `~/.pi`, `~/.config/opencode`, `~/.local/share/opencode`, `~/.hermes` or `~/.nativemem`. Use temp directories and
   explicit roots (`--claude-home`, `--codex-home`, `--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir`).
 - CLI tests redirect `HOME` and pass every root explicitly (see `run` in `crates/cli/tests/cli.rs`).
-- Never print secrets or session bodies, and never write inside a git repository.
+- Never print secrets or session bodies. Inside repositories, write only project skill directories;
+  nativemem does not manage git tracking or `.gitignore`.
 - Every delete or overwrite backs up first; writes are atomic (`crates/core/src/fsx.rs`).
 - Code, comments and docs describe the current state only; history lives in git. One canonical name
   per symbol, and a replaced implementation is removed, not kept beside its replacement.

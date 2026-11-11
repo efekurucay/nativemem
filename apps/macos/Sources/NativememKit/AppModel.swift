@@ -225,7 +225,7 @@ public final class AppModel {
 
     public func skillText(of item: LogicalItem) async throws -> String {
         guard let cli else { throw CLIError.notFound }
-        return try await cli.skillShow(agent: item.primary.agent, name: item.primary.name).text
+        return try await cli.skillShow(agent: item.primary.agent, nativeId: item.primary.nativeId).text
     }
 
     public func sessionTranscript(of item: LogicalItem) async throws -> SessionTranscript {

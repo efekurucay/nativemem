@@ -54,7 +54,9 @@ hand-drawn borders, dividers or backgrounds.
     below. Siblings are sorted by that count, largest first, then by name.
   - Top-level folders start expanded; deeper ones start collapsed.
   - The filter keeps folders whose path contains the text, with their ancestors, expanded.
-- Skills are listed in their own row, not under "Global" or a project.
+- The "Skills" row and its badge include global skills only. Project skills live in the project
+  folder tree, alongside memories, with a `skill` label. Folder counts include project skills.
+  Global skills do not appear under "Global".
 
 **Item list** (a folder is selected)
 - Items of that folder and everything below it. When they come from more than one project, the
@@ -66,7 +68,7 @@ hand-drawn borders, dividers or backgrounds.
   copies are folded into their original.
 
 **Sessions** (a folder is selected)
-- Above the list, a segmented control switches "Memory" and "Sessions (N)"; N counts the
+- Above the list, a segmented control switches "Memory & skills" and "Sessions (N)"; N counts the
   sessions of that folder and below. It is shown for project folders only; every other row lists
   memory. Chat sessions never appear in the memory list.
 - The Sessions list covers the folder and below, sectioned by project like memory, newest first
@@ -79,11 +81,14 @@ hand-drawn borders, dividers or backgrounds.
   `delete` and `edit` refuse them). "Show in Finder" appears for the agents that keep one file per
   session (Claude Code, Pi, Codex) and is hidden for OpenCode, whose sessions live in a database.
 
-**Skills** ("Skills" row selected)
-- One row each: name, description and a small label per agent that holds the skill.
-- The detail pane shows the `SKILL.md` text read-only (loaded with `skill show`), "Lives in", and
-  Delete (the skill directory is removed with a backup; the next sync propagates it). Edit is
-  disabled with the tooltip "Skills are edited as files: edit the skill files directly."
+**Skills** ("Skills" row for global skills; project folders for project skills)
+- One row each: name, a `skill` label, description and a small label per agent that holds the skill.
+- The detail pane shows the scope (Global or the absolute project path), each agent's full skill
+  directory path as selectable text, its original/copy label and a Show in Finder button per copy.
+- `SKILL.md` is read-only, loaded with `skill show --id <native id>` so equal names in global and
+  project scopes open the exact selected file. Delete removes the skill directory with a backup;
+  the next sync propagates it. Edit is disabled with the tooltip
+  "Skills are edited as files: edit the skill files directly."
 
 **MCP & Integrations** ("MCP & Integrations" row selected)
 - Everything on this screen runs `nativemem mcp ... --json`; the app holds no MCP logic. The
@@ -326,7 +331,7 @@ Reads one session from that agent's own store; it takes no lock and writes nothi
 `not_found` when the agent is not installed or holds no such session. Without `--json` it prints
 the title and a readable transcript.
 
-`nativemem skill show --agent <id> --name <skill> --json`
+`nativemem skill show --agent <id> (--name <global skill> | --id <native id>) --json`
 ```json
 { "agent": "claude", "name": "demo-skill",
   "path": "/Users/x/.claude/skills/demo-skill/SKILL.md",

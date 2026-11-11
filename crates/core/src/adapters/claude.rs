@@ -507,12 +507,10 @@ impl Adapter for ClaudeAdapter {
         out.extend(self.scan_sessions()?.observed);
         if !self.blocked.contains(&Kind::Skill) {
             out.extend(self.skills.scan()?);
-            let cwds: Vec<PathBuf> = out
-                .iter()
-                .filter_map(|o| match &o.item.scope {
-                    Scope::Project(cwd) => Some(cwd.clone()),
-                    _ => None,
-                })
+            let cwds: Vec<PathBuf> = self
+                .project_cwds()?
+                .into_iter()
+                .filter_map(|(_, cwd)| cwd.ok())
                 .collect();
             out.extend(self.skills.scan_projects(&cwds)?);
         }

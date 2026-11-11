@@ -480,6 +480,22 @@ impl Adapter for PiAdapter {
         let mut out = self.instructions.scan()?;
         out.retain(|o| !self.blocked.contains(&o.item.kind));
         out.extend(self.scan_sessions()?.observed);
+        if !self.blocked.contains(&Kind::Skill) {
+            let cwds: Vec<PathBuf> = out
+                .iter()
+                .filter_map(|o| match &o.item.scope {
+                    Scope::Project(cwd) => Some(cwd.clone()),
+                    _ => None,
+                })
+                .collect();
+            let skills = self.instructions.scan_project_skills(&cwds)?;
+            let mut seen: HashSet<String> = out.iter().map(|o| o.native_id.clone()).collect();
+            out.extend(
+                skills
+                    .into_iter()
+                    .filter(|o| seen.insert(o.native_id.clone())),
+            );
+        }
         Ok(out)
     }
 

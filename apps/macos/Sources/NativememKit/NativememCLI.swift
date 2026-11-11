@@ -102,8 +102,8 @@ public struct NativememCLI: Sendable {
     }
 
     /// The SKILL.md text of a skill in one agent's own skills directory.
-    public func skillShow(agent: String, name: String) async throws -> SkillText {
-        try await run(["skill", "show", "--agent", agent, "--name=\(name)", "--json"])
+    public func skillShow(agent: String, nativeId: String) async throws -> SkillText {
+        try await run(["skill", "show", "--agent", agent, "--id=\(nativeId)", "--json"])
     }
 
     /// Native ids often begin with "-", so the value is attached with "=" to stay one option argument.

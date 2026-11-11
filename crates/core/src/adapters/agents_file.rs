@@ -92,9 +92,12 @@ impl AgentsFileAdapter {
         self
     }
 
-    /// Whether this adapter has a project skills directory configured.
-    pub fn has_project(&self) -> bool {
-        self.skills.has_project()
+    /// Project skills for paths discovered by a session-owning adapter such as Pi.
+    pub fn scan_project_skills(&self, cwds: &[PathBuf]) -> Result<Vec<Observed>> {
+        if self.blocked.contains(&Kind::Skill) {
+            return Ok(Vec::new());
+        }
+        self.skills.scan_projects(cwds)
     }
 
     /// Project working directories this adapter knows about, from its memory store.
@@ -221,7 +224,11 @@ impl Adapter for AgentsFileAdapter {
         }
         out.extend(self.scan_sessions()?.observed);
         if !self.blocked.contains(&Kind::Skill) {
-            let cwds = self.project_cwds();
+            let mut cwds = self.project_cwds();
+            cwds.extend(out.iter().filter_map(|o| match &o.item.scope {
+                Scope::Project(cwd) => Some(cwd.clone()),
+                _ => None,
+            }));
             out.extend(self.skills.scan_projects(&cwds)?);
         }
         Ok(out)

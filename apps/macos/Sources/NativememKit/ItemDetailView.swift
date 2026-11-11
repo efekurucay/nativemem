@@ -80,11 +80,42 @@ struct ItemDetailView: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Lives in").font(.headline)
-                    HStack(spacing: 8) {
-                        ForEach(item.livesIn, id: \.self) { residence in
-                            Text("\(agentDisplayName(residence.agent)) · \(residence.label)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    if item.primary.isSkill {
+                        Text(item.project.path ?? "Global · available across projects")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        ForEach([item.primary] + item.copies, id: \.agent) { copy in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(agentDisplayName(copy.agent)).font(.subheadline)
+                                    Text(copy.agent == item.primary.agent
+                                         ? (item.originalMissing ? "copy (original missing)" : "original")
+                                         : "copy")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("Show in Finder", systemImage: "folder") {
+                                        NSWorkspace.shared.activateFileViewerSelecting([
+                                            URL(fileURLWithPath: copy.path)
+                                        ])
+                                    }
+                                    .labelStyle(.iconOnly)
+                                    .help("Show \(agentDisplayName(copy.agent)) skill in Finder")
+                                }
+                                Text(copy.path)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    } else {
+                        HStack(spacing: 8) {
+                            ForEach(item.livesIn, id: \.self) { residence in
+                                Text("\(agentDisplayName(residence.agent)) · \(residence.label)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }

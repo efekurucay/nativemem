@@ -1484,6 +1484,99 @@ fn skills_sync_through_the_cli_and_items_status_and_show_report_them() {
 }
 
 #[test]
+fn pi_project_skills_are_discovered_from_session_projects() {
+    let f = four_agents();
+    let cwd = f.state.with_file_name("pi-project");
+    fs::create_dir_all(&cwd).unwrap();
+    PiHome::new(&f.state.with_file_name("pi")).add_session(
+        &cwd,
+        "p1",
+        Some("Demo chat"),
+        &[("user", "fixture question")],
+    );
+    skill_dir(&cwd.join(".pi/skills"), "demo-skill", "project fixture");
+    let (code, doc) = f.json(&["items", "--kind", "skill", "--json"]);
+    assert_eq!(code, Some(0), "{doc}");
+    let skills = doc["items"].as_array().unwrap();
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0]["agent"], "pi");
+    assert_eq!(skills[0]["scope"]["path"], cwd.display().to_string());
+}
+
+#[test]
+fn project_skill_sync_survives_reopening_without_project_memories() {
+    let f = four_agents();
+    let cwd = f.state.with_file_name("skill-only-project");
+    fs::create_dir_all(&cwd).unwrap();
+    ClaudeHome::new(&f.claude).add_project(&cwd);
+    skill_dir(&cwd.join(".claude/skills"), "demo-skill", "project fixture");
+    let id = nativemem_core::adapters::skills::project_native_id(
+        &nativemem_core::adapters::memory_store::project_key(&cwd),
+        "demo-skill",
+    );
+    let (code, applied) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{applied}");
+    assert!(cwd.join(".pi/skills/demo-skill/SKILL.md").is_file());
+    assert!(cwd.join(".opencode/skills/demo-skill/SKILL.md").is_file());
+    let (code, unchanged) = f.json(&["sync", "--json"]);
+    assert_eq!(code, Some(0), "{unchanged}");
+    assert_eq!(unchanged["actions"], json!([]));
+    let (code, shown) = f.json(&["skill", "show", "--agent", "pi", "--id", &id, "--json"]);
+    assert_eq!(code, Some(0), "{shown}");
+    assert!(shown["text"].as_str().unwrap().contains("project fixture"));
+    let (code, removed) = f.json(&["delete", "--agent", "pi", "--id", &id, "--json"]);
+    assert_eq!(code, Some(0), "{removed}");
+    let (code, deleted) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{deleted}");
+    assert!(!cwd.join(".claude/skills/demo-skill").exists());
+    assert!(!cwd.join(".opencode/skills/demo-skill").exists());
+}
+
+#[test]
+fn skill_show_by_id_distinguishes_projects_from_global_skills() {
+    let f = four_agents();
+    let cwd = f.state.with_file_name("project");
+    fs::create_dir_all(&cwd).unwrap();
+    ClaudeHome::new(&f.claude).add_project(&cwd);
+    skill_dir(&skills_of(&f, "claude"), "demo-skill", "global fixture");
+    let project = skill_dir(&cwd.join(".claude/skills"), "demo-skill", "project fixture");
+    let id = nativemem_core::adapters::skills::project_native_id(
+        &nativemem_core::adapters::memory_store::project_key(&cwd),
+        "demo-skill",
+    );
+    let (code, shown) = f.json(&["skill", "show", "--agent", "claude", "--id", &id, "--json"]);
+    assert_eq!(code, Some(0), "{shown}");
+    assert_eq!(
+        shown["path"],
+        project.join("SKILL.md").display().to_string()
+    );
+    assert!(shown["text"].as_str().unwrap().contains("project fixture"));
+    assert!(!shown["text"].as_str().unwrap().contains("global fixture"));
+    let (code, global) = f.json(&[
+        "skill",
+        "show",
+        "--agent",
+        "claude",
+        "--name",
+        "demo-skill",
+        "--json",
+    ]);
+    assert_eq!(code, Some(0));
+    assert!(global["text"].as_str().unwrap().contains("global fixture"));
+    let (code, invalid) = f.json(&[
+        "skill",
+        "show",
+        "--agent",
+        "claude",
+        "--id",
+        "not-a-skill",
+        "--json",
+    ]);
+    assert_eq!(code, Some(1));
+    assert_eq!(invalid["code"], "invalid");
+}
+
+#[test]
 fn skill_delete_backs_up_and_the_next_sync_propagates_it() {
     let f = four_agents();
     skill_dir(&skills_of(&f, "claude"), "demo-skill", "text");

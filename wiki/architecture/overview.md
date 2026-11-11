@@ -158,9 +158,12 @@ in `crates/cli/src/main.rs`.
 ## Desktop app
 
 `apps/macos` runs CLI commands with `--json` and renders the result. A toolbar "New" button opens a sheet that runs `add` for a memory entry or a global instruction section in any installed agent (`NewEntrySheet.swift`, `NewEntry.swift`). Display names come from
-`agentDisplayName` in `apps/macos/Sources/NativememKit/MemoryIndex.swift`. Skills are listed on their own "Skills" sidebar row, with `SKILL.md` read through `nativemem skill show`. Chat sessions are
+`agentDisplayName` in `apps/macos/Sources/NativememKit/MemoryIndex.swift`. Global skills are listed on the
+"Skills" sidebar row; project skills live in the project folder tree beside memories and count toward
+folder badges. The detail shows scope, each original/copy directory path and a Finder action per copy.
+`SKILL.md` is read through `nativemem skill show --id` to distinguish equal names across scopes. Chat sessions are
 filtered out of the memory views (`MemoryIndex.init` in the same file); `status` counts them
-separately. Selecting a project folder shows a "Memory" / "Sessions (N)" control above the list:
+separately. Selecting a project folder shows a "Memory & skills" / "Sessions (N)" control above the list:
 the Sessions list (`SessionIndex.swift`, from `items --kind session --json`) covers the folder and
 below, sectioned by project, newest first, and the detail pane (`SessionDetailView.swift`) loads the
 read-only transcript through `nativemem session show`. There is no edit and no delete for sessions. The "MCP & Integrations" sidebar row opens the hub screen (`McpView.swift`, `McpModel.swift`): which agents have the hub (`mcp install` / `uninstall` / `status`), the servers with their state from `mcp list` and `mcp test`, sign-in, add, edit, remove and import (`wiki/architecture/hub.md`). The app finds the binary through app settings, `NATIVEMEM_BIN`, a

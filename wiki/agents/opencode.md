@@ -77,6 +77,11 @@ else `~/.config/opencode`.
 
 ## What nativemem reads and writes today
 
+- Global skills live in `<opencode home>/skills/`; project skills live in `<project>/.opencode/skills/`.
+  Projects are discovered from memory, scanned sessions and the path-only
+  `<opencode home>/nativemem/skill-projects.json` index retained when writing project copies.
+  `skill show --id` selects the exact global or project skill (`wiki/kinds/skills.md`).
+
 - Reads `AGENTS.md` sections, the replica store and, while `opencode.db` exists, root-level non-archived sessions (`wiki/kinds/sessions.md`).
 - Writes session copies into `opencode.db` only as `wiki/decisions/opencode-session-writes-gated.md` describes.
 - Writes instruction replicas in the region at the end of `AGENTS.md`, the replica memory store under

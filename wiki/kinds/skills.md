@@ -8,8 +8,8 @@ how additions, edits and deletes travel.
 ## Scope
 
 `Kind::Skill` with `Scope::Global` and `Scope::Project`, for Claude Code, OpenCode and Pi.
-Project-level skill directories inside repositories are read and written. Codex has no project
-skill directory. Plugin caches and agent-managed skills are not read or written.
+Project-level skill directories inside repositories are read and written. Codex project-skill
+sync is not implemented. Plugin caches and agent-managed skills are not read or written.
 Policy decision: `wiki/decisions/skills-mirror-without-shared-store.md`.
 
 ## Model
@@ -47,7 +47,7 @@ directories without a top-level `SKILL.md`, anything outside the agent's own ski
 | Claude Code | `<repo>/.claude/skills/<name>/` | |
 | OpenCode | `<repo>/.opencode/skills/<name>/` | `<repo>/.claude/skills/`, `<repo>/.agents/skills/` |
 | Pi | `<repo>/.pi/skills/<name>/` | `<repo>/.agents/skills/` |
-| Codex | no project skills | |
+| Codex | not implemented | |
 
 The `native_id` of a project skill is `skill:<project-key>/<name>`, where `project-key` is the same
 key the memory store uses (`slug` of the last path component plus `-` and the first 8 hex of the
@@ -97,9 +97,24 @@ directory `[UNVERIFIED: duplicate-name behaviour]`.
 
 ## CLI and app
 
-`items --kind skill`, `status` (`skills` per agent), `sync`, `delete --id skill:<name>`,
-`skill show --agent <id> --name <skill>` (prints `SKILL.md`). `edit` answers `unsupported`. The app
-lists skills on a "Skills" sidebar row (`docs/desktop.md`).
+`items --kind skill`, `status` (`skills` per agent), `sync`, `delete --id <native id>`,
+`skill show --agent <id> --id <native id>` (prints the selected `SKILL.md`). `--name <skill>` selects
+only a global skill; it is mutually exclusive with `--id`. `edit` answers `unsupported`.
+The app lists global skills on the "Skills" sidebar row and project skills in the project tree.
+The detail shows the project or Global, all original/copy directory paths, and a Finder action for
+any copy (`docs/desktop.md`; `SkillTests.projectSkillsLiveInTheFolderTreeAndShowEachCopyPath`).
+
+Claude project directories are scanned even when they contain no memory entries. OpenCode and Pi
+also discover projects from their scanned sessions. After writing a project skill, the adapter keeps
+its absolute working directory in `<agent home>/nativemem/skill-projects.json` (paths only, backed up
+and atomically written). This makes copies discoverable on later runs even without a project memory
+or session in that agent. Tests: `project_skill_sync_survives_reopening_without_project_memories`.
+Duplicate project paths are scanned once and a project path resolving to the global skills directory
+is excluded.
+Project skill backups are isolated by project key:
+`<state dir>/backups/<stamp>/<agent>/projects/<project-key>/<agent subdir>/skills/<name>/`.
+Tests: `skill_show_by_id_distinguishes_projects_from_global_skills` in `crates/cli/tests/cli.rs` and
+`project_skills_create_parents_deduplicate_scans_and_keep_backups_separate` in `skills.rs`.
 
 ## Source anchors
 

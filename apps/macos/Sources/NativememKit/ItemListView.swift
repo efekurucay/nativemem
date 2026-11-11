@@ -34,7 +34,7 @@ struct ItemListView: View {
 
     private var modePicker: some View {
         Picker("Show", selection: modeBinding) {
-            Text("Memory").tag(ItemMode.memory)
+            Text("Memory & skills").tag(ItemMode.memory)
             Text("Sessions (\(model.folderSessionCount))").tag(ItemMode.sessions)
         }
         .labelsHidden()
@@ -78,11 +78,13 @@ struct ItemListView: View {
 
     private var emptyTitle: String {
         if model.showsSessions { return "No sessions" }
+        if model.selectedFolderPath != nil { return "No memories or skills" }
         return isSkills ? "No skills" : "No memories"
     }
 
     private var searchPrompt: String {
         if model.showsSessions { return "Search sessions" }
+        if model.selectedFolderPath != nil { return "Search memories and skills" }
         return isSkills ? "Search skills" : "Search memories"
     }
 
@@ -121,7 +123,9 @@ struct ItemListView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Text(item.primary.name).lineLimit(1)
-                if let category = item.primary.category {
+                if item.primary.isSkill {
+                    CategoryTag(category: "skill")
+                } else if let category = item.primary.category {
                     CategoryTag(category: category)
                 }
             }

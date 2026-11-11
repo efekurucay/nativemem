@@ -35,8 +35,8 @@ All work in this repo: Rust core and CLI, the macOS app, tests, docs and this wi
 - **Memory and instruction items replicate faithfully in both directions, deletes included, with
   backups.** Sessions are snapshots: deletes and edits never propagate.
   See `wiki/decisions/session-snapshot-policy.md`.
-- **Nothing is written inside a git repository.** Only agent home directories and the state
-  directory are written.
+- **Repository writes are limited to project skill directories.** Other writes stay in agent homes
+  and the state directory. Git tracking and `.gitignore` are user policy, not managed by nativemem.
 - **Agent-owned state is never edited.** Codex SQLite files (except the `threads` rows of `codex_threads.rs`), OpenCode's `opencode.db` (except the rows of `opencode_sessions.rs`), `hooks.json`, `config.toml`, generated
   `memories/MEMORY.md` and `memory_summary.md`, and any file that holds secrets. The one config exception is
   the `nativemem` MCP entry that `nativemem mcp install` adds to each agent's MCP config and

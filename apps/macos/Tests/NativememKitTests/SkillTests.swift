@@ -28,6 +28,34 @@ import Testing
         #expect(index.items(in: .folder(path: "/")).isEmpty)
     }
 
+    @Test func projectSkillsLiveInTheFolderTreeAndShowEachCopyPath() throws {
+        var global = try #require(entries().first)
+        var project = global
+        project.nativeId = "skill:app-123/demo-skill"
+        project.scope = Scope(type: "project", path: "/work/app")
+        project.path = "/work/app/.claude/skills/demo-skill"
+        var copy = project
+        copy.agent = "pi"
+        copy.path = "/work/app/.pi/skills/demo-skill"
+        copy.replicaOf = ItemRef(origin: "claude", nativeId: project.nativeId)
+        var other = project
+        other.nativeId = "skill:other-456/demo-skill"
+        other.scope = Scope(type: "project", path: "/work/other")
+        other.path = "/work/other/.claude/skills/demo-skill"
+        global.path = "/home/.claude/skills/demo-skill"
+        let index = MemoryIndex(entries: [global, project, copy, other])
+        #expect(index.skills.count == 1)
+        #expect(index.items(in: .skills).map(\.primary.path) == [global.path])
+        #expect(index.items(in: .global).isEmpty)
+        #expect(index.projects.count == 2)
+        #expect(index.items(in: .folder(path: "/work")).count == 2)
+        let selected = try #require(index.items(in: .folderOnly(path: "/work/app")).first)
+        #expect(selected.primary.path == project.path)
+        #expect(selected.copies.map(\.path) == [copy.path])
+        #expect(selected.project.path == "/work/app")
+        #expect(index.sections(for: .folder(path: "/work")).count == 2)
+    }
+
     @Test func skillSearchMatchesNameAndDescription() throws {
         let index = MemoryIndex(entries: try entries())
         #expect(index.items(in: .skills, matching: "Does demo").count == 1)
