@@ -573,8 +573,20 @@ impl SkillStore {
         let Some(ref subdir) = self.project_subdir else {
             return Ok(Vec::new());
         };
+        let global_dir = self.dir.canonicalize().ok();
+        let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for cwd in cwds {
+            // Skip the agent home: its skills directory is the global one, already scanned.
+            if let Some(g) = &global_dir {
+                if cwd.join(subdir).canonicalize().ok().as_ref() == Some(g) {
+                    continue;
+                }
+            }
+            // Deduplicate cwds: the same project may appear many times.
+            if !seen.insert(cwd) {
+                continue;
+            }
             let dir = cwd.join(subdir);
             let Ok(entries) = fs::read_dir(&dir) else {
                 continue;
