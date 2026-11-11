@@ -6,8 +6,8 @@ not a user's agent homes. `assets/social.png` is the social sharing card.
 
 ## Agent logos
 
-`assets/agents/` holds unmodified original marks from their publishers, served locally without
-third-party requests. Visible agent names label the decorative images; fixed dimensions reserve space.
+`assets/agents/` holds publisher marks and the user-supplied Pi artwork, served locally without
+third-party requests. Pi's outer white margin is cropped; its colors and artwork are preserved. Visible agent names label the decorative images; fixed dimensions reserve space.
 The strip stays light, including embedded SVGs when the browser prefers dark colors.
 
 Sources:
@@ -16,7 +16,7 @@ Sources:
 - `codex.png`: OpenAI's [official Codex extension](https://marketplace.visualstudio.com/items?itemName=openai.chatgpt),
   [published icon](https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.51106.51428/1794372152150/Microsoft.VisualStudio.Services.Icons.Default).
 - `opencode.svg`: [OpenCode's official repository](https://github.com/anomalyco/opencode/blob/dev/packages/ui/src/assets/favicon/favicon-v3.svg).
-- `pi.svg`: [Pi's official site icon](https://pi.dev/favicon.svg).
+- `pi.png`: [user-supplied color Pi reference](https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRF2bgJAlOiyYcfdqBG8VSAhIbrFlg_GGPXwNR04jfXS4Z_cDvDllNBQlE&s=10).
 
 These marks identify supported integrations and remain their respective owners' trademarks.
 
@@ -41,7 +41,7 @@ npm test
 ```
 
 The Playwright suite checks screenshot tabs (including keyboard controls), clipboard copying,
-internal anchors, images, official agent logos and their sizing, a no-JavaScript view, horizontal
+internal anchors, images, agent logos and their sizing, a no-JavaScript view, horizontal
 overflow at five viewport widths, and WCAG A/AA rules with axe. `tests/server.py` serves the fixture
 with the OS connection-backlog limit so parallel browser connection pools can load assets together.
 No external service or real agent is contacted.

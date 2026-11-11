@@ -34,7 +34,7 @@ test("assets load locally, internal links resolve and the product claims are exp
   expect(failed).toEqual([]);
 });
 
-test("supported agents use local official logos with stable sizing", async ({
+test("supported agents use local logo assets with stable sizing", async ({
   page,
 }) => {
   await page.goto("/");
@@ -44,7 +44,7 @@ test("supported agents use local official logos with stable sizing", async ({
   ]);
   const logos = strip.locator("img.agent-logo");
   await expect(logos).toHaveCount(4);
-  const files = ["claude.svg", "codex.png", "opencode.svg", "pi.svg"];
+  const files = ["claude.svg", "codex.png", "opencode.svg", "pi.png"];
   for (const [index, file] of files.entries()) {
     const logo = logos.nth(index);
     await expect(logo).toHaveAttribute("src", `assets/agents/${file}`);

@@ -27,7 +27,7 @@ nativemem-sync/
 │   ├── index.html · style.css · app.js  product page, responsive styling, accessible tabs and copying
 │   ├── render-icon.mjs            renders assets/mark.svg into the macOS source AppIcon.png
 │   ├── assets/                   mark.svg, social.png, synthetic app screenshots (WebP), self-hosted OFL fonts
-│   │   └── agents/               publisher-original Claude, Codex, OpenCode and Pi marks; sources in site/README.md
+│   │   └── agents/               Claude, Codex, OpenCode and Pi integration marks; sources in site/README.md
 │   ├── package.json · package-lock.json  browser-test dependencies only
 │   ├── playwright.config.js · tests/site.spec.js  navigation, logos, tabs, clipboard, responsive and axe checks
 │   ├── tests/server.py           local HTTP fixture with an OS-sized connection backlog for parallel browser loads
