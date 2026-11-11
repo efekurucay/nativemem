@@ -15,8 +15,9 @@ struct NativememApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("nativemem") {
+        WindowGroup {
             ContentView(model: model)
         }
+        .windowStyle(.hiddenTitleBar)
     }
 }

@@ -34,6 +34,7 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollIndicators(.hidden)
         .searchable(text: $model.projectSearch, placement: .sidebar, prompt: "Filter projects")
         .navigationSplitViewColumnWidth(min: 200, ideal: 240)
     }

@@ -36,6 +36,7 @@ pub const KNOWN_ENTRY_TYPES: &[&str] = &[
     "model_change",
     "session_info",
     "thinking_level_change",
+    "usage",
 ];
 
 const TAIL_BYTES: u64 = 1 << 20;

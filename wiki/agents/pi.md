@@ -124,7 +124,7 @@ newest 3 sessions (last 1 MiB each) for entry types.
 | Check id | Protects | Expected constant | Fails when |
 |---|---|---|---|
 | `pi.session_header` | session | `HEADER_TYPE` `session`, `HEADER_VERSION` `3`, keys `cwd`, `id`, `timestamp` | the header has another `type` or `version`, or lacks a key |
-| `pi.entry_types` | session | `KNOWN_ENTRY_TYPES`: `message`, `session_info`, `custom`, `custom_message`, `model_change`, `thinking_level_change`, `compaction`, `branch_summary`, `label` | an entry has another `type` |
+| `pi.entry_types` | session | `KNOWN_ENTRY_TYPES`: `message`, `session_info`, `custom`, `custom_message`, `model_change`, `thinking_level_change`, `compaction`, `branch_summary`, `label`, `usage` | an entry has another `type` |
 | `pi.cwd_encoding` | session | the directory name equals `encode_cwd(header cwd)` | a sampled session (newest 8) sits in another directory |
 | `pi.skills_layout` | skill | `LAYOUT_EXPECTED`: the skills directory is absent, empty, or most of its directories hold a top-level `SKILL.md` | it is not a directory, or most directories lack `SKILL.md` |
 

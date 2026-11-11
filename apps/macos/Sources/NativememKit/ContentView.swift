@@ -16,7 +16,7 @@ public struct ContentView: View {
             detailColumn
         }
         .frame(minWidth: 900, minHeight: 560)
-        .navigationTitle("nativemem")
+        .navigationTitle("")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("New", systemImage: "plus") {
