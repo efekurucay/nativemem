@@ -39,7 +39,10 @@ toolbar items and grouped boxes are the system's own controls with their default
 hand-drawn borders, dividers or backgrounds.
 
 **Sidebar** (`List` with the sidebar style, native `.searchable` filter in the sidebar)
-- "Overview" row at the top, an ordinary list row.
+- The first section (no header): "Overview" row with a badge counting agents that need
+  action, "Global" when global items exist, "Skills" when skills exist with a count badge.
+- Section "Hub": "MCP & Integrations" with a badge counting servers that need sign-in or are
+  in error, and "Subagents" with a badge counting the defined subagents.
 - Section "Projects": a folder tree built from the project paths.
   - The home directory prefix is shown as `~`. The deepest folder that contains every project
     is not a level of the tree: its children are the top level. If that folder itself holds
@@ -51,12 +54,7 @@ hand-drawn borders, dividers or backgrounds.
     below. Siblings are sorted by that count, largest first, then by name.
   - Top-level folders start expanded; deeper ones start collapsed.
   - The filter keeps folders whose path contains the text, with their ancestors, expanded.
-- A "Global" row above the tree when global items exist.
-- A "Skills" row below it when skills exist, with a count badge. Skills are listed there only,
-  not under "Global" or a project.
-- An "MCP & Integrations" row below that, always shown, with a badge counting the servers that need
-  sign-in or are in error.
-- A "Subagents" row below that, always shown, with a badge counting the defined subagents.
+- Skills are listed in their own row, not under "Global" or a project.
 
 **Item list** (a folder is selected)
 - Items of that folder and everything below it. When they come from more than one project, the

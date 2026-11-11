@@ -5,24 +5,28 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: selectionBinding) {
-            Label("Overview", systemImage: "square.grid.2x2")
-                .badge(model.agentsNeedingAction)
-                .tag(SidebarSelection.overview)
-            if model.hasGlobalItems {
-                Label("Global", systemImage: "globe")
-                    .tag(SidebarSelection.global)
+            Section {
+                Label("Overview", systemImage: "square.grid.2x2")
+                    .badge(model.agentsNeedingAction)
+                    .tag(SidebarSelection.overview)
+                if model.hasGlobalItems {
+                    Label("Global", systemImage: "globe")
+                        .tag(SidebarSelection.global)
+                }
+                if model.skillCount > 0 {
+                    Label("Skills", systemImage: "sparkles")
+                        .badge(model.skillCount)
+                        .tag(SidebarSelection.skills)
+                }
             }
-            if model.skillCount > 0 {
-                Label("Skills", systemImage: "sparkles")
-                    .badge(model.skillCount)
-                    .tag(SidebarSelection.skills)
+            Section("Hub") {
+                Label("MCP & Integrations", systemImage: "puzzlepiece.extension")
+                    .badge(model.mcp.attentionCount)
+                    .tag(SidebarSelection.mcp)
+                Label("Subagents", systemImage: "person.2")
+                    .badge(model.subagents.subagents.count)
+                    .tag(SidebarSelection.subagents)
             }
-            Label("MCP & Integrations", systemImage: "puzzlepiece.extension")
-                .badge(model.mcp.attentionCount)
-                .tag(SidebarSelection.mcp)
-            Label("Subagents", systemImage: "person.2")
-                .badge(model.subagents.subagents.count)
-                .tag(SidebarSelection.subagents)
             Section("Projects") {
                 ForEach(model.visibleTree) { node in
                     TreeNodeView(node: node, depth: 0, forceExpanded: model.isFiltering)
