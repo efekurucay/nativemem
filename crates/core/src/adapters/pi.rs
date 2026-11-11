@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -331,6 +332,7 @@ impl PiAdapter {
     /// Kinds this adapter neither reads nor writes while its compatibility checks fail.
     pub fn with_blocked_kinds(mut self, kinds: &[Kind]) -> Self {
         self.blocked = kinds.to_vec();
+        self.instructions = self.instructions.with_blocked_kinds(kinds);
         self
     }
 
@@ -355,6 +357,39 @@ impl PiAdapter {
 
     fn sessions_dir(&self) -> PathBuf {
         self.home.join("sessions")
+    }
+
+    /// Discover skill projects without parsing transcripts when session loading is disabled.
+    fn session_projects(&self) -> Result<Vec<PathBuf>> {
+        let root = self.sessions_dir();
+        let mut projects = HashSet::new();
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
+        for dir in sorted_entries(&root)?.into_iter().filter(|p| p.is_dir()) {
+            for path in sorted_entries(&dir)?
+                .into_iter()
+                .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "jsonl"))
+            {
+                let file = fs::File::open(&path).map_err(|e| Error::io(&path, e))?;
+                let mut header = Vec::new();
+                BufReader::new(file.take(64 * 1024))
+                    .read_until(b'\n', &mut header)
+                    .map_err(|e| Error::io(&path, e))?;
+                if let Ok(value) = serde_json::from_slice::<Value>(&header) {
+                    if value["type"] == "session" {
+                        if let Some(cwd) = value["cwd"]
+                            .as_str()
+                            .map(PathBuf::from)
+                            .filter(|p| p.is_absolute())
+                        {
+                            projects.insert(cwd);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(projects.into_iter().collect())
     }
 
     fn scan_sessions(&self) -> Result<SessionScan> {
@@ -477,24 +512,27 @@ impl Adapter for PiAdapter {
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
-        let mut out = self.instructions.scan()?;
-        out.retain(|o| !self.blocked.contains(&o.item.kind));
-        out.extend(self.scan_sessions()?.observed);
+        Ok(self.inspect()?.observed)
+    }
+
+    fn inspect(&self) -> Result<crate::model::ScanReport> {
+        let mut out = self.instructions.inspect_entries()?;
+        out.sessions(self.scan_sessions()?);
         if !self.blocked.contains(&Kind::Skill) {
-            let cwds: Vec<PathBuf> = out
+            let mut cwds: Vec<PathBuf> = out
+                .observed
                 .iter()
                 .filter_map(|o| match &o.item.scope {
                     Scope::Project(cwd) => Some(cwd.clone()),
                     _ => None,
                 })
                 .collect();
-            let skills = self.instructions.scan_project_skills(&cwds)?;
-            let mut seen: HashSet<String> = out.iter().map(|o| o.native_id.clone()).collect();
-            out.extend(
-                skills
-                    .into_iter()
-                    .filter(|o| seen.insert(o.native_id.clone())),
-            );
+            cwds.extend(self.instructions.project_cwds());
+            if self.options.is_none() && !self.blocked.contains(&Kind::Session) {
+                cwds.extend(self.session_projects()?);
+            }
+            out.observed
+                .extend(self.instructions.scan_project_skills(&cwds)?);
         }
         Ok(out)
     }

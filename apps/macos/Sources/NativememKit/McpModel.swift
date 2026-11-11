@@ -13,6 +13,7 @@ public final class McpModel {
     public private(set) var loadError: String?
     public private(set) var registrationError: String?
     public private(set) var isLoaded = false
+    public private(set) var isLoading = false
     /// Servers with a test or a sign-in running.
     public private(set) var testing: Set<String> = []
     public private(set) var signingIn: Set<String> = []
@@ -21,6 +22,7 @@ public final class McpModel {
     public var errorMessage: String?
 
     private var testTask: Task<Void, Never>?
+    private var loadGeneration = 0
 
     public init() {}
 
@@ -47,12 +49,29 @@ public final class McpModel {
 
     // MARK: - Loading
 
+    public func invalidate() {
+        loadGeneration += 1
+        isLoaded = false
+        isLoading = false
+        testTask?.cancel()
+        tests = [:]
+    }
+
+    public func loadIfNeeded() async {
+        if !isLoaded && !isLoading { await reload() }
+    }
+
     /// Reads the servers and the registration, then tests every enabled server in the background.
     public func reload() async {
         guard let cli else { return }
+        loadGeneration += 1
+        let generation = loadGeneration
+        isLoading = true
+        defer { if generation == loadGeneration { isLoading = false } }
         async let listed = Result { try await cli.mcpList() }
         async let registered = Result { try await cli.mcpStatus() }
         let (list, status) = await (listed, registered)
+        guard generation == loadGeneration, !Task.isCancelled else { return }
         switch list {
         case .success(let value):
             servers = value

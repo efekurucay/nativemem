@@ -92,6 +92,17 @@ public struct Item: Codable, Hashable, Sendable {
 
 public struct ItemsDocument: Codable, Sendable {
     public var items: [Item]
+    /// Session-only diagnostics, delivered with the on-demand listing.
+    public var sessionStatus: [AgentStatus]?
+    public var sessionNotice: String?
+}
+
+/// The desktop's initial read; transcript loading is a separate, on-demand operation.
+public struct SnapshotDocument: Codable, Sendable {
+    public var items: ItemsDocument
+    public var status: StatusDocument
+    public var doctor: DoctorDocument
+    public var sessionsIncluded: Bool
 }
 
 public struct SkippedEntry: Codable, Hashable, Sendable {

@@ -30,12 +30,15 @@ struct ItemListView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .searchable(text: $model.itemSearch, prompt: searchPrompt)
+        .task(id: model.showsSessions ? model.dataRevision : nil) {
+            if model.showsSessions { await model.loadSessions() }
+        }
     }
 
     private var modePicker: some View {
         Picker("Show", selection: modeBinding) {
             Text("Memory & skills").tag(ItemMode.memory)
-            Text("Sessions (\(model.folderSessionCount))").tag(ItemMode.sessions)
+            Text(model.sessionsLoaded ? "Sessions (\(model.folderSessionCount))" : "Sessions").tag(ItemMode.sessions)
         }
         .labelsHidden()
         .pickerStyle(.segmented)
@@ -46,7 +49,17 @@ struct ItemListView: View {
     private var list: some View {
         let sections = model.visibleSections
         return Group {
-            if sections.isEmpty {
+            if model.showsSessions && model.isLoadingSessions {
+                ProgressView("Loading sessions…")
+            } else if model.showsSessions, let error = model.sessionError {
+                ContentUnavailableView {
+                    Label("Sessions could not be loaded", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error)
+                } actions: {
+                    Button("Retry") { Task { await model.loadSessions() } }
+                }
+            } else if sections.isEmpty {
                 if model.itemSearch.isEmpty {
                     ContentUnavailableView(emptyTitle, systemImage: "tray")
                 } else {

@@ -50,10 +50,17 @@ public final class AppModel {
     public private(set) var status: StatusDocument?
     public private(set) var doctor: DoctorDocument?
     public private(set) var isLoading = false
+    public private(set) var isLoadingSessions = false
+    public private(set) var sessionsLoaded = false
+    public private(set) var sessionError: String?
+    public private(set) var dataRevision = 0
+    private var reloadGeneration = 0
     public private(set) var cli: NativememCLI? {
         didSet {
             mcp.cli = cli
             subagents.cli = cli
+            mcp.invalidate()
+            subagents.invalidate()
         }
     }
     public let mcp = McpModel()
@@ -75,10 +82,10 @@ public final class AppModel {
     private var pendingItemID: String?
     private var pendingMode: ItemMode?
 
-    public init() {
-        cli = NativememCLI.locateOnThisMachine().map(NativememCLI.init(binary:))
-        mcp.cli = cli
-        subagents.cli = cli
+    public init(cli: NativememCLI? = nil) {
+        self.cli = cli ?? NativememCLI.locateOnThisMachine().map(NativememCLI.init(binary:))
+        mcp.cli = self.cli
+        subagents.cli = self.cli
     }
 
     public var isFiltering: Bool {
@@ -157,24 +164,74 @@ public final class AppModel {
 
     public func reload() async {
         guard let cli else { return }
+        reloadGeneration += 1
+        let generation = reloadGeneration
+        isLoadingSessions = false
         isLoading = true
-        defer { isLoading = false }
+        defer { if generation == reloadGeneration { isLoading = false } }
         do {
-            async let loadedItems = cli.items()
-            async let loadedSessions: [Item] = (try? await cli.sessions()) ?? []
-            async let loadedStatus = cli.status()
-            async let loadedDoctor: DoctorDocument? = try? await cli.doctor()
-            let (entries, statusDocument) = try await (loadedItems, loadedStatus)
-            index = MemoryIndex(entries: entries)
-            sessionIndex = SessionIndex(entries: await loadedSessions)
-            status = statusDocument
-            doctor = await loadedDoctor
+            let (document, loadedIndex) = try await Self.readSnapshot(cli)
+            guard generation == reloadGeneration, !Task.isCancelled else { return }
+            index = loadedIndex
+            status = document.status
+            doctor = document.doctor
+            errorMessage = nil
+            sessionIndex = .empty
+            sessionsLoaded = false
+            isLoadingSessions = false
+            sessionError = nil
+            dataRevision += 1
+            mcp.invalidate()
+            subagents.invalidate()
+            if showsSessions { await loadSessions() }
             if selectedItem == nil { selectedItemID = nil }
+            if sidebar == .mcp { await mcp.reload() }
+            if sidebar == .subagents { await subagents.reload() }
+        } catch is CancellationError {
         } catch {
-            errorMessage = error.localizedDescription
+            if generation == reloadGeneration { errorMessage = error.localizedDescription }
         }
-        await mcp.reload()
-        await subagents.reload()
+    }
+
+    // Index construction, like CLI decoding, must not occupy the UI's main actor.
+    private nonisolated static func readSnapshot(_ cli: NativememCLI) async throws -> (SnapshotDocument, MemoryIndex) {
+        let document = try await cli.snapshot()
+        return (document, MemoryIndex(entries: document.items.items))
+    }
+
+    private nonisolated static func readSessions(_ cli: NativememCLI) async throws -> (ItemsDocument, SessionIndex) {
+        let document = try await cli.sessions()
+        return (document, SessionIndex(entries: document.items))
+    }
+
+    public func loadSessions() async {
+        guard !sessionsLoaded, !isLoadingSessions, let cli else { return }
+        let generation = reloadGeneration
+        let revision = dataRevision
+        isLoadingSessions = true
+        sessionError = nil
+        defer { if generation == reloadGeneration, revision == dataRevision { isLoadingSessions = false } }
+        do {
+            let (document, loaded) = try await Self.readSessions(cli)
+            guard generation == reloadGeneration, revision == dataRevision, !Task.isCancelled else { return }
+            sessionIndex = loaded
+            for summary in document.sessionStatus ?? [] {
+                if let position = status?.agents.firstIndex(where: { $0.id == summary.id }) {
+                    status?.agents[position].sessions = summary.sessions
+                    status?.agents[position].skipped.append(contentsOf: summary.skipped)
+                }
+            }
+            if let notice = document.sessionNotice,
+               let position = doctor?.agents.firstIndex(where: { $0.id == "claude" }),
+               doctor?.agents[position].noticeLines.contains(notice) != true {
+                let notices = (doctor?.agents[position].noticeLines ?? []) + [notice]
+                doctor?.agents[position].notices = notices
+            }
+            sessionsLoaded = true
+        } catch is CancellationError {
+        } catch {
+            if generation == reloadGeneration, revision == dataRevision { sessionError = error.localizedDescription }
+        }
     }
 
     public func delete(_ item: LogicalItem) async {

@@ -1501,6 +1501,15 @@ fn pi_project_skills_are_discovered_from_session_projects() {
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0]["agent"], "pi");
     assert_eq!(skills[0]["scope"]["path"], cwd.display().to_string());
+    let (code, snapshot) = f.json(&["--no-sessions", "snapshot", "--json"]);
+    assert_eq!(code, Some(0));
+    assert!(snapshot["items"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["agent"] == "pi"
+            && s["kind"] == "skill"
+            && s["scope"]["path"] == cwd.display().to_string()));
 }
 
 #[test]
@@ -1530,6 +1539,122 @@ fn project_skill_sync_survives_reopening_without_project_memories() {
     assert_eq!(code, Some(0), "{deleted}");
     assert!(!cwd.join(".claude/skills/demo-skill").exists());
     assert!(!cwd.join(".opencode/skills/demo-skill").exists());
+}
+
+#[test]
+fn snapshot_matches_documents_and_keeps_diagnostics_without_writes() {
+    let f = four_agents();
+    fs::write(f.claude_file.with_file_name("broken.md"), "no frontmatter").unwrap();
+    skill_dir(&f.claude.join("skills"), "demo", "fixture");
+    skill_dir(
+        &f.state.with_file_name("pi").join("skills"),
+        "shadowed",
+        "own fixture",
+    );
+    skill_dir(
+        &f.state.with_file_name("home").join(".agents/skills"),
+        "shadowed",
+        "shared fixture",
+    );
+    let (_, doctor) = f.json(&["--no-sessions", "doctor", "--json"]);
+    let state = fs::read(f.state.join("compat.json")).unwrap();
+    let (code, snapshot) = f.json(&["--no-sessions", "snapshot", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(snapshot["sessions_included"], false);
+    assert_eq!(snapshot["doctor"], doctor);
+    assert_eq!(
+        snapshot["status"],
+        f.json(&["--no-sessions", "status", "--json"]).1
+    );
+    assert_eq!(snapshot["items"], f.json(&["items", "--json"]).1);
+    assert!(snapshot["status"]["agents"][0]["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["label"].as_str().unwrap().ends_with("broken.md")));
+    assert!(snapshot["doctor"]["agents"][3]["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n.as_str().unwrap().contains("shadowed")));
+    assert_eq!(fs::read(f.state.join("compat.json")).unwrap(), state);
+}
+
+#[test]
+fn scoped_session_listing_does_not_read_instruction_files() {
+    let f = four_agents();
+    ClaudeHome::new(&f.claude).add_session(Path::new("/w/app"), "c1", None, &[("user", "fixture")]);
+    PiHome::new(&f.state.with_file_name("pi")).add_session(
+        Path::new("/w/app"),
+        "p1",
+        None,
+        &[("user", "fixture")],
+    );
+    for (home, name) in [
+        (&f.claude, "CLAUDE.md"),
+        (&f.codex, "AGENTS.md"),
+        (&f.state.with_file_name("pi"), "AGENTS.md"),
+        (&f.state.with_file_name("opencode"), "AGENTS.md"),
+    ] {
+        fs::write(home.join(name), [0xff]).unwrap();
+    }
+    let (code, sessions) = f.json(&["items", "--kind", "session", "--json"]);
+    assert_eq!(code, Some(0), "{sessions}");
+    assert_eq!(sessions["items"].as_array().unwrap().len(), 2);
+    assert!(sessions["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["body"] == ""));
+    let session = &sessions["items"][0];
+    assert_eq!(
+        f.json(&[
+            "session",
+            "show",
+            "--agent",
+            session["agent"].as_str().unwrap(),
+            "--id",
+            session["native_id"].as_str().unwrap(),
+            "--json"
+        ])
+        .0,
+        Some(0)
+    );
+    skill_dir(&f.claude.join("skills"), "demo", "fixture");
+    assert_eq!(
+        f.json(&["skill", "show", "--agent", "claude", "--name", "demo", "--json"])
+            .0,
+        Some(0)
+    );
+    assert_eq!(
+        f.json(&["items", "--kind", "instruction", "--json"]).0,
+        Some(1)
+    );
+}
+
+#[test]
+fn snapshot_is_fresh_and_sync_observes_edits_after_it() {
+    let f = Fx::new();
+    let (code, first) = f.json(&["--no-sessions", "snapshot", "--json"]);
+    assert_eq!(code, Some(0));
+    assert!(!f.state.exists());
+    let text = fs::read_to_string(&f.claude_file)
+        .unwrap()
+        .replace("alpha body", "edited fixture");
+    fs::write(&f.claude_file, text).unwrap();
+    let (code, second) = f.json(&["--no-sessions", "snapshot", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_ne!(
+        first["items"]["items"][0]["hash"],
+        second["items"]["items"][0]["hash"]
+    );
+    assert!(!f.state.exists());
+    assert_eq!(f.json(&["sync", "--apply", "--json"]).0, Some(0));
+    let (_, items) = f.json(&["items", "--json"]);
+    assert!(find(&items, "codex")["body"]
+        .as_str()
+        .unwrap()
+        .contains("edited fixture"));
 }
 
 #[test]

@@ -680,6 +680,17 @@ fn a_session_older_than_the_retention_is_planned_for_other_agents_but_not_claude
         out.contains("set cleanupPeriodDays in Claude's settings"),
         "{out}"
     );
+    let (code, sessions) = f.json(&["items", "--kind", "session", "--json"]);
+    assert_eq!(code, Some(0));
+    assert!(sessions["session_notice"]
+        .as_str()
+        .unwrap()
+        .contains(NOTICE));
+    assert!(sessions["session_status"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["id"] == "pi" && s["sessions"] == 1));
 }
 
 #[test]

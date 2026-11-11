@@ -374,7 +374,7 @@ impl SkillStore {
         names
     }
 
-    fn scan_with_report(&self) -> Result<(Vec<Observed>, SkillReport)> {
+    pub(crate) fn scan_with_report(&self) -> Result<(Vec<Observed>, SkillReport)> {
         let mut out = Vec::new();
         let mut report = SkillReport::default();
         for name in self.names() {

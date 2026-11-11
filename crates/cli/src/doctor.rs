@@ -1,6 +1,8 @@
 //! `nativemem doctor` and the compatibility plumbing `status` and `sync` share: probe results,
 //! the kinds they pause, warnings and desktop notifications.
 
+use std::borrow::Borrow;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,7 +11,7 @@ use nativemem_core::compat::{
     self, kinds_text, AgentReport, Check, CompatState, Notification, Status,
 };
 use nativemem_core::fsx::BackupSession;
-use nativemem_core::model::{Adapter, Kind};
+use nativemem_core::model::{Adapter, Kind, Observed, ScanReport};
 use serde_json::{json, Value};
 
 use crate::{lock_state, print_json, Agents, Blocked, Failure, Outcome, Roots, AGENT_IDS};
@@ -38,42 +40,66 @@ pub fn assess_all(agents: &Agents, state: &mut CompatState) -> Vec<AgentReport> 
 /// Adds the informational notices: skills whose own copy differs
 /// from a copy the agent also reads elsewhere, and sessions other agents hold that Claude Code
 /// would delete.
-pub fn add_notices(agents: &Agents, reports: &mut [AgentReport]) {
+pub fn add_notices(
+    agents: &Agents,
+    reports: &mut [AgentReport],
+    scans: Option<&BTreeMap<String, ScanReport>>,
+) {
     for a in agents.all() {
-        let Ok(report) = a.skill_report() else {
-            continue;
+        let shadowed = if let Some(scans) = scans {
+            scans
+                .get(a.id().as_str())
+                .map(|s| s.shadowed_skills.clone())
+                .unwrap_or_default()
+        } else {
+            a.skill_report().map(|r| r.shadowed).unwrap_or_default()
         };
         if let Some(r) = reports.iter_mut().find(|r| r.agent == a.id()) {
-            r.notices.extend(report.shadowed.into_iter().map(|name| {
+            r.notices.extend(shadowed.into_iter().map(|name| {
                 format!("skill {name}: the copy in the shared skills directory has other content than this agent's own copy")
             }));
         }
     }
-    let Some(claude) = agents.claude.as_ref() else {
-        return;
+    let notice = if let Some(scans) = scans {
+        session_notice(agents, scans.values().flat_map(|s| &s.observed))
+    } else {
+        session_notice(
+            agents,
+            agents
+                .all()
+                .iter()
+                .filter(|a| a.id().as_str() != "claude")
+                .filter_map(|a| a.scan().ok())
+                .flatten(),
+        )
     };
+    if let Some(notice) = notice {
+        if let Some(r) = reports.iter_mut().find(|r| r.agent.as_str() == "claude") {
+            r.notices.push(notice);
+        }
+    }
+}
+
+/// A transcript-retention notice needs session observations, not another compatibility assessment.
+pub fn session_notice<T: Borrow<Observed>>(
+    agents: &Agents,
+    observed: impl IntoIterator<Item = T>,
+) -> Option<String> {
+    let claude = agents.claude.as_ref()?;
     let retention = claude.retention();
     if retention.configured || retention.days == 0 {
-        return;
+        return None;
     }
-    let held = agents
-        .all()
-        .iter()
-        .filter(|a| a.id().as_str() != "claude")
-        .filter_map(|a| a.scan().ok())
-        .flatten()
-        .any(|o| {
-            o.item.kind == Kind::Session && o.replica_of.is_none() && !claude.accepts(&o.item)
-        });
-    if !held {
-        return;
-    }
-    if let Some(r) = reports.iter_mut().find(|r| r.agent.as_str() == "claude") {
-        r.notices.push(format!(
-            "transcripts older than {} days are deleted by Claude itself; set cleanupPeriodDays in Claude's settings to keep older sessions",
-            retention.days
-        ));
-    }
+    let held = observed.into_iter().any(|o| {
+        let o = o.borrow();
+        o.agent.as_str() != "claude"
+            && o.item.kind == Kind::Session
+            && o.replica_of.is_none()
+            && !claude.accepts(&o.item)
+    });
+    held.then(|| format!(
+        "transcripts older than {} days are deleted by Claude itself; set cleanupPeriodDays in Claude's settings to keep older sessions", retention.days
+    ))
 }
 
 pub fn blocked_kinds(reports: &[AgentReport]) -> Blocked {
@@ -177,6 +203,10 @@ fn report_json(r: &AgentReport) -> Value {
     doc
 }
 
+pub fn document(reports: &[AgentReport]) -> Value {
+    json!({ "agents": reports.iter().map(report_json).collect::<Vec<_>>() })
+}
+
 fn print_report(r: &AgentReport) {
     let version = r.version.as_deref().unwrap_or("version unknown");
     if !r.installed {
@@ -269,7 +299,7 @@ pub fn run(
         ctx.reports = assess_all(agents, &mut ctx.state);
     }
     persist(roots, backups, &ctx, args.accept.is_some())?;
-    add_notices(agents, &mut ctx.reports);
+    add_notices(agents, &mut ctx.reports, None);
 
     let shown: Vec<&AgentReport> = ctx
         .reports

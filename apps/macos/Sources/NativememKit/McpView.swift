@@ -12,6 +12,9 @@ struct McpView: View {
                 .padding(20)
             if model.cli == nil {
                 ContentUnavailableView("nativemem not found", systemImage: "questionmark.folder")
+            } else if model.isLoading || !model.isLoaded {
+                ProgressView("Loading integrations…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let loadError = model.loadError {
                 ContentUnavailableView("The servers could not be read", systemImage: "xmark.circle", description: Text(loadError))
             } else if model.isLoaded && model.servers.isEmpty {

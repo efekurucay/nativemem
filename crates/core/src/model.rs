@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::adapters::skills::SkillReport;
 use crate::error::{Error, Result};
+use crate::session::SessionScan;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(pub String);
@@ -89,6 +90,38 @@ pub struct Observed {
     pub replica_of: Option<ItemKey>,
 }
 
+/// One fresh read of an agent's entries and the diagnostics produced by that same read.
+#[derive(Debug, Default)]
+pub struct ScanReport {
+    pub observed: Vec<Observed>,
+    /// `(human-output prefix, native label, reason)`; JSON keeps the native label unchanged.
+    pub skipped: Vec<(&'static str, String, String)>,
+    pub shadowed_skills: Vec<String>,
+    pub automated_sessions: usize,
+}
+
+impl ScanReport {
+    pub fn skip(&mut self, prefix: &'static str, entries: Vec<(String, String)>) {
+        self.skipped.extend(
+            entries
+                .into_iter()
+                .map(|(label, reason)| (prefix, label, reason)),
+        );
+    }
+
+    pub fn sessions(&mut self, scan: SessionScan) {
+        self.observed.extend(scan.observed);
+        self.skip("session ", scan.skipped);
+        self.automated_sessions = scan.automated;
+    }
+
+    pub fn skills(&mut self, observed: Vec<Observed>, report: SkillReport) {
+        self.observed.extend(observed);
+        self.skip("skill ", report.skipped);
+        self.shadowed_skills.extend(report.shadowed);
+    }
+}
+
 pub trait Adapter {
     fn id(&self) -> AgentId;
     /// The installed version of the agent, when it can be found without running it.
@@ -139,6 +172,14 @@ pub trait Adapter {
         Ok(SkillReport::default())
     }
     fn scan(&self) -> Result<Vec<Observed>>;
+
+    /// Read entries and their diagnostics together; the result is local to this call, never cached.
+    fn inspect(&self) -> Result<ScanReport> {
+        Ok(ScanReport {
+            observed: self.scan()?,
+            ..ScanReport::default()
+        })
+    }
     /// Create or update the replica of `key` in this agent. Returns its native_id and path.
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)>;
     /// Create a new original in this agent's own store. Returns its native_id and path, and fails

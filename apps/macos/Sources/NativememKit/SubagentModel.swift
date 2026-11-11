@@ -9,8 +9,10 @@ public final class SubagentModel {
     public private(set) var subagents: [Subagent] = []
     public private(set) var loadError: String?
     public private(set) var isLoaded = false
+    public private(set) var isLoading = false
     public var selectedName: String?
     public var errorMessage: String?
+    private var loadGeneration = 0
 
     public init() {}
 
@@ -18,12 +20,31 @@ public final class SubagentModel {
         subagents.first { $0.name == selectedName }
     }
 
+    public func invalidate() {
+        loadGeneration += 1
+        isLoaded = false
+        isLoading = false
+    }
+
+    public func loadIfNeeded() async {
+        if !isLoaded && !isLoading { await reload() }
+    }
+
     public func reload() async {
         guard let cli else { return }
+        loadGeneration += 1
+        let generation = loadGeneration
+        isLoading = true
+        defer { if generation == loadGeneration { isLoading = false } }
         do {
-            subagents = try await cli.subagentList()
+            let loaded = try await cli.subagentList()
+            guard generation == loadGeneration, !Task.isCancelled else { return }
+            subagents = loaded
             loadError = nil
+        } catch is CancellationError {
+            return
         } catch {
+            guard generation == loadGeneration else { return }
             subagents = []
             loadError = error.localizedDescription
         }

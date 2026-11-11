@@ -144,6 +144,9 @@ nativemem items --kind memory --json
 nativemem items --kind skill --json
 nativemem items --kind session --json
 
+# Read the desktop's items, status and compatibility together, without loading transcripts
+nativemem --no-sessions snapshot --json
+
 # Read exactly one skill, including a project skill, by the ID from items
 nativemem skill show --agent claude --id 'skill:<project-key>/<name>'
 
@@ -160,6 +163,11 @@ nativemem schedule uninstall
 Entry JSON contains `name`, `description`, `category` (or `null`) and Markdown `body`.
 For a global instruction, `description` is the section heading. Skills are edited as files.
 Use `nativemem --help` and the subcommand's `--help` for the full CLI.
+
+The desktop starts with one fresh snapshot. Sessions, MCP connections and subagent definitions load
+when you open their screens. Reload refreshes the current screen and invalidates deferred data;
+sync always reads fresh native data. See [the loading contract](wiki/architecture/overview.md#desktop-app)
+and [synthetic performance measurements](CONTRIBUTING.md#startup-performance).
 
 ### MCP integrations & subagents
 

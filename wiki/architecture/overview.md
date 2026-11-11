@@ -138,7 +138,7 @@ session format changes. Tests: `unmodified_replica_with_an_older_writer_revision
 
 ## CLI
 
-Commands: `status`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
+Commands: `status`, `snapshot --json`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
 `delete`, `add`, `edit`, `skill show`, `session show`, `mcp serve|list|add|edit|remove|enable|disable|set-secret|delete-secret|test|login|logout|install|uninstall|status|import`
 (`wiki/architecture/hub.md`), `subagent list|add|edit|remove|run` (`wiki/architecture/hub.md`, "Subagents"), `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
 `--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
@@ -157,6 +157,34 @@ in `crates/cli/src/main.rs`.
 
 ## Desktop app
 
+Initial load and Reload use `nativemem --no-sessions snapshot --json`. Its document is
+`{ "items": <items document>, "status": <status document>, "doctor": <doctor document>,
+"sessions_included": false }`. Each adapter's fresh `inspect()` returns a `ScanReport`: entries,
+skipped sources, shadowed skills and automated-session count. Lists, counts and notices reuse that
+report. Skill linking affects the listed copies, not raw per-agent counts. Compatibility probes run
+once; paused kinds are excluded from item scanning. A snapshot does not persist compatibility state or write agent files.
+It is not a filesystem transaction across concurrently changing native stores.
+
+`items` skips full transcript scans unless `--kind session` is requested. Kind-filtered lists disable
+unrelated kinds before scanning; path-only project discovery still supplies skill scopes.
+Compatibility probes can inspect bounded native samples independently of transcript loading. The session-only
+JSON document adds `session_status` (per-agent session counts, automated counts and skipped sources;
+non-session counts are zero) and `session_notice` (nullable Claude retention notice). The app merges
+these diagnostics into Overview after loading Sessions. Transcript bodies remain absent from listings.
+Tests: `snapshot_matches_documents_and_keeps_diagnostics_without_writes`,
+`scoped_session_listing_does_not_read_instruction_files`,
+`snapshot_is_fresh_and_sync_observes_edits_after_it` in `crates/cli/tests/cli.rs`.
+
+The app constructs memory and session indexes off the main actor. Sessions load on the first Sessions
+selection; until then the tab has no count. Loading has a spinner, errors have Retry, and cancellation
+leaves the data unloaded. Reload invalidates session and hub data, refreshing only visible expensive
+screens. MCP metadata, upstream connection tests and subagent definitions load when their screens
+open, not during Overview startup. Repeated navigation reuses loaded screen data until invalidated;
+generation checks prevent superseded reads from replacing current data. Tests:
+`apps/macos/Tests/NativememKitTests/LoadingTests.swift`. All sync and apply paths still perform fresh
+scans and compatibility checks; there is no persistent content cache. Reproducible synthetic CLI
+measurements: `scripts/benchmark-startup.py` (instructions in `CONTRIBUTING.md`).
+
 `apps/macos` runs CLI commands with `--json` and renders the result. A toolbar "New" button opens a sheet that runs `add` for a memory entry or a global instruction section in any installed agent (`NewEntrySheet.swift`, `NewEntry.swift`). Display names come from
 `agentDisplayName` in `apps/macos/Sources/NativememKit/MemoryIndex.swift`. Global skills are listed on the
 "Skills" sidebar row; project skills live in the project folder tree beside memories and count toward
@@ -168,8 +196,8 @@ the Sessions list (`SessionIndex.swift`, from `items --kind session --json`) cov
 below, sectioned by project, newest first, and the detail pane (`SessionDetailView.swift`) loads the
 read-only transcript through `nativemem session show`. There is no edit and no delete for sessions. The "MCP & Integrations" sidebar row opens the hub screen (`McpView.swift`, `McpModel.swift`): which agents have the hub (`mcp install` / `uninstall` / `status`), the servers with their state from `mcp list` and `mcp test`, sign-in, add, edit, remove and import (`wiki/architecture/hub.md`). The app finds the binary through app settings, `NATIVEMEM_BIN`, a
 file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebrew/bin`
-(`apps/macos/Sources/NativememKit/NativememCLI.swift`). It also runs `doctor --json` and shows the
-compatibility notices on the Overview (`wiki/architecture/compatibility.md`).
+(`apps/macos/Sources/NativememKit/NativememCLI.swift`). Compatibility notices from the snapshot's
+`doctor` member appear on Overview (`wiki/architecture/compatibility.md`).
 
 ## Source anchors
 
@@ -182,6 +210,8 @@ compatibility notices on the Overview (`wiki/architecture/compatibility.md`).
 - `crates/hub/src/lib.rs`
 - `crates/cli/src/doctor.rs`
 - `crates/cli/tests/cli.rs`
+- `apps/macos/Tests/NativememKitTests/LoadingTests.swift`
+- `scripts/benchmark-startup.py`
 - `docs/design.md`
 - `docs/desktop.md`
 

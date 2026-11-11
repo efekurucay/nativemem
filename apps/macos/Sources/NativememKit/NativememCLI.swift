@@ -63,6 +63,10 @@ public struct NativememCLI: Sendable {
         )
     }
 
+    public func snapshot() async throws -> SnapshotDocument {
+        try await run(["--no-sessions", "snapshot", "--json"])
+    }
+
     public func status() async throws -> StatusDocument {
         try await run(["status", "--json"])
     }
@@ -72,8 +76,8 @@ public struct NativememCLI: Sendable {
     }
 
     /// Chat sessions, without their turns.
-    public func sessions() async throws -> [Item] {
-        try await run(["items", "--kind", "session", "--json"], as: ItemsDocument.self).items
+    public func sessions() async throws -> ItemsDocument {
+        try await run(["items", "--kind", "session", "--json"])
     }
 
     /// The transcript of one session; native ids often begin with "-", so the value is attached with "=".

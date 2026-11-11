@@ -84,8 +84,10 @@ public struct ContentView: View {
             OverviewView(model: model)
         case .mcp:
             McpView(model: model.mcp)
+                .task { await model.mcp.loadIfNeeded() }
         case .subagents:
             SubagentView(model: model.subagents, installedAgents: model.installedAgents)
+                .task { await model.subagents.loadIfNeeded() }
         case .global, .skills, .folder, .folderOnly:
             HSplitView {
                 ItemListView(model: model)

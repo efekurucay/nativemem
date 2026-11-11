@@ -11,6 +11,9 @@ struct SubagentView: View {
         Group {
             if model.cli == nil {
                 ContentUnavailableView("nativemem not found", systemImage: "questionmark.folder")
+            } else if model.isLoading || !model.isLoaded {
+                ProgressView("Loading subagents…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let loadError = model.loadError {
                 ContentUnavailableView(
                     "The subagents could not be read", systemImage: "xmark.circle", description: Text(loadError))

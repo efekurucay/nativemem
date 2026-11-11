@@ -101,7 +101,7 @@ impl AgentsFileAdapter {
     }
 
     /// Project working directories this adapter knows about, from its memory store.
-    fn project_cwds(&self) -> Vec<PathBuf> {
+    pub(super) fn project_cwds(&self) -> Vec<PathBuf> {
         self.memory
             .project_dirs()
             .unwrap_or_default()
@@ -122,8 +122,8 @@ impl AgentsFileAdapter {
         self
     }
 
-    /// OpenCode's session database. `options` is `None` while session sync is off, so nothing is
-    /// read or written.
+    /// OpenCode's session database. With `options` unset, only skill-project path metadata is read;
+    /// no transcripts are read or written.
     pub fn with_opencode_sessions(mut self, db: PathBuf, options: Option<SessionOptions>) -> Self {
         self.sessions = Some(OpencodeSessions::new(
             db,
@@ -145,6 +145,23 @@ impl AgentsFileAdapter {
             Some(s) if !self.blocked.contains(&Kind::Session) => s.scan(&self.agent),
             _ => Ok(SessionScan::default()),
         }
+    }
+
+    /// Entries except project skills, whose complete project set the owning adapter supplies.
+    pub(super) fn inspect_entries(&self) -> Result<crate::model::ScanReport> {
+        let mut out = crate::model::ScanReport::default();
+        if !self.blocked.contains(&Kind::Instruction) {
+            out.observed.extend(self.instructions.scan()?);
+        }
+        if !self.blocked.contains(&Kind::Memory) {
+            out.observed.extend(self.memory.scan()?);
+        }
+        if !self.blocked.contains(&Kind::Skill) {
+            let (observed, report) = self.skills.scan_with_report()?;
+            out.skills(observed, report);
+        }
+        out.sessions(self.scan_sessions()?);
+        Ok(out)
     }
 
     /// Sessions that cannot be synced and how many are automated.
@@ -212,24 +229,25 @@ impl Adapter for AgentsFileAdapter {
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
-        let mut out = Vec::new();
-        if !self.blocked.contains(&Kind::Instruction) {
-            out.extend(self.instructions.scan()?);
-        }
-        if !self.blocked.contains(&Kind::Memory) {
-            out.extend(self.memory.scan()?);
-        }
-        if !self.blocked.contains(&Kind::Skill) {
-            out.extend(self.skills.scan()?);
-        }
-        out.extend(self.scan_sessions()?.observed);
+        Ok(self.inspect()?.observed)
+    }
+
+    fn inspect(&self) -> Result<crate::model::ScanReport> {
+        let mut out = self.inspect_entries()?;
         if !self.blocked.contains(&Kind::Skill) {
             let mut cwds = self.project_cwds();
-            cwds.extend(out.iter().filter_map(|o| match &o.item.scope {
+            if let Some(sessions) = self
+                .sessions
+                .as_ref()
+                .filter(|s| !s.is_enabled() && !self.blocked.contains(&Kind::Session))
+            {
+                cwds.extend(sessions.project_dirs().unwrap_or_default());
+            }
+            cwds.extend(out.observed.iter().filter_map(|o| match &o.item.scope {
                 Scope::Project(cwd) => Some(cwd.clone()),
                 _ => None,
             }));
-            out.extend(self.skills.scan_projects(&cwds)?);
+            out.observed.extend(self.skills.scan_projects(&cwds)?);
         }
         Ok(out)
     }

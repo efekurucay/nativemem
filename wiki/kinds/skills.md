@@ -105,7 +105,15 @@ The detail shows the project or Global, all original/copy directory paths, and a
 any copy (`docs/desktop.md`; `SkillTests.projectSkillsLiveInTheFolderTreeAndShowEachCopyPath`).
 
 Claude project directories are scanned even when they contain no memory entries. OpenCode and Pi
-also discover projects from their scanned sessions. After writing a project skill, the adapter keeps
+also discover projects from their scanned sessions. With transcript loading disabled and the session kind
+not paused, Pi reads only
+session headers (the first line, bounded to 64 KiB); OpenCode queries distinct `session_v2.directory`
+values read-only without reading message rows or waiting on a locked database. Unavailable OpenCode
+metadata leaves memory-store paths and the path index available. Tests:
+`pi_project_skills_are_discovered_from_session_projects` and
+`no_sessions_snapshot_discovers_project_skills_without_reading_message_rows` in the CLI tests.
+`Adapter::inspect` shares the skill scan's diagnostics with status and the desktop snapshot without
+hashing the global skill trees a second time for their report. After writing a project skill, the adapter keeps
 its absolute working directory in `<agent home>/nativemem/skill-projects.json` (paths only, backed up
 and atomically written). This makes copies discoverable on later runs even without a project memory
 or session in that agent. Tests: `project_skill_sync_survives_reopening_without_project_memories`.

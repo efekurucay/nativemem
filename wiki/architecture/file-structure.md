@@ -32,7 +32,8 @@ nativemem-sync/
 │   └── README.md                 local preview, browser tests, Pages deployment
 ├── scripts/
 │   ├── release.sh                local release: checks, version bump, macOS artifacts, notes, commit, tag
-│   └── demo-home.sh              synthetic agent homes with generic memory items and skills for trying the CLI and app
+│   ├── demo-home.sh              synthetic agent homes with generic memory items and skills for trying the CLI and app
+│   └── benchmark-startup.py      isolated small/large fixtures, CLI startup measurements and paired binary comparison
 ├── .github/
 │   ├── workflows/                ci.yml (Linux checks), site.yml (browser checks + Pages), release.yml (Linux binaries, release), portability.yml (manual Windows build)
 │   ├── ISSUE_TEMPLATE/           bug_report, agent_update, config
@@ -42,7 +43,7 @@ nativemem-sync/
 │   ├── core/                     library `nativemem-core`: no agent format knowledge in the engine
 │   │   └── src/
 │   │       ├── lib.rs            module list
-│   │       ├── model.rs          AgentId, Scope, Kind, Item, ItemKey, Observed, the Adapter trait, content_hash
+│   │       ├── model.rs          AgentId, Scope, Kind, Item, ItemKey, Observed, ScanReport, the Adapter trait, content_hash
 │   │       ├── engine.rs         plan (pure) and apply: three-way decision, session planner, mass-delete guard
 │   │       ├── ledger.rs         SQLite ledger: items and replicas tables, writer revision column
 │   │       ├── fsx.rs            atomic_write, BackupSession, backup layout, backup_dir for skill directories
@@ -91,7 +92,7 @@ nativemem-sync/
 │   │   └── tests/                hub.rs (proxy, failures, secrets, HTTP headers), import.rs (four fake agent homes), oauth.rs (sign-in, refresh, needs_login over a fake authorization server), register.rs (the entry in four fake agent homes), subagents.rs (every harness against fake scripts, timeout, depth, cut, concurrency, the hub tools), common/fake_oauth.rs (the fake server, also used by the CLI tests)
 │   └── cli/                      binary `nativemem`
 │       ├── src/
-│       │   ├── main.rs           clap CLI, root resolution, lock, status/items/sync/delete/add/edit, JSON output
+│       │   ├── main.rs           clap CLI, root resolution, lock, snapshot/status/items/sync/delete/add/edit, JSON output
 │       │   ├── doctor.rs         `doctor`, compatibility reports, warnings, notification delivery
 │       │   ├── mcp.rs            `mcp` subcommands over the hub crate
 │       │   ├── subagent.rs       `subagent` subcommands over the hub crate
@@ -119,6 +120,7 @@ nativemem-sync/
 │   │   ├── BodyText.swift, MarkdownBlocks.swift  body rendering
 │   │   └── SidebarView, ItemListView, ItemDetailView, OverviewView, SyncSheet, ContentView
 │   ├── Tests/NativememKitTests/  contract, doctor, index, session, tree, sectioning, body parser, sync headline, new entry, MCP contract, server state and server draft tests
+│   │   ├── LoadingTests.swift    fake-only startup, lazy loading, diagnostics, retry, cancellation and superseded reload tests
 │   │   └── Fixtures/             one JSON file per CLI document shape
 │   ├── Resources/AppIcon.png      1024px desktop icon generated from site/assets/mark.svg
 │   └── scripts/                  bundle.sh builds `build/nativemem.app` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`); dmg.sh packages an app with an Applications shortcut

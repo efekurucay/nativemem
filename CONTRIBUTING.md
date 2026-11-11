@@ -27,6 +27,32 @@ cd apps/macos && swift test      # when the app changed
 CI runs the Rust checks on Linux. The macOS app and its tests run only on the maintainer's
 machine (`scripts/release.sh`), so run `swift test` yourself when you change the app.
 
+## Startup performance
+
+```sh
+cargo build --release
+python3 scripts/benchmark-startup.py target/release/nativemem --size small
+python3 scripts/benchmark-startup.py target/release/nativemem --size large
+# Compare the commands profile of another nativemem build with the snapshot profile:
+python3 scripts/benchmark-startup.py target/release/nativemem --compare /tmp/nativemem-baseline
+```
+
+The script owns a temporary fixture tree, redirects `HOME`, passes every root explicitly and gives
+probes an empty executable search path. It never runs an agent. Paired comparisons alternate order on
+the exact same files. Output contains fixture counts and millisecond median/min/max only. The large
+fixture has 80 nine-file skills per agent, 200 memories and 160 sessions of 100 turns. Five samples
+are the default; filesystem caches are not flushed. `first_content` covers the initial core reads;
+`content_with_sessions` includes an immediate session listing. Neither measures rendered app launch,
+hub loading or upstream network latency. Use Instruments for main-thread work and cold app launches.
+
+Measure before changing an implementation and remeasure the same workload. Keep disk observation
+fresh before sync rather than substituting a persistent metadata/hash cache. Relevant references:
+[Apple's performance feedback loop](https://developer.apple.com/videos/play/wwdc2023/10160/),
+[launch-time measurement and deferred work](https://developer.apple.com/documentation/xcode/reducing-your-app-s-launch-time),
+[main-thread responsiveness](https://developer.apple.com/documentation/xcode/improving-app-responsiveness),
+[the USE method](https://www.brendangregg.com/usemethod.html) and
+[SQLite's in-process query costs](https://sqlite.org/np1queryprob.html).
+
 ## Landing page and screenshots
 
 The static website lives in `site/`. Run `npm ci`, `npx playwright install chromium` and `npm test`

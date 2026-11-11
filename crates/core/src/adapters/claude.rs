@@ -503,16 +503,27 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
-        let mut out = self.collect()?.items;
-        out.extend(self.scan_sessions()?.observed);
+        Ok(self.inspect()?.observed)
+    }
+
+    fn inspect(&self) -> Result<crate::model::ScanReport> {
+        let collected = self.collect()?;
+        let mut out = crate::model::ScanReport {
+            observed: collected.items,
+            ..Default::default()
+        };
+        out.skip("project ", collected.skipped_projects);
+        out.skip("file ", collected.skipped_files);
+        out.sessions(self.scan_sessions()?);
         if !self.blocked.contains(&Kind::Skill) {
-            out.extend(self.skills.scan()?);
+            let (observed, report) = self.skills.scan_with_report()?;
+            out.skills(observed, report);
             let cwds: Vec<PathBuf> = self
                 .project_cwds()?
                 .into_iter()
                 .filter_map(|(_, cwd)| cwd.ok())
                 .collect();
-            out.extend(self.skills.scan_projects(&cwds)?);
+            out.observed.extend(self.skills.scan_projects(&cwds)?);
         }
         Ok(out)
     }

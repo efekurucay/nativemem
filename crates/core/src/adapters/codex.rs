@@ -332,9 +332,13 @@ impl Adapter for CodexAdapter {
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
-        let mut out = Vec::new();
+        Ok(self.inspect()?.observed)
+    }
+
+    fn inspect(&self) -> Result<crate::model::ScanReport> {
+        let mut out = crate::model::ScanReport::default();
         if !self.blocked.contains(&Kind::Memory) {
-            out.extend(self.memory.scan()?);
+            out.observed.extend(self.memory.scan()?);
         }
         let originals = if self.blocked.contains(&Kind::Memory) {
             Originals {
@@ -344,6 +348,7 @@ impl Adapter for CodexAdapter {
         } else {
             self.originals()?
         };
+        out.skip("", originals.skipped);
         let path = layout::originals(&self.home);
         let mut seen: Vec<String> = Vec::new();
         for b in originals.blocks {
@@ -356,7 +361,7 @@ impl Adapter for CodexAdapter {
                 n += 1;
             }
             seen.push(native_id.clone());
-            out.push(Observed {
+            out.observed.push(Observed {
                 agent: Self::agent(),
                 native_id,
                 path: path.clone(),
@@ -373,11 +378,12 @@ impl Adapter for CodexAdapter {
             });
         }
         if !self.blocked.contains(&Kind::Instruction) {
-            out.extend(self.instructions.scan()?);
+            out.observed.extend(self.instructions.scan()?);
         }
-        out.extend(self.scan_sessions()?.observed);
+        out.sessions(self.scan_sessions()?);
         if !self.blocked.contains(&Kind::Skill) {
-            out.extend(self.skills.scan()?);
+            let (observed, report) = self.skills.scan_with_report()?;
+            out.skills(observed, report);
         }
         Ok(out)
     }

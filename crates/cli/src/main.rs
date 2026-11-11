@@ -17,7 +17,9 @@ use nativemem_core::engine::{self, Action, ApplyOptions, Note};
 use nativemem_core::error::{Error, Result};
 use nativemem_core::fsx::BackupSession;
 use nativemem_core::ledger::Ledger;
-use nativemem_core::model::{content_hash, Adapter, Item, ItemKey, Kind, Observed, Scope};
+use nativemem_core::model::{
+    content_hash, Adapter, Item, ItemKey, Kind, Observed, ScanReport, Scope,
+};
 use nativemem_core::session::{is_session_id, Role, Session, SessionOptions};
 use nativemem_core::slug::slugify;
 use serde_json::{json, Value};
@@ -72,6 +74,11 @@ enum Command {
     Status {
         /// Print one JSON document
         #[arg(long)]
+        json: bool,
+    },
+    /// Read the desktop's items, status and compatibility from one fresh scan
+    Snapshot {
+        #[arg(long, required = true)]
         json: bool,
     },
     /// Print the sync plan; with --apply, execute it
@@ -504,10 +511,25 @@ fn lock_state(state: &Path) -> Outcome<File> {
     }
 }
 
-fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) -> Result<()> {
+fn scan_agents(agents: &Agents) -> Result<BTreeMap<String, ScanReport>> {
+    agents
+        .all()
+        .into_iter()
+        .map(|a| Ok((a.id().to_string(), a.inspect()?)))
+        .collect()
+}
+
+fn status(
+    roots: &Roots,
+    present: &Agents,
+    reports: &[AgentReport],
+    scans: &BTreeMap<String, ScanReport>,
+    json: bool,
+) -> Result<Value> {
     let mut agents = Vec::new();
     for a in present.all() {
-        let observed = a.scan()?;
+        let scan = &scans[a.id().as_str()];
+        let observed = &scan.observed;
         let sessions = observed
             .iter()
             .filter(|o| o.item.kind == Kind::Session)
@@ -523,52 +545,8 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
         };
         let replicas = entries().filter(|o| o.replica_of.is_some()).count();
         let originals = entries().count() - replicas;
-        // The prefix is only used by the human output.
-        let mut skipped: Vec<(&str, String, String)> = Vec::new();
-        if let Some(claude) = present
-            .claude
-            .as_ref()
-            .filter(|_| a.id().as_str() == "claude")
-        {
-            skipped.extend(
-                claude
-                    .skipped_projects()?
-                    .into_iter()
-                    .map(|(l, r)| ("project ", l, r)),
-            );
-            skipped.extend(
-                claude
-                    .skipped_files()?
-                    .into_iter()
-                    .map(|(l, r)| ("file ", l, r)),
-            );
-        }
-        if let Some(codex) = present
-            .codex
-            .as_ref()
-            .filter(|_| a.id().as_str() == "codex")
-        {
-            skipped.extend(codex.skipped()?.into_iter().map(|(l, r)| ("", l, r)));
-        }
-        skipped.extend(
-            a.skill_report()?
-                .skipped
-                .into_iter()
-                .map(|(l, r)| ("skill ", l, r)),
-        );
-        let report = match a.id().as_str() {
-            "claude" => present.claude.as_ref().map(|c| c.session_report()),
-            "codex" => present.codex.as_ref().map(|c| c.session_report()),
-            "opencode" => present.opencode.as_ref().map(|c| c.session_report()),
-            "pi" => present.pi.as_ref().map(|c| c.session_report()),
-            _ => None,
-        };
-        let mut automated = 0;
-        if let Some(report) = report {
-            let report = report?;
-            automated = report.automated;
-            skipped.extend(report.skipped.into_iter().map(|(l, r)| ("session ", l, r)));
-        }
+        let skipped = &scan.skipped;
+        let automated = scan.automated_sessions;
         if json {
             agents.push(json!({
                 "id": a.id().as_str(),
@@ -587,7 +565,7 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
                 "{}: {originals} originals, {replicas} replicas, {sessions} sessions, {automated} automated, {skills} skills",
                 a.id()
             );
-            for (kind, label, reason) in &skipped {
+            for (kind, label, reason) in skipped {
                 println!("  skipped {kind}{label}: {reason}");
             }
         }
@@ -601,13 +579,7 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
     } else {
         0
     };
-    if json {
-        print_json(&json!({
-            "agents": agents,
-            "ledger_items": items,
-            "compat": doctor::summary_json(reports),
-        }));
-    } else {
+    if !json {
         println!("ledger: {items} items");
         for line in doctor::warning_lines(reports) {
             println!("{line}");
@@ -616,52 +588,69 @@ fn status(roots: &Roots, present: &Agents, reports: &[AgentReport], json: bool) 
             println!("{line}");
         }
     }
+    Ok(json!({
+        "agents": agents,
+        "ledger_items": items,
+        "compat": doctor::summary_json(reports),
+    }))
+}
+
+fn items_json(observed: &[Observed]) -> Value {
+    let list: Vec<Value> = observed.iter().map(|o| {
+        let mut item = json!({
+            "agent": o.agent.as_str(), "native_id": o.native_id, "kind": o.item.kind.as_str(),
+            "path": o.path.display().to_string(), "scope": scope_json(&o.item.scope),
+            "name": o.item.name, "description": o.item.description, "category": o.item.category,
+            "body": if matches!(o.item.kind, Kind::Session | Kind::Skill) { "" } else { &o.item.body },
+            "replica_of": o.replica_of.as_ref().map(key_json), "hash": content_hash(&o.item),
+        });
+        if o.item.kind == Kind::Session {
+            if let Some(session) = Session::from_body(&o.item.body) {
+                item["session"] = json!({ "created_ms": session.created_ms, "updated_ms": session.updated_ms, "turns": session.turns.len() });
+            }
+        }
+        item
+    }).collect();
+    json!({ "items": list })
+}
+
+fn link_skills(roots: &Roots, observed: &mut [Observed]) -> Result<()> {
+    if observed.iter().any(|o| o.item.kind == Kind::Skill) {
+        let ledger = if roots.state.join("ledger.db").is_file() {
+            Ledger::open(&roots.state)?
+        } else {
+            Ledger::in_memory()?
+        };
+        engine::link_skills(observed, &ledger)?;
+    }
     Ok(())
 }
 
 fn items(roots: &Roots, agents: &Agents, kind: Option<Kind>, json: bool) -> Result<()> {
-    let mut observed: Vec<Observed> = Vec::new();
-    for a in agents.all() {
-        observed.extend(a.scan()?);
-    }
-    let ledger = if roots.state.join("ledger.db").is_file() {
-        Ledger::open(&roots.state)?
+    let scans = scan_agents(agents)?;
+    let session_status = (kind == Some(Kind::Session)).then(|| scans.iter().map(|(id, scan)| json!({
+        "id": id, "originals": 0, "replicas": 0, "sessions": scan.observed.len(),
+        "automated_sessions": scan.automated_sessions,
+        "skipped": scan.skipped.iter().map(|(_, label, reason)| json!({ "label": label, "reason": reason })).collect::<Vec<_>>(),
+    })).collect::<Vec<_>>());
+    let session_notice = if kind == Some(Kind::Session) {
+        doctor::session_notice(agents, scans.values().flat_map(|s| &s.observed))
     } else {
-        Ledger::in_memory()?
+        None
     };
-    engine::link_skills(&mut observed, &ledger)?;
+    let mut observed: Vec<Observed> = scans.into_values().flat_map(|s| s.observed).collect();
+    link_skills(roots, &mut observed)?;
     observed.retain(|o| match kind {
         Some(k) => o.item.kind == k,
         None => o.item.kind != Kind::Session,
     });
     if json {
-        let list: Vec<Value> = observed
-            .iter()
-            .map(|o| {
-                let mut item = json!({
-                    "agent": o.agent.as_str(),
-                    "native_id": o.native_id,
-                    "kind": o.item.kind.as_str(),
-                    "path": o.path.display().to_string(),
-                    "scope": scope_json(&o.item.scope),
-                    "name": o.item.name,
-                    "description": o.item.description,
-                    "category": o.item.category,
-                    "body": if matches!(o.item.kind, Kind::Session | Kind::Skill) { "" } else { &o.item.body },
-                    "replica_of": o.replica_of.as_ref().map(key_json),
-                    "hash": content_hash(&o.item),
-                });
-                if let Some(session) = Session::from_body(&o.item.body).filter(|_| o.item.kind == Kind::Session) {
-                    item["session"] = json!({
-                        "created_ms": session.created_ms,
-                        "updated_ms": session.updated_ms,
-                        "turns": session.turns.len(),
-                    });
-                }
-                item
-            })
-            .collect();
-        print_json(&json!({ "items": list }));
+        let mut document = items_json(&observed);
+        if let Some(status) = session_status {
+            document["session_status"] = json!(status);
+            document["session_notice"] = json!(session_notice);
+        }
+        print_json(&document);
     } else {
         for o in &observed {
             let scope = match &o.item.scope {
@@ -1180,7 +1169,15 @@ const EXIT_ATTENTION: u8 = 2;
 fn run(cli: &Cli) -> Outcome<u8> {
     let roots = resolve(cli)?;
     let backups = BackupSession::new();
-    let sessions = (!cli.no_sessions).then_some(SessionOptions {
+    let requested_kind = match &cli.command {
+        Command::Items { kind, .. } => kind.as_deref().and_then(Kind::parse),
+        Command::Skill(_) => Some(Kind::Skill),
+        Command::Session(_) => Some(Kind::Session),
+        _ => None,
+    };
+    let lists_without_sessions = matches!(cli.command, Command::Items { .. } | Command::Skill(_))
+        && requested_kind != Some(Kind::Session);
+    let sessions = (!cli.no_sessions && !lists_without_sessions).then_some(SessionOptions {
         days: cli.session_days,
         exclude_automated: cli.exclude_automated_sessions,
     });
@@ -1198,7 +1195,10 @@ fn run(cli: &Cli) -> Outcome<u8> {
     };
     let watches_compat = matches!(
         cli.command,
-        Command::Status { .. } | Command::Sync { .. } | Command::Doctor { .. }
+        Command::Status { .. }
+            | Command::Snapshot { .. }
+            | Command::Sync { .. }
+            | Command::Doctor { .. }
     );
     let loaded = CompatState::load(&roots.state);
     let mut state = loaded.clone();
@@ -1208,15 +1208,48 @@ fn run(cli: &Cli) -> Outcome<u8> {
     } else {
         Vec::new()
     };
-    let agents = Agents::open(&roots, &backups, sessions, &doctor::blocked_kinds(&reports));
+    let mut blocked = doctor::blocked_kinds(&reports);
+    if let Some(requested) = requested_kind {
+        for id in AGENT_IDS {
+            let kinds = blocked.entry(id.to_string()).or_default();
+            kinds.extend(
+                [Kind::Memory, Kind::Instruction, Kind::Session, Kind::Skill]
+                    .into_iter()
+                    // Skill scopes depend on session path metadata, not transcript payloads.
+                    .filter(|k| {
+                        *k != requested && !(requested == Kind::Skill && *k == Kind::Session)
+                    }),
+            );
+        }
+    }
+    let agents = Agents::open(&roots, &backups, sessions, &blocked);
     let attention = |needs: bool| if needs { EXIT_ATTENTION } else { 0 };
     match &cli.command {
         Command::Status { json } => {
             let mut reports = reports;
-            doctor::add_notices(&agents, &mut reports);
-            status(&roots, &agents, &reports, *json)
-                .map(|()| 0)
-                .map_err(Failure::from)
+            let scans = scan_agents(&agents)?;
+            doctor::add_notices(&agents, &mut reports, Some(&scans));
+            let document = status(&roots, &agents, &reports, &scans, *json)?;
+            if *json {
+                print_json(&document);
+            }
+            Ok(0)
+        }
+        Command::Snapshot { .. } => {
+            let scans = scan_agents(&agents)?;
+            let mut reports = reports;
+            doctor::add_notices(&agents, &mut reports, Some(&scans));
+            let status = status(&roots, &agents, &reports, &scans, true)?;
+            let mut observed: Vec<Observed> = scans
+                .into_values()
+                .flat_map(|s| s.observed)
+                .filter(|o| o.item.kind != Kind::Session)
+                .collect();
+            link_skills(&roots, &mut observed)?;
+            print_json(
+                &json!({ "items": items_json(&observed), "status": status, "doctor": doctor::document(&reports), "sessions_included": sessions.is_some() }),
+            );
+            Ok(0)
         }
         Command::Sync {
             apply,
@@ -1312,6 +1345,7 @@ fn run(cli: &Cli) -> Outcome<u8> {
 fn wants_json(command: &Command) -> bool {
     match command {
         Command::Status { json }
+        | Command::Snapshot { json }
         | Command::Sync { json, .. }
         | Command::Doctor { json, .. }
         | Command::Items { json, .. }

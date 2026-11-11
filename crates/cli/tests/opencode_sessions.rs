@@ -121,6 +121,42 @@ impl Fx {
 }
 
 #[test]
+fn no_sessions_snapshot_discovers_project_skills_without_reading_message_rows() {
+    let f = fx();
+    let cwd = f.root.join("session-project");
+    let skill = cwd.join(".opencode/skills/demo");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\ndescription: Synthetic skill\n---\nfixture",
+    )
+    .unwrap();
+    f.data.add_session(
+        "ses_fixture",
+        &cwd,
+        Some("Fixture"),
+        &[("user", "fixture")],
+        1_794_304_800_000,
+    );
+    f.data
+        .connect()
+        .execute("UPDATE session_message SET data = x'ff'", [])
+        .unwrap();
+    let before = fs::read(f.data.db()).unwrap();
+    let (code, snapshot) = f.json(&["--no-sessions", "snapshot", "--json"]);
+    assert_eq!(code, Some(0), "{snapshot}");
+    assert!(snapshot["items"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["agent"] == "opencode"
+            && item["kind"] == "skill"
+            && item["scope"]["path"] == cwd.display().to_string()));
+    assert_eq!(fs::read(f.data.db()).unwrap(), before);
+    assert_eq!(f.json(&["items", "--kind", "session", "--json"]).0, Some(1));
+}
+
+#[test]
 fn a_synced_session_reaches_opencode_and_the_second_plan_is_empty() {
     let f = fx();
     let (code, _) = f.sync(true);

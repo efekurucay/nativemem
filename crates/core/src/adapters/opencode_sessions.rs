@@ -270,7 +270,7 @@ fn tool(b: &mut TurnBuilder, block: &Value, ts: i64) {
 }
 
 impl OpencodeSessions {
-    /// `options` is `None` while session sync is off: nothing is read then.
+    /// `options` is `None` while session sync is off: no transcript is read then.
     pub fn new(
         db: PathBuf,
         state_dir: PathBuf,
@@ -306,6 +306,18 @@ impl OpencodeSessions {
         let conn = Connection::open_with_flags(&self.db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(self.busy_timeout)?;
         Ok(conn)
+    }
+
+    /// Project paths for skill discovery; never reads message rows or opens the database writable.
+    pub fn project_dirs(&self) -> std::result::Result<Vec<PathBuf>, rusqlite::Error> {
+        let conn = self.reader()?;
+        conn.busy_timeout(Duration::ZERO)?;
+        let mut statement =
+            conn.prepare("SELECT DISTINCT directory FROM session_v2 WHERE time_archived IS NULL")?;
+        let projects = statement
+            .query_map([], |row| row.get::<_, String>(0).map(PathBuf::from))?
+            .collect();
+        projects
     }
 
     pub fn scan(&self, agent: &AgentId) -> Result<SessionScan> {
