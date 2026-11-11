@@ -19,7 +19,7 @@ repo, and `opencode.json` and `service.json` (which hold secrets) are never open
 | Project memory | OpenCode has no native memory: the store holds replicas and originals created through `add`, announced by a routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
 | Instruction sections | Read and write in `AGENTS.md`, including a new section through `add` | `agents_file.rs` through `sections.rs` |
 | Sessions | Read as originals and written as copies while `opencode.db` exists and the session probes pass | `crates/core/src/adapters/opencode_sessions.rs`, `opencode_project.rs`, `agents_file.rs` |
-| Skills (global) | Read and write in `<opencode home>/skills/` | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
+| Skills | Read and write in `<opencode home>/skills/` | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
 | MCP servers | Read by `mcp import` (`mcp.<name>` of `opencode.json` and `opencode.jsonc`); `mcp install` and `uninstall` write the one entry `mcp.nativemem` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
 ## Native locations
@@ -31,7 +31,7 @@ repo, and `opencode.json` and `service.json` (which hold secrets) are never open
 | Memory | none native; replica store `<opencode home>/nativemem/memory/<project key>/` | |
 | Sessions | SQLite `<data home>/opencode.db` (default `~/.local/share/opencode`; `--opencode-data-home`, `NATIVEMEM_OPENCODE_DATA_HOME`, `$XDG_DATA_HOME/opencode`) | |
 | MCP servers | `<opencode home>/opencode.json` key `mcp.<name>` (`opencode.jsonc` is merged) | `<repo>/opencode.json(c)`, `<repo>/.opencode/opencode.json(c)` |
-| Skills | `<opencode home>/skills/`; also scans `.agents`, `.claude`, `.opencode` roots | `.opencode/skills`, `.claude/skills`, `.agents/skills` |
+| Skills | `<opencode home>/skills/` (global), `<repo>/.opencode/skills/` (project); also scans `.agents`, `.claude`, `.opencode` roots | `.opencode/skills`, `.claude/skills`, `.agents/skills` |
 
 The OpenCode home is `--opencode-home`, else `NATIVEMEM_OPENCODE_HOME`, else `OPENCODE_CONFIG_DIR`,
 else `~/.config/opencode`.

@@ -30,7 +30,7 @@ by versions 2.1.247 to 2.1.322; 376 top-level session files across 63 project di
 | Memory | none | `<claude home>/projects/<dir>/memory/*.md` with a `MEMORY.md` index |
 | Sessions | | `<claude home>/projects/<dir>/<session id>.jsonl` |
 | MCP servers | `~/.claude.json` key `mcpServers` | `~/.claude.json` `projects.<path>.mcpServers`, `<repo>/.mcp.json`, plugin `.mcp.json` |
-| Skills | `<claude home>/skills/<name>/SKILL.md` (`synced/` is managed by Claude itself and left alone) | `<repo>/.claude/skills/`, plugin caches |
+| Skills | `<claude home>/skills/<name>/SKILL.md` (global), `<repo>/.claude/skills/<name>/` (project) (`synced/` is managed by Claude itself and left alone) | `<repo>/.claude/skills/`, plugin caches |
 
 The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_CONFIG_DIR`, else
 `~/.claude`. The agent takes part in a run only when that directory exists.

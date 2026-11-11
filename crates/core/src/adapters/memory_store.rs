@@ -175,7 +175,7 @@ fn scope_path(dir: &Path) -> PathBuf {
     dir.join(SCOPE_FILE)
 }
 
-fn read_scope_cwd(dir: &Path) -> Result<Option<String>> {
+pub(crate) fn read_scope_cwd(dir: &Path) -> Result<Option<String>> {
     let path = scope_path(dir);
     let Some(text) = read_opt(&path)? else {
         return Ok(None);
@@ -274,7 +274,7 @@ impl MemoryStore {
         self.base.join(key)
     }
 
-    fn project_dirs(&self) -> Result<Vec<(String, PathBuf)>> {
+    pub fn project_dirs(&self) -> Result<Vec<(String, PathBuf)>> {
         let entries = match fs::read_dir(&self.base) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

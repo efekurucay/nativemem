@@ -37,6 +37,8 @@ It writes nothing else: no hook, no plugin, no other key, and no other file.
   installed and trusted per agent.
 - A marked block in a user-owned file or a replica file in a directory the agent already reads is
   visible, reviewable and reversible from the backup directory. So is the `nativemem` MCP entry.
+  Project skill replicas go into the agent's own skills directory inside the repository
+  (`<repo>/.<agent>/skills/`), which the agent reads natively; the user adds these to `.gitignore`.
 - Agent-owned databases have schemas that belong to the agent, so the two writers refuse to run when
   the schema differs from the probed shape and never change or delete a row the agent made.
 

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use super::memory_store::project_key;
 use crate::compat::Check;
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
@@ -34,9 +35,22 @@ pub fn native_id(name: &str) -> String {
     format!("{ID_PREFIX}{name}")
 }
 
+/// The native id of a project skill.
+pub fn project_native_id(project_key: &str, name: &str) -> String {
+    format!("{ID_PREFIX}{project_key}/{name}")
+}
+
 /// The skill name inside a native id, `None` for ids of other kinds.
+/// Works for both global (`skill:demo`) and project (`skill:proj-abc/demo`) ids.
 pub fn skill_name(native_id: &str) -> Option<&str> {
-    native_id.strip_prefix(ID_PREFIX)
+    let rest = native_id.strip_prefix(ID_PREFIX)?;
+    Some(rest.rsplit('/').next().unwrap_or(rest))
+}
+
+/// The project key of a project skill id, or `None` for a global skill.
+pub fn skill_project_key(native_id: &str) -> Option<&str> {
+    let rest = native_id.strip_prefix(ID_PREFIX)?;
+    rest.rsplit_once('/').map(|(key, _)| key)
 }
 
 /// What an adapter reports about its skills apart from the items themselves.
@@ -306,6 +320,8 @@ pub struct SkillStore {
     agent: AgentId,
     home: PathBuf,
     dir: PathBuf,
+    project_subdir: Option<PathBuf>,
+    project_visible_roots: Vec<PathBuf>,
     state_dir: PathBuf,
     backups: BackupSession,
     visible_roots: Vec<PathBuf>,
@@ -315,6 +331,8 @@ impl SkillStore {
     pub fn new(agent: AgentId, home: PathBuf, state_dir: PathBuf, backups: BackupSession) -> Self {
         SkillStore {
             dir: home.join(SKILLS_DIR),
+            project_subdir: None,
+            project_visible_roots: Vec::new(),
             agent,
             home,
             state_dir,
@@ -327,6 +345,20 @@ impl SkillStore {
     pub fn with_visible_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.visible_roots = roots;
         self
+    }
+
+    /// Enable project-level skills. `subdir` is the directory inside a project the agent reads
+    /// skills from (e.g. `.claude/skills`). `visible_roots` are other directories in the same
+    /// project the agent also reads (e.g. `.agents/skills`); copies there are never written.
+    pub fn with_project_skills(mut self, subdir: PathBuf, visible_roots: Vec<PathBuf>) -> Self {
+        self.project_subdir = Some(subdir);
+        self.project_visible_roots = visible_roots;
+        self
+    }
+
+    /// Whether this store has a project skills directory configured.
+    pub fn has_project(&self) -> bool {
+        self.project_subdir.is_some()
     }
 
     fn names(&self) -> Vec<String> {
@@ -408,6 +440,23 @@ impl SkillStore {
     /// and never a mix. An existing directory or symlink is backed up first and a symlink is
     /// replaced, never written through. Returns the native id and the skill directory.
     pub fn write(&self, item: &Item) -> Result<(String, PathBuf)> {
+        self.write_into(&self.dir, &self.home, item)
+    }
+
+    /// Same as `write` but into a project skills directory.
+    pub fn write_project(&self, cwd: &Path, item: &Item) -> Result<(String, PathBuf)> {
+        let subdir = self
+            .project_subdir
+            .as_ref()
+            .ok_or_else(|| Error::unsupported(self.agent.as_str(), "project skills"))?;
+        let dir = cwd.join(subdir);
+        let (_id, path) = self.write_into(&dir, cwd, item)?;
+        // write_into returns the plain native_id; replace it with the project one.
+        let pk = project_key(cwd);
+        Ok((project_native_id(&pk, &item.name), path))
+    }
+
+    fn write_into(&self, dir: &Path, base: &Path, item: &Item) -> Result<(String, PathBuf)> {
         let name = item.name.as_str();
         valid_name(name)?;
         let source = item
@@ -423,7 +472,7 @@ impl SkillStore {
                 )))
             }
         };
-        let target = self.dir.join(name);
+        let target = dir.join(name);
         let id = native_id(name);
         let existing = fs::symlink_metadata(&target).ok();
         if let Some(meta) = &existing {
@@ -434,20 +483,14 @@ impl SkillStore {
                     }
                 }
             }
-            fsx::backup_dir(
-                &self.backups,
-                &self.state_dir,
-                &self.agent,
-                &self.home,
-                &target,
-            )?;
+            fsx::backup_dir(&self.backups, &self.state_dir, &self.agent, base, &target)?;
         }
-        if !self.dir.exists() {
-            fs::create_dir(&self.dir).map_err(|e| Error::io(&self.dir, e))?;
+        if !dir.exists() {
+            fs::create_dir(dir).map_err(|e| Error::io(dir, e))?;
         }
         let pid = std::process::id();
-        let tmp = self.dir.join(format!(".{name}.nativemem-tmp-{pid}"));
-        let old = self.dir.join(format!(".{name}.nativemem-old-{pid}"));
+        let tmp = dir.join(format!(".{name}.nativemem-tmp-{pid}"));
+        let old = dir.join(format!(".{name}.nativemem-old-{pid}"));
         remove_any(&tmp);
         remove_any(&old);
         if let Err(e) = copy_files(&tree, &tmp) {
@@ -493,21 +536,91 @@ impl SkillStore {
 
     /// Back up and delete `<skills>/<name>`; a symlink is removed, its target stays.
     pub fn remove(&self, name: &str) -> Result<()> {
+        self.remove_from(&self.dir, &self.home, name)
+    }
+
+    fn remove_from(&self, dir: &Path, base: &Path, name: &str) -> Result<()> {
         valid_name(name)?;
-        let target = self.dir.join(name);
+        let target = dir.join(name);
         let meta = fs::symlink_metadata(&target).map_err(|e| Error::io(&target, e))?;
-        fsx::backup_dir(
-            &self.backups,
-            &self.state_dir,
-            &self.agent,
-            &self.home,
-            &target,
-        )?;
+        fsx::backup_dir(&self.backups, &self.state_dir, &self.agent, base, &target)?;
         if meta.file_type().is_symlink() {
             fs::remove_file(&target).map_err(|e| Error::io(&target, e))
         } else {
             fs::remove_dir_all(&target).map_err(|e| Error::io(&target, e))
         }
+    }
+
+    /// Remove a project skill by its native id. Scans `cwds` for the matching project key.
+    pub fn remove_project(&self, native_id: &str, cwds: &[PathBuf]) -> Result<()> {
+        let subdir = self
+            .project_subdir
+            .as_ref()
+            .ok_or_else(|| Error::unsupported(self.agent.as_str(), "project skills"))?;
+        let pk = skill_project_key(native_id)
+            .ok_or_else(|| Error::unsupported(self.agent.as_str(), "not a project skill id"))?;
+        let name = skill_name(native_id)
+            .ok_or_else(|| Error::Parse(format!("not a skill id: {native_id:?}")))?;
+        let cwd = cwds
+            .iter()
+            .find(|c| project_key(c) == pk)
+            .ok_or_else(|| Error::Parse(format!("project skill not found: {native_id:?}")))?;
+        self.remove_from(&cwd.join(subdir), cwd, name)
+    }
+
+    /// Scan project skill directories for the given project paths.
+    pub fn scan_projects(&self, cwds: &[PathBuf]) -> Result<Vec<Observed>> {
+        let Some(ref subdir) = self.project_subdir else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for cwd in cwds {
+            let dir = cwd.join(subdir);
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| !n.starts_with('.') && n != AGENT_MANAGED_DIR)
+                .collect();
+            names.sort();
+            for name in names {
+                let path = dir.join(&name);
+                if !is_skill_dir(&path) {
+                    continue;
+                }
+                let Some(scanned) = read_skill(&name, &path)? else {
+                    continue;
+                };
+                let pk = project_key(cwd);
+                let item = Item {
+                    scope: Scope::Project(cwd.clone()),
+                    ..scanned.item
+                };
+                out.push(Observed {
+                    agent: self.agent.clone(),
+                    native_id: project_native_id(&pk, &name),
+                    path,
+                    item,
+                    replica_of: None,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Hash of a project skill copy in a visible root, or `None`.
+    pub fn project_visible_copy(&self, native_id: &str, cwds: &[PathBuf]) -> Option<String> {
+        let pk = skill_project_key(native_id)?;
+        let name = skill_name(native_id)?;
+        let cwd = cwds.iter().find(|c| project_key(c) == pk)?;
+        self.project_visible_roots
+            .iter()
+            .map(|r| cwd.join(r).join(name))
+            .find(|p| is_skill_dir(p))
+            .and_then(|path| read_skill(name, &path).ok().flatten())
+            .map(|s| content_hash(&s.item))
     }
 
     /// Whether the layout of the skills directory still looks like what this adapter expects.

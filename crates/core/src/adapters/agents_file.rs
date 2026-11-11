@@ -10,11 +10,12 @@ use crate::fsx::BackupSession;
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 use crate::session::{is_session_id, SessionOptions, SessionReport, SessionScan};
 
+use super::memory_store;
 use super::memory_store::MemoryStore;
 use super::opencode_probes;
 use super::opencode_sessions::{OpencodeSessions, SESSION_WRITER_REVISION};
 use super::sections::InstructionFile;
-use super::skills::{skill_name, SkillReport, SkillStore};
+use super::skills::{self, skill_name, SkillReport, SkillStore};
 
 const INSTRUCTION_FILE: &str = "AGENTS.md";
 const MEMORY_DIR: &str = "nativemem/memory";
@@ -52,12 +53,28 @@ impl AgentsFileAdapter {
                 dir.clone(),
                 dir.join(INSTRUCTION_FILE),
             ),
-            skills: SkillStore::new(
-                agent.clone(),
-                dir.clone(),
-                state_dir.clone(),
-                backups.clone(),
-            ),
+            skills: {
+                let s = SkillStore::new(
+                    agent.clone(),
+                    dir.clone(),
+                    state_dir.clone(),
+                    backups.clone(),
+                );
+                match agent.as_str() {
+                    "opencode" => s.with_project_skills(
+                        PathBuf::from(".opencode/skills"),
+                        vec![
+                            PathBuf::from(".claude/skills"),
+                            PathBuf::from(".agents/skills"),
+                        ],
+                    ),
+                    "pi" => s.with_project_skills(
+                        PathBuf::from(".pi/skills"),
+                        vec![PathBuf::from(".agents/skills")],
+                    ),
+                    _ => s,
+                }
+            },
             instructions: InstructionFile::new(
                 agent.clone(),
                 dir,
@@ -73,6 +90,22 @@ impl AgentsFileAdapter {
     pub fn with_visible_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.skills = self.skills.with_visible_roots(roots);
         self
+    }
+
+    /// Whether this adapter has a project skills directory configured.
+    pub fn has_project(&self) -> bool {
+        self.skills.has_project()
+    }
+
+    /// Project working directories this adapter knows about, from its memory store.
+    fn project_cwds(&self) -> Vec<PathBuf> {
+        self.memory
+            .project_dirs()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, dir)| memory_store::read_scope_cwd(&dir).ok().flatten())
+            .map(PathBuf::from)
+            .collect()
     }
 
     /// The probe of the skills directory layout.
@@ -159,6 +192,7 @@ impl Adapter for AgentsFileAdapter {
             && match (kind, scope) {
                 (Kind::Memory, Scope::Project(_))
                 | (Kind::Instruction | Kind::Skill, Scope::Global) => true,
+                (Kind::Skill, Scope::Project(_)) => self.skills.has_project(),
                 (Kind::Session, Scope::Project(_)) => {
                     self.sessions.as_ref().is_some_and(|s| s.is_enabled())
                 }
@@ -186,10 +220,18 @@ impl Adapter for AgentsFileAdapter {
             out.extend(self.skills.scan()?);
         }
         out.extend(self.scan_sessions()?.observed);
+        if !self.blocked.contains(&Kind::Skill) {
+            let cwds = self.project_cwds();
+            out.extend(self.skills.scan_projects(&cwds)?);
+        }
         Ok(out)
     }
 
     fn visible_copy(&self, native_id: &str) -> Option<String> {
+        if skills::skill_project_key(native_id).is_some() {
+            let cwds = self.project_cwds();
+            return self.skills.project_visible_copy(native_id, &cwds);
+        }
         self.skills.visible_copy(native_id)
     }
 
@@ -201,7 +243,13 @@ impl Adapter for AgentsFileAdapter {
         match item.kind {
             Kind::Instruction => self.instructions.write_replica(key, item),
             Kind::Memory => self.memory.write_replica(key, item),
-            Kind::Skill => self.skills.write(item),
+            Kind::Skill => {
+                if let Scope::Project(cwd) = &item.scope {
+                    self.skills.write_project(cwd, item)
+                } else {
+                    self.skills.write(item)
+                }
+            }
             Kind::Session => match &self.sessions {
                 Some(sessions) => sessions.write(key, item, self.version().as_deref()),
                 None => Err(self.unsupported("write_replica session")),
@@ -222,6 +270,9 @@ impl Adapter for AgentsFileAdapter {
             return Err(self.unsupported("write_original session"));
         }
         if skill_name(native_id).is_some() {
+            if let Scope::Project(cwd) = &item.scope {
+                return self.skills.write_project(cwd, item).map(|_| ());
+            }
             return self.skills.write(item).map(|_| ());
         }
         if self.instructions.owns(native_id) {
@@ -234,8 +285,14 @@ impl Adapter for AgentsFileAdapter {
         if is_session_id(native_id) {
             return Err(self.unsupported("remove session"));
         }
-        if let Some(name) = skill_name(native_id) {
-            return self.skills.remove(name);
+        if skill_name(native_id).is_some() {
+            if skills::skill_project_key(native_id).is_some() {
+                let cwds = self.project_cwds();
+                return self.skills.remove_project(native_id, &cwds);
+            }
+            if let Some(name) = skill_name(native_id) {
+                return self.skills.remove(name);
+            }
         }
         if self.instructions.owns(native_id) {
             return self.instructions.remove(native_id);

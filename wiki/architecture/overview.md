@@ -96,7 +96,7 @@ fallback. Test: `memory_is_planned_only_for_agents_that_support_it`.
 
 | Agent | Memory (Project) | Instruction (Global) | Skill (Global) | Session (Project) |
 |---|---|---|---|---|
-| Claude Code | yes, originals and replicas | yes | yes | yes |
+| Claude Code | yes, originals and replicas | yes | yes (global and project) | yes |
 | Codex | yes; generated originals are read-only, store originals and replicas are written | yes | yes | yes while the Codex schema probes pass; each written replica also gets a `threads` row |
 | OpenCode | yes; store originals and replicas | yes | yes | yes while the OpenCode schema and version probes pass and `opencode.db` exists |
 | Pi | yes; store originals and replicas | yes | yes | yes |

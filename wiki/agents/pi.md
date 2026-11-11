@@ -18,7 +18,7 @@ Facts gathered read-only on a development machine running Pi 1.5.0 (session file
 | Project memory | Pi has no native memory: the store holds replicas and originals created through `add`, announced by a routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
 | Instruction sections | Read and write in `AGENTS.md`, including a new section through `add` | `agents_file.rs` through `sections.rs` |
 | Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/pi.rs` |
-| Skills (global) | Read and write in `<pi home>/skills/`; symlinked skills are read through the link and replaced, never written through; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
+| Skills | Read and write in `<pi home>/skills/`; symlinked skills are read through the link and replaced, never written through; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
 | MCP servers | Read by `mcp import`; `mcp install` and `uninstall` write the one entry `mcpServers.nativemem` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
 ## Native locations
@@ -29,7 +29,7 @@ Facts gathered read-only on a development machine running Pi 1.5.0 (session file
 | Memory | none native; replica store `<pi home>/nativemem/memory/<project key>/` | |
 | Sessions | `<pi home>/sessions/--<cwd>--/<ISO ts>_<session id>.jsonl` | |
 | MCP servers | `<pi home>/mcp.json` key `mcpServers` | `.pi/mcp.json` (only after project trust) |
-| Skills | `<pi home>/skills/` (entries may be symlinks into `~/.agents/skills`), `~/.agents/skills/` (read, never written), paths listed in `settings.json` `skills[]` | `.pi/skills/`, `.agents/skills/` (only after project trust) |
+| Skills | `<pi home>/skills/` (global), `<repo>/.pi/skills/` (project) (entries may be symlinks into `~/.agents/skills`), `~/.agents/skills/` (read, never written), paths listed in `settings.json` `skills[]` | `.pi/skills/`, `.agents/skills/` (only after project trust) |
 
 The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
 

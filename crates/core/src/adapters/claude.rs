@@ -15,7 +15,7 @@ use crate::slug::slugify;
 use super::claude_probes;
 use super::claude_sessions::{self, ClaudeSessions, MARKER_KEY};
 use super::sections::InstructionFile;
-use super::skills::{skill_name, SkillReport, SkillStore};
+use super::skills::{self, skill_name, SkillReport, SkillStore};
 
 const INSTRUCTION_FILE: &str = "CLAUDE.md";
 const INDEX_FILE: &str = "MEMORY.md";
@@ -91,7 +91,8 @@ impl ClaudeAdapter {
                 claude_home.clone(),
                 state_dir.clone(),
                 backups.clone(),
-            ),
+            )
+            .with_project_skills(PathBuf::from(".claude/skills"), vec![]),
             claude_home,
             state_dir,
             backups,
@@ -260,6 +261,14 @@ impl ClaudeAdapter {
 
     /// Every project dir name with its cwd (from jsonl files, else decoded from the name) or
     /// the reason it is unresolved, sorted by name.
+    fn project_cwds_ok(&self) -> Vec<PathBuf> {
+        self.project_cwds()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, cwd)| cwd.ok())
+            .collect()
+    }
+
     fn project_cwds(&self) -> Result<Vec<(String, std::result::Result<PathBuf, String>)>> {
         let root = self.projects_dir();
         if !root.is_dir() {
@@ -481,6 +490,7 @@ impl Adapter for ClaudeAdapter {
                 (kind, scope),
                 (Kind::Memory | Kind::Session, Scope::Project(_))
                     | (Kind::Instruction | Kind::Skill, Scope::Global)
+                    | (Kind::Skill, Scope::Project(_))
             )
     }
 
@@ -497,11 +507,23 @@ impl Adapter for ClaudeAdapter {
         out.extend(self.scan_sessions()?.observed);
         if !self.blocked.contains(&Kind::Skill) {
             out.extend(self.skills.scan()?);
+            let cwds: Vec<PathBuf> = out
+                .iter()
+                .filter_map(|o| match &o.item.scope {
+                    Scope::Project(cwd) => Some(cwd.clone()),
+                    _ => None,
+                })
+                .collect();
+            out.extend(self.skills.scan_projects(&cwds)?);
         }
         Ok(out)
     }
 
     fn visible_copy(&self, native_id: &str) -> Option<String> {
+        if skills::skill_project_key(native_id).is_some() {
+            let cwds = self.project_cwds_ok();
+            return self.skills.project_visible_copy(native_id, &cwds);
+        }
         self.skills.visible_copy(native_id)
     }
 
@@ -511,6 +533,9 @@ impl Adapter for ClaudeAdapter {
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
         if item.kind == Kind::Skill {
+            if let Scope::Project(cwd) = &item.scope {
+                return self.skills.write_project(cwd, item);
+            }
             return self.skills.write(item);
         }
         if item.kind == Kind::Instruction {
@@ -561,6 +586,9 @@ impl Adapter for ClaudeAdapter {
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
         if skill_name(native_id).is_some() {
+            if let Scope::Project(cwd) = &item.scope {
+                return self.skills.write_project(cwd, item).map(|_| ());
+            }
             return self.skills.write(item).map(|_| ());
         }
         if is_session_id(native_id) {
@@ -586,8 +614,14 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn remove(&self, native_id: &str) -> Result<()> {
-        if let Some(name) = skill_name(native_id) {
-            return self.skills.remove(name);
+        if skill_name(native_id).is_some() {
+            if skills::skill_project_key(native_id).is_some() {
+                let cwds = self.project_cwds_ok();
+                return self.skills.remove_project(native_id, &cwds);
+            }
+            if let Some(name) = skill_name(native_id) {
+                return self.skills.remove(name);
+            }
         }
         if is_session_id(native_id) {
             return Err(Error::unsupported("claude", "remove session"));

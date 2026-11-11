@@ -7,8 +7,9 @@ how additions, edits and deletes travel.
 
 ## Scope
 
-`Kind::Skill` with `Scope::Global`, for Claude Code, Codex, OpenCode and Pi. Project-level skill
-directories (inside repositories), plugin caches and agent-managed skills are not read or written.
+`Kind::Skill` with `Scope::Global` and `Scope::Project`, for Claude Code, OpenCode and Pi.
+Project-level skill directories inside repositories are read and written. Codex has no project
+skill directory. Plugin caches and agent-managed skills are not read or written.
 Policy decision: `wiki/decisions/skills-mirror-without-shared-store.md`.
 
 ## Model
@@ -38,6 +39,21 @@ and listed by `status`. A skill over 50 MB is skipped and listed by `status`
 
 Excluded from the unit: dot-directories (`.system`), `synced` (managed by Claude Code itself),
 directories without a top-level `SKILL.md`, anything outside the agent's own skills directory.
+
+### Project skills
+
+| Agent | Project directory | Also reads (never written) |
+|---|---|---|
+| Claude Code | `<repo>/.claude/skills/<name>/` | |
+| OpenCode | `<repo>/.opencode/skills/<name>/` | `<repo>/.claude/skills/`, `<repo>/.agents/skills/` |
+| Pi | `<repo>/.pi/skills/<name>/` | `<repo>/.agents/skills/` |
+| Codex | no project skills | |
+
+The `native_id` of a project skill is `skill:<project-key>/<name>`, where `project-key` is the same
+key the memory store uses (`slug` of the last path component plus `-` and the first 8 hex of the
+SHA-256 of the full path). `skill_name` returns the last `/`-separated component; `skill_project_key`
+returns the project key or `None` for a global skill. Skills from different projects are separate
+items.
 A symlinked skill directory counts as a skill; its content is read through the link.
 Test: `excluded_directories_are_never_read_or_touched` in `crates/core/tests/skills.rs`.
 
