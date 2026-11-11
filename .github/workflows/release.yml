@@ -3,12 +3,19 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to build and publish"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   linux:
@@ -24,9 +31,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - name: Verify the tag matches the workspace version
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           if [ "$TAG" != "v$version" ]; then
@@ -48,7 +57,7 @@ jobs:
         run: cargo build --release --locked -p nativemem-cli
       - name: Package
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
           ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p stage dist
@@ -67,6 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
@@ -75,11 +85,12 @@ jobs:
           merge-multiple: true
       - name: Checksums
         working-directory: dist
-        run: sha256sum ./*.tar.gz | sed 's# \./# #' > SHA256SUMS-linux.txt
+        run: |
+          sha256sum ./*.tar.gz | sed 's# \./# #' > SHA256SUMS-linux.txt
       - name: Create the release from the tag message
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
           git tag -l --format='%(contents)' "$TAG" > notes.md

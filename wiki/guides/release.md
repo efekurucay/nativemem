@@ -52,6 +52,12 @@ Pushing the tag starts `.github/workflows/release.yml`, which builds the Linux b
 creates the release. The macOS assets are uploaded afterwards, so a release is complete only
 after the `gh release upload` step.
 
+If publishing is interrupted before a release is created, run
+`gh workflow run release.yml --ref main -f tag=vX.Y.Z`. The workflow uses its definition on `main`
+but checks out the existing tag for the builds and release notes, and verifies the tag matches the
+workspace version. This recovers publishing without moving an immutable version tag. After it
+finishes, upload the macOS assets printed by the local script.
+
 ## Release notes
 
 The notes are generated locally from the commit subjects between the previous `v*` tag and `HEAD`

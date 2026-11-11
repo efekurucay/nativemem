@@ -15,7 +15,7 @@ The workflows under `.github/workflows/`. Release steps are in `wiki/guides/rele
 | `ci.yml` | push to `main`, pull requests (skipped when only `wiki/**`, `docs/**` or `*.md` changed) | `ubuntu-latest` | job `rust`: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`; job `ci-ok` fails unless `rust` succeeded |
 | `site.yml` | push to `main` or PR touching `site/**` or the workflow; manual | `ubuntu-latest` | Node 22, `npm ci`, Chromium install, Playwright tests with axe; stage static files and deploy to GitHub Pages only from `main`, never from PRs |
 | `portability.yml` | manual (`workflow_dispatch`) | `windows-latest`, `continue-on-error` | `cargo build --workspace`, `cargo test --workspace`; best-effort |
-| `release.yml` | push of a tag `v*` | `ubuntu-latest`, `ubuntu-24.04-arm` | verifies the tag against the workspace version, builds the Linux CLI per architecture, writes `SHA256SUMS-linux.txt`, creates the release from the tag message |
+| `release.yml` | push of a tag `v*`, or manual with an existing `tag` input | `ubuntu-latest`, `ubuntu-24.04-arm` | verifies the tag against the workspace version, builds the Linux CLI per architecture, writes `SHA256SUMS-linux.txt`, creates the release from the tag message |
 
 Common settings: `permissions: contents: read` (`contents: write` only in `release.yml`;
 `pages: write` and `id-token: write` only in the site's deployment job),
@@ -40,7 +40,7 @@ weekly grouped updates for cargo and for the actions (`.github/dependabot.yml`).
 
 - `.github/workflows/ci.yml`
 - `.github/workflows/portability.yml`
-- `.github/workflows/release.yml`
+- `.github/workflows/release.yml` (`RELEASE_TAG` selects the version tag for both builds and publication; manual dispatch uses the workflow from `main` without moving the tag)
 - `.github/workflows/site.yml`
 - `site/playwright.config.js`
 - `site/tests/site.spec.js`
