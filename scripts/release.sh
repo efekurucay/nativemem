@@ -130,10 +130,11 @@ generate_notes() {
         fi
         echo "### Install"
         echo
-        echo "Checksums are in the \`SHA256SUMS-*\` assets. Install instructions: $REPO#install"
+        echo "Download \`nativemem-macos-universal.dmg\`, open it and drag the app to Applications."
+        echo "The ZIP is an alternative. Checksums are in the \`SHA256SUMS-*\` assets. Install instructions: $REPO#get-started"
         echo
-        echo "The macOS app is ad-hoc signed and not notarized. After unzipping, run"
-        echo "\`xattr -dr com.apple.quarantine nativemem.app\` or right-click the app and choose Open."
+        echo "The macOS app is ad-hoc signed and not notarized. If macOS blocks the first launch,"
+        echo "use System Settings > Privacy & Security > Open Anyway for nativemem, only if you trust the download."
     } > "$out"
     rm -rf "$work"
 }
@@ -210,6 +211,7 @@ if [ "$DRY" = 1 ]; then
     done
     echo "[dry-run] would run: lipo -create the two binaries into one universal nativemem"
     echo "[dry-run] would run: NATIVEMEM_CLI=<universal> VERSION=$VERSION UNIVERSAL=1 apps/macos/scripts/bundle.sh"
+    echo "[dry-run] would write: dist/nativemem-macos-universal.dmg (app and Applications shortcut)"
     echo "[dry-run] would write: dist/nativemem-macos-universal.zip (ditto -c -k --keepParent)"
     echo "[dry-run] would write: dist/nativemem-cli-$TAG-macos-universal.tar.gz"
     echo "[dry-run] would write: dist/SHA256SUMS-macos.txt"
@@ -229,12 +231,13 @@ else
     [ "$("$STAGE/nativemem" --version)" = "nativemem $VERSION" ] || die "the built binary does not report version $VERSION"
 
     NATIVEMEM_CLI="$STAGE/nativemem" VERSION="$VERSION" UNIVERSAL=1 apps/macos/scripts/bundle.sh
+    apps/macos/scripts/dmg.sh apps/macos/build/nativemem.app dist/nativemem-macos-universal.dmg
     ditto -c -k --keepParent apps/macos/build/nativemem.app dist/nativemem-macos-universal.zip
 
     mkdir "$STAGE/cli"
     cp "$STAGE/nativemem" LICENSE "$STAGE/cli/"
     tar -C "$STAGE/cli" -czf "dist/nativemem-cli-$TAG-macos-universal.tar.gz" nativemem LICENSE
-    (cd dist && shasum -a 256 nativemem-macos-universal.zip "nativemem-cli-$TAG-macos-universal.tar.gz" > SHA256SUMS-macos.txt)
+    (cd dist && shasum -a 256 nativemem-macos-universal.dmg nativemem-macos-universal.zip "nativemem-cli-$TAG-macos-universal.tar.gz" > SHA256SUMS-macos.txt)
 fi
 
 # ---------------------------------------------------------------- notes
@@ -287,7 +290,7 @@ else
 fi
 
 # ---------------------------------------------------------------- next steps
-MACOS_ASSETS="dist/nativemem-macos-universal.zip dist/nativemem-cli-$TAG-macos-universal.tar.gz dist/SHA256SUMS-macos.txt"
+MACOS_ASSETS="dist/nativemem-macos-universal.dmg dist/nativemem-macos-universal.zip dist/nativemem-cli-$TAG-macos-universal.tar.gz dist/SHA256SUMS-macos.txt"
 step "Next steps"
 if [ "$PUBLISH" = 1 ] && [ "$DRY" = 0 ]; then
     git push origin main "$TAG"

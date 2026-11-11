@@ -26,7 +26,7 @@ Run on `main` with a clean working tree, from the repo root:
 scripts/release.sh 0.2.0 --dry-run     # prints every step, changes nothing
 scripts/release.sh 0.2.0               # does the work, stops before pushing
 git push origin main v0.2.0
-gh release upload v0.2.0 dist/nativemem-macos-universal.zip dist/nativemem-cli-v0.2.0-macos-universal.tar.gz dist/SHA256SUMS-macos.txt --clobber
+gh release upload v0.2.0 dist/nativemem-macos-universal.dmg dist/nativemem-macos-universal.zip dist/nativemem-cli-v0.2.0-macos-universal.tar.gz dist/SHA256SUMS-macos.txt --clobber
 ```
 
 The script:
@@ -61,7 +61,7 @@ with the short hash and no author. Groups: Breaking changes (a `!` after the typ
 (`feat`), Fixes (`fix`), Documentation (`docs`), Maintenance (`chore`, `ci`, `test`, `refactor`,
 `build`) and Other (everything else, including subjects without a type). `chore(release)` commits
 are dropped. A fixed footer points to the install instructions, the `SHA256SUMS-*` assets and the
-Gatekeeper command for the app.
+Gatekeeper first-launch guidance for the app.
 
 With `--with-doctor` the script runs `nativemem doctor --json` of the fresh binary on the real
 agent homes, read-only and with a temporary state directory, and lists agent id and version only,
@@ -77,15 +77,21 @@ To change the notes of a published release, edit the release on GitHub.
 
 | File | Built by | Content |
 |---|---|---|
-| `nativemem-macos-universal.zip` | `scripts/release.sh` | `nativemem.app` (arm64 and x86_64), embeds the CLI |
+| `nativemem-macos-universal.dmg` | `scripts/release.sh` through `apps/macos/scripts/dmg.sh` | primary desktop download: universal app, Applications shortcut, installation instructions |
+| `nativemem-macos-universal.zip` | `scripts/release.sh` | alternative archive of `nativemem.app` (arm64 and x86_64), embeds the CLI |
 | `nativemem-cli-<tag>-macos-universal.tar.gz` | `scripts/release.sh` | `nativemem` and `LICENSE` |
-| `SHA256SUMS-macos.txt` | `scripts/release.sh` | checksums of the two macOS files |
+| `SHA256SUMS-macos.txt` | `scripts/release.sh` | checksums of the DMG, ZIP and CLI tarball |
 | `nativemem-cli-<tag>-linux-x86_64.tar.gz` | release workflow | `nativemem` and `LICENSE` |
 | `nativemem-cli-<tag>-linux-aarch64.tar.gz` | release workflow | `nativemem` and `LICENSE` |
 | `SHA256SUMS-linux.txt` | release workflow | checksums of the Linux files |
 
 Windows has no release artifact; it builds from source and its build is checked by the manual
 `portability` workflow.
+
+The app bundle includes the MIT license in `Contents/Resources/LICENSE`. The DMG is created with
+`hdiutil`, verified before publishing, and contains an Applications shortcut for drag-and-drop
+installation. The website's primary download points to
+`releases/latest/download/nativemem-macos-universal.dmg`; ZIP and checksums are linked separately.
 
 ## Versioning
 
@@ -127,6 +133,7 @@ is set up or exercised in the repo `[UNVERIFIED]`.
 
 - `scripts/release.sh`
 - `apps/macos/scripts/bundle.sh`
+- `apps/macos/scripts/dmg.sh`
 - `.github/workflows/release.yml`
 - `Cargo.toml`
 - `.gitignore`
@@ -142,9 +149,11 @@ is set up or exercised in the repo `[UNVERIFIED]`.
 ## Verification checklist
 
 - [ ] `nativemem --version` of the built binary equals the tag without the `v`
-- [ ] `dist/` holds the three macOS files and `RELEASE_NOTES.md`
+- [ ] `dist/` holds the DMG, ZIP, CLI tarball, `SHA256SUMS-macos.txt` and `RELEASE_NOTES.md`
+- [ ] The DMG verifies, mounts read-only, holds the signed universal app and the Applications shortcut, and includes the license in the app bundle
 - [ ] `git tag -n99 vX.Y.Z` shows the reviewed notes
 - [ ] After the workflow, the release lists the Linux tarballs, both checksum files and the macOS assets
+- [ ] The website's direct DMG download resolves successfully
 
 ## Related docs
 

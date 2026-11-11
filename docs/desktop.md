@@ -586,7 +586,9 @@ Swift package at `apps/macos` (SwiftUI app, macOS 14+, Swift 6, no third-party d
   `SubagentView` (list, detail, Try it), `SubagentSheet`.
 - `scripts/bundle.sh`: builds release and assembles `build/nativemem.app` (Info.plist, the
   executable, and the `nativemem` CLI binary copied next to it when
-  `../../target/release/nativemem` exists).
+  `../../target/release/nativemem` exists). The bundle includes the MIT license in its Resources.
+- `scripts/dmg.sh`: packages the built app with an Applications shortcut and installation notes
+  into a verified DMG. Release downloads include the universal DMG, a ZIP alternative and checksums.
 - Tests: decoding of each contract document from fixture JSON (one file per shape, the `mcp`
   documents included, and the `subagent` documents, run results and errors); grouping and folding logic;
   the New entry draft; the server state, the badge count and the server draft; the subagent draft; the

@@ -121,7 +121,7 @@ nativemem-sync/
 │   ├── Tests/NativememKitTests/  contract, doctor, index, session, tree, sectioning, body parser, sync headline, new entry, MCP contract, server state and server draft tests
 │   │   └── Fixtures/             one JSON file per CLI document shape
 │   ├── Resources/AppIcon.png      1024px desktop icon generated from site/assets/mark.svg
-│   └── scripts/bundle.sh         builds the app bundle into `apps/macos/build/` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`)
+│   └── scripts/                  bundle.sh builds `build/nativemem.app` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`); dmg.sh packages an app with an Applications shortcut
 └── wiki/                         this knowledge base
     ├── README.md · CLAUDE.md · WIKI-CREATOR.md
     ├── architecture/             ci, compatibility, context-quality, file-structure, hub, overview, safety
