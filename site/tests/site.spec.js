@@ -64,6 +64,29 @@ test("supported agents use local logo assets with stable sizing", async ({
   }
 });
 
+test("Pi artwork has transparent cutouts and preserves the reference colors", async ({ page }) => {
+  await page.goto("/");
+  const logo = page.locator('.agent-logo[src="assets/agents/pi.png"]');
+  const pixels = await logo.evaluate(async (image) => {
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0);
+    return [[100, 100], [250, 20], [26, 26], [26, 236], [236, 236]].map(
+      ([x, y]) => Array.from(context.getImageData(x, y, 1, 1).data),
+    );
+  });
+  expect(pixels[0][3]).toBe(0);
+  expect(pixels[1][3]).toBe(0);
+  expect(pixels.slice(2)).toEqual([
+    [240, 144, 130, 255],
+    [77, 154, 191, 255],
+    [241, 190, 88, 255],
+  ]);
+});
+
 test("Mac downloads target the universal DMG with a ZIP alternative", async ({
   page,
 }) => {

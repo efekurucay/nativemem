@@ -7,7 +7,8 @@ not a user's agent homes. `assets/social.png` is the social sharing card.
 ## Agent logos
 
 `assets/agents/` holds publisher marks and the user-supplied Pi artwork, served locally without
-third-party requests. Pi's outer white margin is cropped; its colors and artwork are preserved. Visible agent names label the decorative images; fixed dimensions reserve space.
+third-party requests. Pi's outer white margin is cropped and white background/cutout pixels are
+transparent; its colored pixels are preserved. Visible agent names label the decorative images; fixed dimensions reserve space.
 The strip stays light, including embedded SVGs when the browser prefers dark colors.
 
 Sources:
@@ -41,7 +42,7 @@ npm test
 ```
 
 The Playwright suite checks screenshot tabs (including keyboard controls), clipboard copying,
-internal anchors, images, agent logos and their sizing, a no-JavaScript view, horizontal
+internal anchors, images, agent logo sizing, Pi transparency and colors, a no-JavaScript view, horizontal
 overflow at five viewport widths, and WCAG A/AA rules with axe. `tests/server.py` serves the fixture
 with the OS connection-backlog limit so parallel browser connection pools can load assets together.
 No external service or real agent is contacted.
