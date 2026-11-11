@@ -47,5 +47,8 @@ returns the live URL. Only `index.html`, `style.css`, `app.js` and `assets/` are
 
 The support matrix lives in the root README and the wiki's per-agent pages. Keep platform limits,
 project-skill support, conversion limits and source-install instructions consistent with them.
-Download links go to Releases, not a guessed binary URL. Do not publish test counts as benchmarks
+The primary Mac download is `releases/latest/download/nativemem-macos-universal.dmg`; the ZIP is an
+alternative. These names come from `scripts/release.sh`. Publish and verify the release assets before
+shipping a new download link. Keep the macOS minimum, universal architecture and notarization warning
+next to installation instructions. Do not publish test counts as benchmarks
 or promise that schema tests verify native session resume.

@@ -83,10 +83,15 @@
               Carry memory, instructions, skills and conversations between your
               coding agents. In the files they already know.
             </p>
-            <a class="button" href="#start"
-              >Get started <span aria-hidden="true">↗</span></a
+            <a
+              class="button"
+              href="https://github.com/efekurucay/nativemem/releases/latest/download/nativemem-macos-universal.dmg"
+              >Download for Mac <span aria-hidden="true">↓</span></a
             >
-            <span class="micro">No account. No sync subscription.</span>
+            <span class="micro">macOS 14+ · Apple silicon & Intel</span>
+            <a class="install-link" href="#start"
+              >Install instructions & source ↗</a
+            >
           </div>
         </div>
         <div class="agent-strip">
@@ -363,15 +368,30 @@
               inspect the plan, and keep your backups.
             </p>
             <div class="start-links">
-              <a class="button" href="https://github.com/efekurucay/nativemem"
-                >Get the source <span aria-hidden="true">↗</span></a
-              ><a href="https://github.com/efekurucay/nativemem/releases"
-                >Check releases ↗</a
+              <a
+                class="button"
+                href="https://github.com/efekurucay/nativemem/releases/latest/download/nativemem-macos-universal.dmg"
+                >Download for Mac <span aria-hidden="true">↓</span></a
+              >
+              <a
+                href="https://github.com/efekurucay/nativemem/releases/latest/download/nativemem-macos-universal.zip"
+                >ZIP alternative</a
+              >
+              <a href="https://github.com/efekurucay/nativemem"
+                >Source code ↗</a
               >
             </div>
             <p class="micro">
-              MIT licensed. Build from source today.<br />Download availability
-              is listed on GitHub Releases.
+              macOS 14+ · Apple silicon & Intel · MIT licensed<br />
+              <a href="https://github.com/efekurucay/nativemem/releases/latest"
+                >Release notes & checksums ↗</a
+              >
+            </p>
+            <p class="install-note">
+              <strong>To install:</strong> open the DMG and drag nativemem to
+              Applications. The app is ad-hoc signed, not notarized. If macOS
+              blocks the first launch, go to System Settings → Privacy &
+              Security → Open Anyway. Only approve a download you trust.
             </p>
           </div>
           <div class="terminal">
@@ -390,7 +410,7 @@
               id="install-code"
               tabindex="0"
               aria-label="Source installation commands"
-            ><code><span class="comment"># Rust 1.89+ and a C compiler</span>
+            ><code><span class="comment"># Current stable Rust and a C compiler</span>
 git clone https://github.com/efekurucay/nativemem.git
 cd nativemem
 cargo install --path crates/cli

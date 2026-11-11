@@ -34,6 +34,32 @@ test("assets load locally, internal links resolve and the product claims are exp
   expect(failed).toEqual([]);
 });
 
+test("Mac downloads target the universal DMG with a ZIP alternative", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const downloads = page.getByRole("link", {
+    name: "Download for Mac",
+    exact: true,
+  });
+  await expect(downloads).toHaveCount(2);
+  for (const link of await downloads.all()) {
+    await expect(link).toHaveAttribute(
+      "href",
+      "https://github.com/efekurucay/nativemem/releases/latest/download/nativemem-macos-universal.dmg",
+    );
+  }
+  await expect(
+    page.getByRole("link", { name: "ZIP alternative", exact: true }),
+  ).toHaveAttribute(
+    "href",
+    "https://github.com/efekurucay/nativemem/releases/latest/download/nativemem-macos-universal.zip",
+  );
+  await expect(page.getByRole("paragraph").filter({ hasText: "To install:" })).toContainText(
+    "not notarized",
+  );
+});
+
 test("screenshot tabs support clicks and keyboard navigation", async ({
   page,
 }) => {

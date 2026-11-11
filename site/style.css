@@ -233,6 +233,12 @@ h2 em,
   font-size: 10px;
   letter-spacing: 0;
 }
+.hero-aside .install-link {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
 .agent-strip {
   display: flex;
   align-items: center;
@@ -534,12 +540,18 @@ h2 em,
 }
 .start-links {
   display: flex;
+  flex-wrap: wrap;
   gap: 28px;
   align-items: center;
   margin: 28px 0 20px;
 }
 .start-links > a:not(.button) {
   font-size: 12px;
+}
+.start-section .install-note {
+  margin-top: 20px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 .start-section .micro {
   font: 10px/1.7 var(--mono);

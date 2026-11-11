@@ -47,9 +47,26 @@ LLM in the sync loop. The ledger records IDs, hashes and paths—not a second co
 
 ## Get started
 
-**Early software.** Build from source with current stable Rust and a C compiler (SQLite is bundled).
-Check [Releases](https://github.com/efekurucay/nativemem/releases) for published artifacts; availability
-there is the source of truth. You don't need an account or an API key for file sync.
+### Download for Mac
+
+**[Download for Mac ↓](https://github.com/efekurucay/nativemem/releases/latest/download/nativemem-macos-universal.dmg)**
+
+macOS 14+ · Apple silicon & Intel · Universal DMG
+
+1. Open the DMG and drag **nativemem.app** to **Applications**.
+2. Open it from Applications. The app embeds the CLI; no Rust installation is needed.
+3. If macOS blocks the first launch, use **System Settings → Privacy & Security → Open Anyway**
+   for nativemem. The app is ad-hoc signed, not notarized; only approve a download you trust.
+
+[ZIP alternative](https://github.com/efekurucay/nativemem/releases/latest/download/nativemem-macos-universal.zip)
+· [Release notes and SHA-256 checksums](https://github.com/efekurucay/nativemem/releases/latest)
+· [Linux and standalone CLI downloads](https://github.com/efekurucay/nativemem/releases/latest)
+
+**Early software:** preview changes before applying them. File sync does not need an account or an API key.
+
+### CLI from source
+
+Needs current stable Rust and a C compiler (SQLite is bundled).
 
 ```sh
 git clone https://github.com/efekurucay/nativemem.git
@@ -94,8 +111,9 @@ apps/macos/scripts/bundle.sh
 open apps/macos/build/nativemem.app
 ```
 
-Move the bundle to Applications if you want to keep it there. It embeds the CLI. The app is ad-hoc
-signed, not notarized; macOS may require an explicit first-launch approval for downloaded builds.
+These build steps are optional: the [Mac download](#download-for-mac) already includes the app and CLI.
+The bundle can be moved to Applications. It is ad-hoc signed, not notarized; downloaded builds may
+require explicit first-launch approval in System Settings → Privacy & Security.
 The desktop app does not run on Windows or Linux.
 
 ## What works where
