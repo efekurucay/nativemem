@@ -4,6 +4,22 @@ Static HTML, CSS and JavaScript. No build step, analytics, cookies or runtime pa
 self-hosted; their OFL licenses are in `assets/fonts/`. All desktop screenshots use synthetic data,
 not a user's agent homes. `assets/social.png` is the social sharing card.
 
+## Agent logos
+
+`assets/agents/` holds unmodified original marks from their publishers, served locally without
+third-party requests. Visible agent names label the decorative images; fixed dimensions reserve space.
+The strip stays light, including embedded SVGs when the browser prefers dark colors.
+
+Sources:
+
+- `claude.svg`: [Claude's official site icon](https://claude.com/icon.svg).
+- `codex.png`: OpenAI's [official Codex extension](https://marketplace.visualstudio.com/items?itemName=openai.chatgpt),
+  [published icon](https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.51106.51428/1794372152150/Microsoft.VisualStudio.Services.Icons.Default).
+- `opencode.svg`: [OpenCode's official repository](https://github.com/anomalyco/opencode/blob/dev/packages/ui/src/assets/favicon/favicon-v3.svg).
+- `pi.svg`: [Pi's official site icon](https://pi.dev/favicon.svg).
+
+These marks identify supported integrations and remain their respective owners' trademarks.
+
 ## Preview
 
 ```sh
@@ -25,8 +41,10 @@ npm test
 ```
 
 The Playwright suite checks screenshot tabs (including keyboard controls), clipboard copying,
-internal anchors, images, a no-JavaScript view, horizontal overflow at five viewport widths, and
-WCAG A/AA rules with axe. No external service or real agent is contacted.
+internal anchors, images, official agent logos and their sizing, a no-JavaScript view, horizontal
+overflow at five viewport widths, and WCAG A/AA rules with axe. `tests/server.py` serves the fixture
+with the OS connection-backlog limit so parallel browser connection pools can load assets together.
+No external service or real agent is contacted.
 
 ## Desktop icon
 

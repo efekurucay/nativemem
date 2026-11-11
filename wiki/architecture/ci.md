@@ -44,6 +44,7 @@ weekly grouped updates for cargo and for the actions (`.github/dependabot.yml`).
 - `.github/workflows/site.yml`
 - `site/playwright.config.js`
 - `site/tests/site.spec.js`
+- `site/tests/server.py` (local static fixture; OS-sized accept queue supports parallel browser connection pools)
 - `.github/dependabot.yml`
 
 ## Rules

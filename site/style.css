@@ -262,10 +262,12 @@ h2 em,
   font-size: 17px;
   white-space: nowrap;
 }
-.agent-symbol {
-  font-size: 27px;
-  line-height: 1;
-  color: var(--muted);
+.agent-logo {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  object-fit: contain;
+  color-scheme: light;
 }
 .context-band {
   background: var(--deep);

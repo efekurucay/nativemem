@@ -34,6 +34,36 @@ test("assets load locally, internal links resolve and the product claims are exp
   expect(failed).toEqual([]);
 });
 
+test("supported agents use local official logos with stable sizing", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const strip = page.getByRole("list", { name: "Supported coding agents" });
+  await expect(strip.locator("li")).toHaveText([
+    "Claude Code", "Codex", "OpenCode", "Pi",
+  ]);
+  const logos = strip.locator("img.agent-logo");
+  await expect(logos).toHaveCount(4);
+  const files = ["claude.svg", "codex.png", "opencode.svg", "pi.svg"];
+  for (const [index, file] of files.entries()) {
+    const logo = logos.nth(index);
+    await expect(logo).toHaveAttribute("src", `assets/agents/${file}`);
+    await expect(logo).toHaveAttribute("alt", "");
+    await expect(logo).toHaveAttribute("aria-hidden", "true");
+    await expect(logo).toHaveAttribute("width", "28");
+    await expect(logo).toHaveAttribute("height", "28");
+    await expect
+      .poll(() => logo.evaluate((image) => image.complete && image.naturalWidth > 0), {
+        message: `${file} must decode as an image`,
+      })
+      .toBe(true);
+  }
+  await page.emulateMedia({ colorScheme: "dark" });
+  for (const logo of await logos.all()) {
+    await expect(logo).toHaveCSS("color-scheme", "light");
+  }
+});
+
 test("Mac downloads target the universal DMG with a ZIP alternative", async ({
   page,
 }) => {
