@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "playwright test",
+    "icon": "node render-icon.mjs",
     "serve": "python3 -m http.server 4173 --bind 127.0.0.1 --directory ."
   },
   "devDependencies": {

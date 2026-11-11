@@ -25,6 +25,7 @@ nativemem-sync/
 │   └── images/                   synthetic app screenshots: overview.png, memory-detail.png, skills.png
 ├── site/                         static landing page; no build step or runtime dependencies
 │   ├── index.html · style.css · app.js  product page, responsive styling, accessible tabs and copying
+│   ├── render-icon.mjs            renders assets/mark.svg into the macOS source AppIcon.png
 │   ├── assets/                   mark.svg, social.png, synthetic app screenshots (WebP), self-hosted OFL fonts
 │   ├── package.json · package-lock.json  browser-test dependencies only
 │   ├── playwright.config.js · tests/site.spec.js  navigation, tabs, clipboard, responsive and axe checks
@@ -119,7 +120,7 @@ nativemem-sync/
 │   │   └── SidebarView, ItemListView, ItemDetailView, OverviewView, SyncSheet, ContentView
 │   ├── Tests/NativememKitTests/  contract, doctor, index, session, tree, sectioning, body parser, sync headline, new entry, MCP contract, server state and server draft tests
 │   │   └── Fixtures/             one JSON file per CLI document shape
-│   ├── Resources/AppIcon.png
+│   ├── Resources/AppIcon.png      1024px desktop icon generated from site/assets/mark.svg
 │   └── scripts/bundle.sh         builds the app bundle into `apps/macos/build/` (`VERSION`, `UNIVERSAL`, `NATIVEMEM_CLI`, `CODESIGN_IDENTITY`)
 └── wiki/                         this knowledge base
     ├── README.md · CLAUDE.md · WIKI-CREATOR.md

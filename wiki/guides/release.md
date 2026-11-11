@@ -95,6 +95,14 @@ both crates; `nativemem --version` prints it and `scripts/release.sh` writes it 
 A tag with a hyphen (`v0.3.0-rc.1`) creates a GitHub prerelease. The release workflow fails when
 the tag differs from the workspace version of the tagged commit.
 
+## App icon
+
+The website mark in `site/assets/mark.svg` is the source of the desktop icon.
+Run `cd site && npm ci && npx playwright install chromium && npm run icon` to render
+`apps/macos/Resources/AppIcon.png`: 1024 × 1024, transparent margins and the mark on the macOS
+icon grid. The bundle script turns that PNG into all ICNS sizes. Chromium is needed only to
+regenerate the source PNG, not to build or run the app.
+
 ## Signing and Gatekeeper
 
 The app is ad-hoc signed (`codesign -s -`, the default of `CODESIGN_IDENTITY` in

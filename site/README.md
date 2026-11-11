@@ -28,6 +28,12 @@ The Playwright suite checks screenshot tabs (including keyboard controls), clipb
 internal anchors, images, a no-JavaScript view, horizontal overflow at five viewport widths, and
 WCAG A/AA rules with axe. No external service or real agent is contacted.
 
+## Desktop icon
+
+`npm run icon` renders `assets/mark.svg` into `../apps/macos/Resources/AppIcon.png`, with a transparent
+margin for the macOS icon grid. It uses the same Chromium installation as the browser tests.
+The Mac bundle script creates its ICNS sizes from this PNG; no browser is bundled with the app.
+
 ## Publish
 
 `.github/workflows/site.yml` tests and publishes this directory to GitHub Pages on pushes to `main`.
