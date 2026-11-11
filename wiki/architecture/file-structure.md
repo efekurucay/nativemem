@@ -22,12 +22,18 @@ nativemem-sync/
 ├── docs/
 │   ├── design.md                 original design and build plan
 │   ├── desktop.md                desktop app spec and the CLI JSON contract
-│   └── images/                   screenshots referenced by README.md (overview.png, memory-detail.png)
+│   └── images/                   synthetic app screenshots: overview.png, memory-detail.png, skills.png
+├── site/                         static landing page; no build step or runtime dependencies
+│   ├── index.html · style.css · app.js  product page, responsive styling, accessible tabs and copying
+│   ├── assets/                   mark.svg, social.png, synthetic app screenshots (WebP), self-hosted OFL fonts
+│   ├── package.json · package-lock.json  browser-test dependencies only
+│   ├── playwright.config.js · tests/site.spec.js  navigation, tabs, clipboard, responsive and axe checks
+│   └── README.md                 local preview, browser tests, Pages deployment
 ├── scripts/
 │   ├── release.sh                local release: checks, version bump, macOS artifacts, notes, commit, tag
 │   └── demo-home.sh              synthetic agent homes with generic memory items and skills for trying the CLI and app
 ├── .github/
-│   ├── workflows/                ci.yml (Linux checks), release.yml (Linux binaries, release), portability.yml (manual Windows build)
+│   ├── workflows/                ci.yml (Linux checks), site.yml (browser checks + Pages), release.yml (Linux binaries, release), portability.yml (manual Windows build)
 │   ├── ISSUE_TEMPLATE/           bug_report, agent_update, config
 │   ├── PULL_REQUEST_TEMPLATE.md
 │   └── dependabot.yml            weekly grouped cargo and actions updates
@@ -63,7 +69,7 @@ nativemem-sync/
 │   │           ├── opencode_probes.rs  OpenCode probes: config directory, AGENTS.md, session tables, installed version
 │   │           ├── pi.rs         Pi: AGENTS.md through agents_file, session reader and writer
 │   │           ├── agents_file.rs      generic adapter for agents that only read a global AGENTS.md (OpenCode, Pi)
-│   │           ├── skills.rs     skill directories: manifest hash, atomic tree copy, visible roots, layout probe
+│   │           ├── skills.rs     skill directories: manifest hash, staged tree copy, project path index, per-project backups, visible roots, layout probe
 │   │           ├── memory_store.rs     item-file store (originals and replicas) plus routing block, shared by Codex, OpenCode, Pi
 │   │           └── sections.rs   instruction-section parser, managed regions, byte-preserving edits, markers
 │   │   └── tests/                probes.rs (probes, drift, blocked kinds), opencode_sessions.rs (OpenCode reader, writer, database safety, probes, engine flow), skills.rs (skill mirroring over four temp homes)

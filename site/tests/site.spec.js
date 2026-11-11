@@ -1,0 +1,133 @@
+import { test, expect } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
+
+test("assets load locally, internal links resolve and the product claims are explicit", async ({
+  page,
+}) => {
+  const failed = [];
+  page.on("pageerror", (error) => failed.push(error.message));
+  page.on("response", (response) => {
+    if (response.status() >= 400) failed.push(response.url());
+  });
+  await page.goto("/");
+  await expect(page).toHaveTitle(
+    "nativemem — Change the agent. Keep the context.",
+  );
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+    /Change the agent\.\s*Keep the\s+context\s*\./,
+  );
+  const localErrors = await page.evaluate(async () => {
+    const errors = [];
+    for (const link of document.querySelectorAll('a[href^="#"]')) {
+      const id = link.getAttribute("href").slice(1);
+      if (id && !document.getElementById(id)) errors.push(`missing #${id}`);
+    }
+    for (const image of document.querySelectorAll("img")) {
+      const response = await fetch(image.src);
+      if (!response.ok) errors.push(`image ${image.src}`);
+      if (!image.hasAttribute("alt")) errors.push(`missing alt ${image.src}`);
+    }
+    return errors;
+  });
+  expect(localErrors).toEqual([]);
+  await expect(page.getByText("Windows isn't supported yet.")).toBeVisible();
+  expect(failed).toEqual([]);
+});
+
+test("screenshot tabs support clicks and keyboard navigation", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => document.fonts.ready);
+  const skills = page.getByRole("tab", { name: "Skill locations" });
+  await skills.click();
+  await expect(skills).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tabpanel")).toHaveCount(1);
+  await expect(page.getByRole("tabpanel")).toContainText("exact paths");
+  await skills.press("ArrowLeft");
+  await expect(page.getByRole("tab", { name: "Project memory" })).toBeFocused();
+  await expect(page.getByRole("tabpanel")).toContainText(
+    "Memory stays with its project",
+  );
+  await page.getByRole("tab", { name: "Project memory" }).press("Home");
+  await expect(page.getByRole("tab", { name: "Overview" })).toBeFocused();
+});
+
+test("installation commands copy to the clipboard", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Copy source installation commands" })
+    .click();
+  await expect(page.getByRole("status")).toHaveText(
+    "Installation commands copied.",
+  );
+  const text = await page.evaluate(() => navigator.clipboard.readText());
+  expect(text).toContain("cargo install --path crates/cli");
+  expect(text).toContain("nativemem sync --apply");
+});
+
+test("keyboard users can skip navigation and read the FAQ", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.keyboard.press("Tab");
+  await expect(
+    page.getByRole("link", { name: "Skip to content" }),
+  ).toBeFocused();
+  await page.getByText("What actually syncs?", { exact: true }).click();
+  await expect(
+    page.getByText("Project skills are implemented", { exact: false }),
+  ).toBeVisible();
+});
+
+for (const width of [360, 390, 768, 1024, 1440]) {
+  test(`layout and accessibility at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto("/");
+    await page.evaluate(() => document.fonts.ready);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          if (document.documentElement.scrollWidth <= window.innerWidth)
+            return [];
+          return [
+            `viewport ${innerWidth}, document ${document.documentElement.scrollWidth}`,
+            ...[...document.querySelectorAll("body *")]
+              .filter(
+                (element) =>
+                  element.getBoundingClientRect().right > innerWidth + 0.5,
+              )
+              .map(
+                (element) =>
+                  `${element.tagName}.${element.className}: ${element.getBoundingClientRect().right}`,
+              ),
+          ];
+        }),
+      )
+      .toEqual([]);
+    const results = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+      .analyze();
+    expect(results.violations).toEqual([]);
+  });
+}
+
+test("core information is readable with JavaScript disabled", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  const page = await context.newPage();
+  await page.goto("http://127.0.0.1:4173");
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  await page.getByText("How finished is it?", { exact: true }).click();
+  await expect(
+    page.getByText("The Mac app and Rust CLI are under active development.", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await context.close();
+});

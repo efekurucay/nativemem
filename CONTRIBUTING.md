@@ -8,8 +8,9 @@ programs' files.
 - Read `CLAUDE.md` and `wiki/README.md`. The wiki is the canonical description of the behaviour.
 - Hard rules: never run the binary, the tests or the app against real agent homes (`~/.claude`,
   `~/.codex`, `~/.pi`, `~/.config/opencode`, `~/.hermes`, `~/.nativemem`); use temp directories and
-  explicit roots. Never print secrets or session bodies. Never write inside a git repository. Every
-  delete or overwrite backs up first.
+  explicit roots. Never print secrets or session bodies. Repository writes are limited to project
+  skill directories; `.gitignore` and git tracking remain the user's policy. Every delete or
+  overwrite backs up first.
 - `scripts/demo-home.sh <dir> [path-to-nativemem]` builds a synthetic environment to try changes on.
 - No personal data in code, tests, fixtures or docs: use `/Users/x/...` and `acme`.
 - Code and docs describe the current state only; history lives in git.
@@ -25,6 +26,18 @@ cd apps/macos && swift test      # when the app changed
 
 CI runs the Rust checks on Linux. The macOS app and its tests run only on the maintainer's
 machine (`scripts/release.sh`), so run `swift test` yourself when you change the app.
+
+## Landing page and screenshots
+
+The static website lives in `site/`. Run `npm ci`, `npx playwright install chromium` and `npm test`
+there for the browser and accessibility checks; `site/README.md` covers preview and Pages deployment.
+No Node runtime is needed to serve the page.
+
+README and website screenshots must show the current app using synthetic data only. Generate a demo
+with `scripts/demo-home.sh`, redirect `HOME`, and set **every** printed agent root plus the state root
+before launching the app. Capture its window, not the whole desktop. Never publish personal agent
+paths, private conversations, tokens or another app's contents. The assets in `docs/images/` are the
+PNG originals; `site/assets/` contains WebP copies for the website.
 
 ## Commits and pull requests
 

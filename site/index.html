@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f3ed" />
+    <title>nativemem — Change the agent. Keep the context.</title>
+    <meta
+      name="description"
+      content="Keep Claude Code, Codex, OpenCode and Pi in sync. Native memory, instructions, skills and session snapshots, plus one MCP hub. Open source, local-first, no LLM in the sync loop."
+    />
+    <link rel="canonical" href="https://efekurucay.com/nativemem/" />
+    <meta property="og:url" content="https://efekurucay.com/nativemem/" />
+    <meta property="og:type" content="website" />
+    <meta
+      property="og:title"
+      content="nativemem — Change the agent. Keep the context."
+    />
+    <meta
+      property="og:description"
+      content="Your agents have different tools. They shouldn't have different memories. A local Rust CLI and native Mac app, built in the open."
+    />
+    <meta
+      property="og:image"
+      content="https://efekurucay.com/nativemem/assets/social.png"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" href="assets/mark.svg" type="image/svg+xml" />
+    <link
+      rel="preload"
+      href="assets/fonts/dm-sans.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="stylesheet" href="style.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="header wrap">
+      <a class="brand" href="#" aria-label="nativemem home"
+        ><img
+          src="assets/mark.svg"
+          width="32"
+          height="32"
+          alt=""
+        />nativemem<span class="brand-dot">.</span></a
+      >
+      <nav aria-label="Main navigation">
+        <a href="#how">How it works</a>
+        <a href="#desktop">The app</a>
+        <a class="source-link" href="https://github.com/efekurucay/nativemem"
+          >GitHub <span aria-hidden="true">↗</span></a
+        >
+      </nav>
+    </header>
+    <main id="main">
+      <section class="hero wrap" aria-labelledby="hero-title">
+        <div class="eyebrow">
+          <span class="status-dot" aria-hidden="true"></span> OPEN SOURCE /
+          LOCAL FIRST / MIT
+        </div>
+        <div class="hero-grid">
+          <h1 id="hero-title">
+            Change the agent.<br />Keep the
+            <span class="highlight"
+              >context<svg
+                viewBox="0 0 500 20"
+                preserveAspectRatio="none"
+                aria-hidden="true"
+              >
+                <path d="M3 13Q245-1 497 11" /></svg></span
+            >.
+          </h1>
+          <div class="hero-aside">
+            <p>
+              You already explained<br />how this project works.<br /><strong
+                >You shouldn't have to again.</strong
+              >
+            </p>
+            <p class="muted">
+              Carry memory, instructions, skills and conversations between your
+              coding agents. In the files they already know.
+            </p>
+            <a class="button" href="#start"
+              >Get started <span aria-hidden="true">↗</span></a
+            >
+            <span class="micro">No account. No sync subscription.</span>
+          </div>
+        </div>
+        <div class="agent-strip">
+          <span class="micro">SAME PROJECT. FOUR AGENTS.</span>
+          <ul aria-label="Supported coding agents">
+            <li>
+              <span class="agent-symbol" aria-hidden="true">✳</span> Claude Code
+            </li>
+            <li>
+              <span class="agent-symbol" aria-hidden="true">◈</span> Codex
+            </li>
+            <li>
+              <span class="agent-symbol" aria-hidden="true">▣</span> OpenCode
+            </li>
+            <li><span class="agent-symbol" aria-hidden="true">π</span> Pi</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="context-band" aria-labelledby="context-title">
+        <div class="wrap context-grid">
+          <div>
+            <div class="eyebrow">01 / THE HANDOFF, WITHOUT THE CATCH-UP</div>
+            <h2 id="context-title">
+              Different agents.<br /><em>Same page.</em>
+            </h2>
+            <p>
+              Switch tools for the task, not because you're stuck with the one
+              that remembers your project.
+            </p>
+          </div>
+          <div
+            class="context-note"
+            aria-label="Example: project memory copied between agents"
+          >
+            <div class="note-top">
+              <span class="note-label">PROJECT MEMORY</span
+              ><span class="note-label">api / testing.md</span>
+            </div>
+            <p class="note-title">
+              “Run the integration suite<br />before touching billing.”
+            </p>
+            <div class="note-route">
+              <span>Claude Code</span
+              ><span class="route-line" aria-hidden="true"></span
+              ><span>Codex · OpenCode · Pi</span>
+            </div>
+            <div class="note-bottom">
+              <span class="status-dot" aria-hidden="true"></span> Same words.
+              Native files. No LLM rewrite.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap how-section" id="how" aria-labelledby="how-title">
+        <div class="section-heading">
+          <div class="eyebrow">02 / A TRANSLATOR, NOT ANOTHER BRAIN</div>
+          <h2 id="how-title">
+            Your context.<br />Your files. <em>Your call.</em>
+          </h2>
+          <p>
+            nativemem reads what each agent stores, previews the differences,
+            and writes native copies. The sync engine runs locally, without
+            model calls.
+          </p>
+        </div>
+        <ol class="steps">
+          <li>
+            <span class="step-number">01</span>
+            <h3>Read the room.</h3>
+            <p>
+              Adapters read each agent's memory, global instructions, skill
+              directories and sessions. Project scope stays attached.
+            </p>
+            <code>nativemem status</code>
+          </li>
+          <li>
+            <span class="step-number">02</span>
+            <h3>Look before you sync.</h3>
+            <p>
+              See what will be added, updated or removed. Both sides changed?
+              That's a conflict to review, not a guess to make.
+            </p>
+            <code>nativemem sync</code>
+          </li>
+          <li>
+            <span class="step-number">03</span>
+            <h3>Bring everyone along.</h3>
+            <p>
+              Apply the plan when you're ready. Overwrites and deletions get
+              backups. Format checks pause incompatible writes.
+            </p>
+            <code>nativemem sync --apply</code>
+          </li>
+        </ol>
+      </section>
+
+      <section
+        class="desktop-section"
+        id="desktop"
+        aria-labelledby="desktop-title"
+      >
+        <div class="wrap">
+          <div class="desktop-heading">
+            <div>
+              <div class="eyebrow">03 / LESS TERMINAL, WHEN YOU WANT IT</div>
+              <h2 id="desktop-title">
+                A little home<br />for what your agents <em>know.</em>
+              </h2>
+            </div>
+            <p>
+              Browse by project. Add a memory. See the exact folder behind every
+              skill. Preview your next sync in a native Mac app.
+            </p>
+          </div>
+          <div
+            class="app-tabs"
+            role="tablist"
+            aria-label="Explore the desktop app"
+          >
+            <button
+              type="button"
+              role="tab"
+              id="tab-overview"
+              aria-selected="true"
+              aria-controls="panel-overview"
+              data-view="overview"
+            >
+              Overview
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-memory"
+              aria-selected="false"
+              aria-controls="panel-memory"
+              tabindex="-1"
+              data-view="memory"
+            >
+              Project memory
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id="tab-skills"
+              aria-selected="false"
+              aria-controls="panel-skills"
+              tabindex="-1"
+              data-view="skills"
+            >
+              Skill locations
+            </button>
+          </div>
+          <figure
+            class="app-panel"
+            id="panel-overview"
+            role="tabpanel"
+            aria-labelledby="tab-overview"
+            tabindex="0"
+          >
+            <img
+              src="assets/overview.webp"
+              width="2360"
+              height="1440"
+              alt="nativemem Mac app showing four agents, the project folder tree, global skills and the MCP hub navigation."
+              loading="lazy"
+            />
+            <figcaption>
+              One view of what's stored in each agent. All screenshots use
+              synthetic demo data.
+            </figcaption>
+          </figure>
+          <figure
+            class="app-panel"
+            id="panel-memory"
+            role="tabpanel"
+            aria-labelledby="tab-memory"
+            tabindex="0"
+            hidden
+          >
+            <img
+              src="assets/memory.webp"
+              width="2360"
+              height="1440"
+              alt="A project memory entry with its text, original agent and copies in the other coding agents."
+              loading="lazy"
+            />
+            <figcaption>
+              Memory stays with its project. Create, edit or remove an entry,
+              then preview its sync.
+            </figcaption>
+          </figure>
+          <figure
+            class="app-panel"
+            id="panel-skills"
+            role="tabpanel"
+            aria-labelledby="tab-skills"
+            tabindex="0"
+            hidden
+          >
+            <img
+              src="assets/skills.webp"
+              width="2360"
+              height="1440"
+              alt="Skill details with separate Claude Code, Codex, OpenCode and Pi folder paths and Show in Finder buttons."
+              loading="lazy"
+            />
+            <figcaption>
+              Global skills have their own list. Project skills live in the
+              project tree, with exact paths for each copy.
+            </figcaption>
+          </figure>
+          <div class="platform-note">
+            <span>Native SwiftUI · macOS 14+</span
+            ><span
+              >Rust CLI · macOS + Linux<span class="muted">
+                (best-effort)</span
+              ></span
+            ><span>Windows isn't supported yet.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap hub-section" aria-labelledby="hub-title">
+        <div class="hub-heading">
+          <div class="eyebrow">04 / ONE HUB. LESS SETUP.</div>
+          <h2 id="hub-title">Your tools<br />can travel, <em>too.</em></h2>
+          <p>
+            Memory sync keeps native files in sync. The optional MCP hub does a
+            different job: one connection to your integrations and headless
+            agents.
+          </p>
+        </div>
+        <div class="hub-features">
+          <article>
+            <span class="feature-icon" aria-hidden="true">↔</span>
+            <h3>One integration. Every agent.</h3>
+            <p>
+              Connect local or HTTP MCP servers to the hub. Sign in with OAuth
+              there, rather than copying client-bound tokens between agents.
+              Secrets stay in the OS keychain.
+            </p>
+            <a
+              href="https://github.com/efekurucay/nativemem/blob/main/wiki/architecture/hub.md"
+              >Read about the hub <span aria-hidden="true">↗</span></a
+            >
+          </article>
+          <article>
+            <span class="feature-icon" aria-hidden="true">↳</span>
+            <h3>Pick a harness. Pick a model.</h3>
+            <p>
+              Define a subagent once. Choose Claude Code, Codex, OpenCode or Pi
+              and its model. Agents connected to the hub can call it as an MCP
+              tool.
+            </p>
+            <a
+              href="https://github.com/efekurucay/nativemem/blob/main/wiki/architecture/hub.md#subagents"
+              >How subagents work <span aria-hidden="true">↗</span></a
+            >
+          </article>
+        </div>
+      </section>
+
+      <section class="start-section" id="start" aria-labelledby="start-title">
+        <div class="wrap start-grid">
+          <div>
+            <div class="eyebrow">05 / SMALL TOOL. OPEN DOOR.</div>
+            <h2 id="start-title">
+              Make the next<br />switch <em>an easy one.</em>
+            </h2>
+            <p>
+              This is early software, built in the open. Start with a preview,
+              inspect the plan, and keep your backups.
+            </p>
+            <div class="start-links">
+              <a class="button" href="https://github.com/efekurucay/nativemem"
+                >Get the source <span aria-hidden="true">↗</span></a
+              ><a href="https://github.com/efekurucay/nativemem/releases"
+                >Check releases ↗</a
+              >
+            </div>
+            <p class="micro">
+              MIT licensed. Build from source today.<br />Download availability
+              is listed on GitHub Releases.
+            </p>
+          </div>
+          <div class="terminal">
+            <div class="terminal-top">
+              <span>YOUR TERMINAL</span
+              ><button
+                type="button"
+                class="copy-button"
+                data-copy="install-code"
+                aria-label="Copy source installation commands"
+              >
+                Copy
+              </button>
+            </div>
+            <pre
+              id="install-code"
+              tabindex="0"
+              aria-label="Source installation commands"
+            ><code><span class="comment"># Rust 1.89+ and a C compiler</span>
+git clone https://github.com/efekurucay/nativemem.git
+cd nativemem
+cargo install --path crates/cli
+
+<span class="comment"># See the plan. No writes yet.</span>
+nativemem doctor
+nativemem sync
+
+<span class="comment"># Ready? Apply with backups.</span>
+nativemem sync --apply</code></pre>
+            <div class="terminal-bottom">
+              <span class="status-dot" aria-hidden="true"></span> The sync
+              engine doesn't need an API key.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap faq-section" aria-labelledby="faq-title">
+        <div>
+          <div class="eyebrow">THE USEFUL FINE PRINT</div>
+          <h2 id="faq-title">Before you sync.</h2>
+          <a
+            href="https://github.com/efekurucay/nativemem/blob/main/wiki/README.md"
+            >Full technical reference ↗</a
+          >
+        </div>
+        <div class="faq-list">
+          <details>
+            <summary>Does it replace my agents' own memory?</summary>
+            <p>
+              No. Each agent reads its own files in its own format. nativemem
+              translates between those native stores. The ledger keeps IDs,
+              hashes and paths, not a second memory database.
+            </p>
+          </details>
+          <details>
+            <summary>What actually syncs?</summary>
+            <p>
+              Project memory, global instruction sections, global skills and
+              session snapshots between Claude Code, Codex, OpenCode and Pi.
+              Project skills are implemented for Claude Code, OpenCode and Pi;
+              Codex project-skill sync is not implemented. Agent-specific limits
+              and compatibility checks still apply.
+            </p>
+          </details>
+          <details>
+            <summary>Can I continue a conversation in another agent?</summary>
+            <p>
+              Session copies use the target agent's format. Text and readable
+              tool activity travel; provider-bound thinking, signatures and
+              image contents don't. Once you continue a copy, it is left alone.
+              Native resume behavior still needs verification in some agents;
+              this is not a live, lossless session merge.
+            </p>
+          </details>
+          <details>
+            <summary>What happens to deletions and conflicts?</summary>
+            <p>
+              Memory, instruction and skill deletions propagate, with backups.
+              Concurrent edits are reported as conflicts. Sessions use a
+              separate snapshot policy: deletions never propagate, and edits to
+              a continued copy never flow back.
+            </p>
+          </details>
+          <details>
+            <summary>Does any data leave my computer?</summary>
+            <p>
+              The sync engine doesn't use the network or an LLM. The optional
+              MCP hub connects to the servers and authorization endpoints you
+              configure. A subagent uses its harness's model provider,
+              permissions and billing.
+            </p>
+          </details>
+          <details>
+            <summary>How finished is it?</summary>
+            <p>
+              The Mac app and Rust CLI are under active development. The Mac app
+              is ad-hoc signed, not notarized. Linux CLI support is best-effort;
+              Windows is not supported. Schema checks and fixture tests don't
+              replace verification with real agents.
+              <a
+                href="https://github.com/efekurucay/nativemem/blob/main/wiki/guides/verify-with-real-agents.md"
+                >See the verification checklist.</a
+              >
+            </p>
+          </details>
+        </div>
+      </section>
+      <section class="closing wrap">
+        <p>
+          Your next agent<br />doesn't have to<br /><em>start from scratch.</em>
+        </p>
+        <a
+          href="https://github.com/efekurucay/nativemem"
+          aria-label="Explore nativemem on GitHub"
+          >↗</a
+        >
+      </section>
+    </main>
+    <footer class="footer wrap">
+      <a class="brand" href="#"
+        ><img
+          src="assets/mark.svg"
+          width="28"
+          height="28"
+          alt=""
+        />nativemem.</a
+      ><span
+        >Made by <a href="https://efekurucay.com/">Yahya Efe Kuruçay</a>.</span
+      >
+      <div>
+        <a
+          href="https://github.com/efekurucay/nativemem/blob/main/CONTRIBUTING.md"
+          >Contribute</a
+        ><a href="https://github.com/efekurucay/nativemem/blob/main/LICENSE"
+          >MIT license</a
+        ><a href="https://github.com/efekurucay/nativemem/issues"
+          >Report an issue ↗</a
+        >
+      </div>
+    </footer>
+    <span
+      class="sr-only"
+      id="copy-status"
+      role="status"
+      aria-live="polite"
+    ></span>
+  </body>
+</html>
