@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -7,8 +8,8 @@ use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 use crate::session::{
-    derived_uuid, is_session_id, marker_text, set_mtime, Session, SessionOptions, SessionReport,
-    SessionScan,
+    derived_uuid, is_session_id, marker_text, set_mtime, sha_hex, Role, Session, SessionOptions,
+    SessionReport, SessionScan, Turn, MAX_SOURCE_BYTES,
 };
 use crate::slug::slugify;
 
@@ -23,7 +24,9 @@ const ORIGIN_KEY: &str = "nativemem_origin";
 const HELPER_FILE: &str = "nativemem.jsonl";
 const NEW_INDEX: &str = "# Memory Index\n\n";
 /// Bump when the written session format changes; unmodified replicas are then rewritten.
-const SESSION_WRITER_REVISION: u32 = 1;
+const SESSION_WRITER_REVISION: u32 = 2;
+
+type MemoryOrigins = BTreeMap<String, String>;
 
 pub struct ClaudeAdapter {
     claude_home: PathBuf,
@@ -157,7 +160,17 @@ impl ClaudeAdapter {
         let file = format!("{uuid}.jsonl");
         let path = self.projects_dir().join(&dir).join(&file);
         let text = claude_sessions::render(&session, key, &uuid);
-        if read_optional(&path)?.as_deref() != Some(text.as_str()) {
+        let current = read_optional(&path)?;
+        if current.as_deref() != Some(text.as_str()) {
+            if current
+                .as_deref()
+                .is_some_and(|raw| !claude_sessions::owns_replica_records(raw, key))
+            {
+                return Err(Error::unsupported(
+                    "claude",
+                    "rewrite a session with native entries",
+                ));
+            }
             self.overwrite(&path, &text)?;
         }
         set_mtime(&path, session.updated_ms);
@@ -185,6 +198,108 @@ impl ClaudeAdapter {
         self.claude_home.join("projects")
     }
 
+    fn project_dirs(&self) -> Result<Vec<PathBuf>> {
+        let root = self.projects_dir();
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut dirs = read_dir_paths(&root)?;
+        dirs.retain(|path| path.is_dir());
+        dirs.sort();
+        Ok(dirs)
+    }
+
+    fn memory_origins_path(&self) -> PathBuf {
+        let home = self
+            .claude_home
+            .canonicalize()
+            .unwrap_or_else(|_| self.claude_home.clone());
+        let profile = sha_hex(home.as_os_str().as_encoded_bytes());
+        self.state_dir
+            .join("claude-memory-origins")
+            .join(format!("{profile}.json"))
+    }
+
+    fn memory_origins(&self) -> Result<MemoryOrigins> {
+        let path = self.memory_origins_path();
+        read_optional(&path)?.map_or_else(
+            || Ok(BTreeMap::new()),
+            |text| {
+                serde_json::from_str(&text)
+                    .map_err(|e| Error::Parse(format!("{}: {e}", path.display())))
+            },
+        )
+    }
+
+    fn save_memory_origins(&self, origins: &MemoryOrigins) -> Result<()> {
+        let path = self.memory_origins_path();
+        let bytes = serde_json::to_vec(origins).map_err(|e| Error::Parse(e.to_string()))?;
+        if path.exists() {
+            fsx::backup(
+                &self.backups,
+                &self.state_dir,
+                &self.id(),
+                &self.state_dir,
+                &path,
+            )?;
+        }
+        fsx::atomic_write(&path, &bytes)
+    }
+
+    /// Record replica identity before changing any agent-readable memory.
+    pub fn reconcile_memory_origins(&self) -> Result<()> {
+        if self.blocked.contains(&Kind::Memory) {
+            return Ok(());
+        }
+        let mut origins = self.memory_origins()?;
+        let mut present = BTreeSet::new();
+        let mut edits = Vec::new();
+        let mut changed = false;
+        for project in self.project_dirs()? {
+            let dir = file_name(&project);
+            let memory = project.join("memory");
+            let linked = project.is_symlink() || memory.is_symlink();
+            for path in memory_files(&memory)? {
+                let id = format!("{dir}/{}", file_name(&path));
+                present.insert(id.clone());
+                if linked || path.is_symlink() {
+                    continue;
+                }
+                let Ok(raw) = String::from_utf8(fs::read(&path).map_err(|e| Error::io(&path, e))?)
+                else {
+                    continue;
+                };
+                let Some(doc) = parse_doc(&raw) else { continue };
+                let Some((line, origin)) = field_line(&doc.fm, ORIGIN_KEY, true) else {
+                    continue;
+                };
+                if origin.split_once(':').is_none() {
+                    continue;
+                }
+                if origins.get(&id) != Some(&origin) {
+                    origins.insert(id, origin);
+                    changed = true;
+                }
+                let start = raw.split_inclusive('\n').next().map_or(0, str::len)
+                    + doc.fm[..line].iter().map(String::len).sum::<usize>();
+                let end = start + doc.fm[line].len();
+                edits.push((path, raw, start..end));
+            }
+        }
+        let count = origins.len();
+        origins.retain(|id, _| present.contains(id));
+        if changed || count != origins.len() {
+            self.save_memory_origins(&origins)?;
+        }
+        for (path, mut raw, line) in edits {
+            if !path.is_symlink() && read_optional(&path)?.as_ref() == Some(&raw) {
+                raw.replace_range(line, "");
+                self.overwrite(&path, &raw)?;
+            }
+        }
+        Ok(())
+    }
+
     fn collect(&self) -> Result<Scan> {
         let mut scan = Scan {
             items: Vec::new(),
@@ -195,6 +310,11 @@ impl ClaudeAdapter {
             Vec::new()
         } else {
             self.project_cwds()?
+        };
+        let origins = if projects.is_empty() {
+            MemoryOrigins::new()
+        } else {
+            self.memory_origins()?
         };
         for (dir, cwd) in projects {
             let mem = self.projects_dir().join(&dir).join("memory");
@@ -227,7 +347,9 @@ impl ClaudeAdapter {
                         .push((native_id, "no parsable frontmatter with name".into()));
                     continue;
                 };
-                let replica_of = field(&doc.fm, ORIGIN_KEY, true).and_then(|v| {
+                let origin =
+                    field(&doc.fm, ORIGIN_KEY, true).or_else(|| origins.get(&native_id).cloned());
+                let replica_of = origin.and_then(|v| {
                     let (agent, id) = v.split_once(':')?;
                     Some(ItemKey {
                         origin: AgentId::new(agent),
@@ -270,16 +392,8 @@ impl ClaudeAdapter {
     }
 
     fn project_cwds(&self) -> Result<Vec<(String, std::result::Result<PathBuf, String>)>> {
-        let root = self.projects_dir();
-        if !root.is_dir() {
-            return Ok(Vec::new());
-        }
-        let mut dirs: Vec<PathBuf> = read_dir_paths(&root)?
+        self.project_dirs()?
             .into_iter()
-            .filter(|p| p.is_dir())
-            .collect();
-        dirs.sort();
-        dirs.into_iter()
             .map(|d| {
                 let name = file_name(&d);
                 let cwd = match project_cwd(&d)? {
@@ -430,18 +544,31 @@ impl ClaudeAdapter {
         if path.exists() {
             return Err(Error::Exists(format!("{dir}/{file}")));
         }
-        self.overwrite(&path, &render(&frontmatter(item, None), &item.body))?;
+        let native_id = format!("{dir}/{file}");
+        let mut origins = self.memory_origins()?;
+        if origins.remove(&native_id).is_some() {
+            self.save_memory_origins(&origins)?;
+        }
+        self.overwrite(&path, &render(&frontmatter(item), &item.body))?;
         self.update_index(&mem, &file, &item.name, &item.description)?;
-        Ok((format!("{dir}/{file}"), path))
+        Ok((native_id, path))
     }
 
-    fn find_replica(&self, mem: &Path, marker: &str) -> Result<Option<PathBuf>> {
+    fn find_replica(
+        &self,
+        dir: &str,
+        mem: &Path,
+        marker: &str,
+        origins: &MemoryOrigins,
+    ) -> Result<Option<PathBuf>> {
         for path in memory_files(mem)? {
             let Some(text) = read_optional(&path)? else {
                 continue;
             };
+            let native_id = format!("{dir}/{}", file_name(&path));
             if parse_doc(&text)
                 .and_then(|d| field(&d.fm, ORIGIN_KEY, true))
+                .or_else(|| origins.get(&native_id).cloned())
                 .is_some_and(|v| v == marker)
             {
                 return Ok(Some(path));
@@ -454,6 +581,13 @@ impl ClaudeAdapter {
 impl Adapter for ClaudeAdapter {
     fn id(&self) -> AgentId {
         AgentId::new("claude")
+    }
+
+    fn finish(&self) -> Result<Vec<(String, String)>> {
+        if !self.blocked.contains(&Kind::Instruction) {
+            self.instructions.reconcile()?;
+        }
+        Ok(Vec::new())
     }
 
     /// A session older than the retention minus a day would be deleted by Claude soon after it is
@@ -502,6 +636,82 @@ impl Adapter for ClaudeAdapter {
         }
     }
 
+    fn can_append_session(&self, target: &Observed, turns: &[Turn]) -> bool {
+        let id = &target.item.name;
+        self.sessions.is_some()
+            && id.len() == 36
+            && id.bytes().enumerate().all(|(i, c)| {
+                if matches!(i, 8 | 13 | 18 | 23) {
+                    c == b'-'
+                } else {
+                    c.is_ascii_hexdigit()
+                }
+            })
+            && !turns.iter().any(|turn| turn.role == Role::Summary)
+    }
+
+    fn append_session(&self, target: &Observed, item: &Item) -> Result<()> {
+        let unsupported = |reason| Error::unsupported("claude", reason);
+        let current = Session::from_body(&target.item.body)
+            .ok_or_else(|| unsupported("invalid target session"))?;
+        let head =
+            Session::from_body(&item.body).ok_or_else(|| unsupported("invalid continuation"))?;
+        let turns = head
+            .appended_turns(&current)
+            .filter(|turns| self.can_append_session(target, turns))
+            .ok_or_else(|| unsupported("append requires compatible message turns"))?;
+        let root = self
+            .projects_dir()
+            .canonicalize()
+            .map_err(|_| unsupported("Claude project directory is missing"))?;
+        let path = target
+            .path
+            .canonicalize()
+            .map_err(|_| unsupported("target transcript is missing"))?;
+        if !path.starts_with(&root)
+            || !fs::metadata(&path).is_ok_and(|meta| meta.len() <= MAX_SOURCE_BYTES)
+        {
+            return Err(unsupported(
+                "the target transcript is outside the project or exceeds the size limit",
+            ));
+        }
+        let raw = fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+        let valid = claude_sessions::parse(&raw, &current.id, current.updated_ms)
+            .session
+            .is_some_and(|session| session.hash() == current.hash());
+        if !valid {
+            return Err(unsupported("target transcript changed after planning"));
+        }
+        let suffix = claude_sessions::continuation(&raw, &current, turns)
+            .ok_or_else(|| unsupported("target transcript has no native conversation leaf"))?;
+        if (raw.len() + suffix.len()) as u64 > MAX_SOURCE_BYTES {
+            return Err(unsupported(
+                "continuation exceeds the transcript size limit",
+            ));
+        }
+        let valid = claude_sessions::parse(&format!("{raw}{suffix}"), &current.id, head.updated_ms)
+            .session
+            .is_some_and(|session| {
+                session.title == current.title && head.includes(&session) && session.includes(&head)
+            });
+        if !valid {
+            return Err(unsupported(
+                "continuation changes the existing conversation",
+            ));
+        }
+        fsx::backup(
+            &self.backups,
+            &self.state_dir,
+            &self.id(),
+            &self.claude_home,
+            &target.path,
+        )?;
+        if !fsx::append_checked(&path, raw.as_bytes(), suffix.as_bytes())? {
+            return Err(unsupported("target transcript changed while appending"));
+        }
+        Ok(())
+    }
+
     fn scan(&self) -> Result<Vec<Observed>> {
         Ok(self.inspect()?.observed)
     }
@@ -540,6 +750,10 @@ impl Adapter for ClaudeAdapter {
         self.skills.report()
     }
 
+    fn project_skill_dirs(&self) -> Option<(&Path, &[PathBuf])> {
+        self.skills.project_skill_dirs()
+    }
+
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
         if item.kind == Kind::Skill {
             if let Scope::Project(cwd) = &item.scope {
@@ -559,7 +773,8 @@ impl Adapter for ClaudeAdapter {
         let dir = self.project_dir(cwd)?;
         let mem = self.projects_dir().join(&dir).join("memory");
         let marker = format!("{}:{}", key.origin, key.native_id);
-        let path = match self.find_replica(&mem, &marker)? {
+        let mut origins = self.memory_origins()?;
+        let path = match self.find_replica(&dir, &mem, &marker, &origins)? {
             Some(p) => p,
             None => {
                 let stem = slugify(&item.name);
@@ -579,10 +794,14 @@ impl Adapter for ClaudeAdapter {
         };
         let file = file_name(&path);
 
-        let fm = frontmatter(item, Some(&marker));
-        self.overwrite(&path, &render(&fm, &item.body))?;
+        let native_id = format!("{dir}/{file}");
+        if origins.get(&native_id) != Some(&marker) {
+            origins.insert(native_id.clone(), marker);
+            self.save_memory_origins(&origins)?;
+        }
+        self.overwrite(&path, &render(&frontmatter(item), &item.body))?;
         self.update_index(&mem, &file, &item.name, &item.description)?;
-        Ok((format!("{dir}/{file}"), path))
+        Ok((native_id, path))
     }
 
     fn create_original(&self, item: &Item) -> Result<(String, PathBuf)> {
@@ -640,6 +859,7 @@ impl Adapter for ClaudeAdapter {
         }
         let (dir, file) = self.split_native_id(native_id)?;
         let mem = self.projects_dir().join(dir).join("memory");
+        let mut origins = self.memory_origins()?;
         fsx::remove_with_backup(
             &self.backups,
             &self.state_dir,
@@ -647,6 +867,9 @@ impl Adapter for ClaudeAdapter {
             &self.claude_home,
             &mem.join(file),
         )?;
+        if origins.remove(native_id).is_some() {
+            self.save_memory_origins(&origins)?;
+        }
         self.drop_index_line(&mem, file)
     }
 }
@@ -800,21 +1023,14 @@ fn parse_doc(text: &str) -> Option<Doc> {
     None
 }
 
-/// Nested frontmatter of a memory file; the replica marker is present only on replicas.
-fn frontmatter(item: &Item, marker: Option<&str>) -> String {
+fn frontmatter(item: &Item) -> String {
     let mut fm = format!(
         "name: {}\ndescription: {}\n",
         quote(&item.name),
         quote(&item.description)
     );
-    if item.category.is_some() || marker.is_some() {
-        fm.push_str("metadata:\n");
-    }
     if let Some(c) = &item.category {
-        fm.push_str(&format!("  type: {}\n", quote(c)));
-    }
-    if let Some(m) = marker {
-        fm.push_str(&format!("  {ORIGIN_KEY}: {}\n", quote(m)));
+        fm.push_str(&format!("metadata:\n  type: {}\n", quote(c)));
     }
     fm
 }
@@ -849,8 +1065,12 @@ fn kv(line: &str, key: &str) -> Option<String> {
 
 /// Top-level key, or a key nested one level under `metadata:` when `nested`.
 fn field(fm: &[String], key: &str, nested: bool) -> Option<String> {
+    field_line(fm, key, nested).map(|(_, value)| value)
+}
+
+fn field_line(fm: &[String], key: &str, nested: bool) -> Option<(usize, String)> {
     let mut in_meta = false;
-    for raw in fm {
+    for (line, raw) in fm.iter().enumerate() {
         let l = raw.trim_end_matches(['\n', '\r']);
         if l.trim().is_empty() || l.trim_start().starts_with('#') {
             continue;
@@ -858,14 +1078,14 @@ fn field(fm: &[String], key: &str, nested: bool) -> Option<String> {
         if l.starts_with([' ', '\t']) {
             if nested && in_meta {
                 if let Some(v) = kv(l.trim_start(), key) {
-                    return Some(v);
+                    return Some((line, v));
                 }
             }
         } else {
             in_meta = l.trim_end() == "metadata:";
             if !nested {
                 if let Some(v) = kv(l, key) {
-                    return Some(v);
+                    return Some((line, v));
                 }
             }
         }
@@ -1411,6 +1631,50 @@ mod tests {
     }
 
     #[test]
+    fn replica_origin_stays_outside_native_memory_and_is_cleared_on_delete() {
+        let f = fx();
+        f.home.add_project(Path::new("/w"));
+        let origin = key("pi", "source/note.md");
+        let note = item("/w", "Project note", "Guidance", Some("project"), "Body");
+        let (id, path) = f.adapter.write_replica(&origin, &note).unwrap();
+        let native = fs::read_to_string(&path).unwrap();
+        assert!(!native.contains(ORIGIN_KEY));
+        assert_eq!(f.adapter.scan().unwrap()[0].replica_of, Some(origin));
+        f.adapter.remove(&id).unwrap();
+        assert!(!path.exists());
+        assert!(f.adapter.memory_origins().unwrap().is_empty());
+        let (new_id, _) = f.adapter.create_original(&note).unwrap();
+        assert_eq!(new_id, id);
+        assert_eq!(f.adapter.scan().unwrap()[0].replica_of, None);
+    }
+
+    #[test]
+    fn reconciliation_preserves_memory_bytes_and_replica_identity() {
+        let f = fx();
+        let dir = f.home.add_project(Path::new("/w"));
+        let path = mem(&f, &dir).join("note.md");
+        let plain = "---\r\nname: note\r\ndescription: project note\r\nmetadata:\r\n  type: project\r\n  modified: 42\r\n---\r\n\r\nA note with no final newline";
+        let marked = plain.replace(
+            "  modified:",
+            "  nativemem_origin: pi:source/note.md\r\n  modified:",
+        );
+        fs::write(&path, &marked).unwrap();
+        let source = key("pi", "source/note.md");
+        assert_eq!(
+            f.adapter.scan().unwrap()[0].replica_of,
+            Some(source.clone())
+        );
+        assert!(!f.adapter.memory_origins_path().exists());
+        f.adapter.reconcile_memory_origins().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), plain);
+        let backup = backup_of(&f, &format!("projects/{dir}/memory/note.md"));
+        assert_eq!(fs::read_to_string(&backup).unwrap(), marked);
+        assert_eq!(f.adapter.scan().unwrap()[0].replica_of, Some(source));
+        f.adapter.reconcile_memory_origins().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), plain);
+    }
+
+    #[test]
     fn index_description_link_does_not_collide_with_other_file_row() {
         let f = fx();
         let dir = f.home.add_project(Path::new("/w"));
@@ -1753,7 +2017,7 @@ mod tests {
     }
 
     #[test]
-    fn instruction_replica_creates_claude_md_with_only_the_region() {
+    fn instruction_replica_creates_claude_md_as_plain_markdown() {
         let f = fx();
         let (id, path) = f
             .adapter
@@ -1761,9 +2025,8 @@ mod tests {
             .unwrap();
         assert_eq!(id, "CLAUDE.md#codex:AGENTS.md#a");
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with("<!-- nativemem:instructions:begin -->\n"));
-        assert!(text.ends_with("<!-- nativemem:instructions:end -->\n"));
-        assert!(!f.state.join("backups").exists());
+        assert_eq!(text, "## A\n\nbody\n");
+        assert!(!f.state.join("backups/T/claude/CLAUDE.md").exists());
         f.adapter.remove(&id).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "");
         assert!(f.state.join("backups/T/claude/CLAUDE.md").is_file());

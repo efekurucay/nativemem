@@ -34,9 +34,9 @@ agent can act on this repo without re-deriving facts.
 | `wiki/architecture/ci.md` | GitHub Actions workflows, runners, what is best-effort and what runs only locally |
 | `wiki/architecture/compatibility.md` | Compatibility watch: probes, status, `compat.json`, gating, `doctor`, prompt, notifications |
 | `wiki/architecture/safety.md` | Backups, atomic writes, mass-delete guard, lock, no writes in git repos, secrets, test isolation, staged rollout |
-| `wiki/kinds/memory.md` | Project memory entries: model, stores, markers, write-back |
+| `wiki/kinds/memory.md` | Project memory entries: stores, native Codex import, markers, write-back |
 | `wiki/kinds/instruction-sections.md` | Global instruction files as one item per `## ` section |
-| `wiki/kinds/skills.md` | Skills: manifest hash, identity without a marker, adoption, visible roots, atomic directory swap |
+| `wiki/kinds/skills.md` | Skills: manifest hash, identity without a marker, shared native project roots, atomic directory swap |
 | `wiki/kinds/sessions.md` | Chat sessions: neutral model, snapshot policy, markers, tool rendering, window flags |
 | `wiki/agents/claude-code.md` | Claude Code locations, formats, quirks |
 | `wiki/agents/codex.md` | Codex locations, formats, rollouts, thread rows, quirks |
@@ -51,10 +51,10 @@ agent can act on this repo without re-deriving facts.
 | `wiki/decisions/no-shared-store.md` | Decision: there is no shared store |
 | `wiki/decisions/native-flow-only.md` | Decision: only files and formats the agents already read, plus one owned MCP entry; agent databases are written only for Codex thread rows and OpenCode session rows |
 | `wiki/decisions/mcp-hub.md` | Decision: one MCP hub with one `nativemem` entry per agent instead of copying MCP configs |
-| `wiki/decisions/session-snapshot-policy.md` | Decision: sessions are snapshots, deletes never propagate |
+| `wiki/decisions/session-snapshot-policy.md` | Decision: session continuations refresh untouched copies or append to compatible native sessions |
 | `wiki/decisions/skills-mirror-without-shared-store.md` | Decision: skills are mirrored as real copies in each agent's own directory |
 | `wiki/decisions/instruction-sections-as-items.md` | Decision: one `## ` section is one item |
-| `wiki/decisions/routing-block-for-agents-without-memory.md` | Decision: a marked block in the global instruction file points at per-project indexes |
+| `wiki/decisions/routing-block-for-agents-without-memory.md` | Decision: project memory is independent of global instructions |
 | `wiki/decisions/codex-session-writes-gated.md` | Decision: Codex session writes are guarded by the schema probes and always carry a thread row |
 | `wiki/decisions/opencode-session-writes-gated.md` | Decision: OpenCode session writes are guarded by the schema probes and marked by a key inside the message JSON |
 | `wiki/_templates/PAGE.md` | Skeleton for a new page |
@@ -89,4 +89,4 @@ agent can act on this repo without re-deriving facts.
 
 ## Last updated
 
-2026-11-11
+2026-11-22

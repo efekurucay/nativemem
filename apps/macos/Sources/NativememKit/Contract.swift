@@ -203,8 +203,13 @@ public struct SessionTurn: Codable, Hashable, Sendable {
     public var text: String
     public var tsMs: Int64
 
-    /// "You" or "Assistant".
-    public var speaker: String { role == "user" ? "You" : "Assistant" }
+    public var speaker: String {
+        switch role {
+        case "user": "You"
+        case "summary": "Conversation summary"
+        default: "Assistant"
+        }
+    }
 }
 
 /// One session with its turns, as `session show --json` prints it.

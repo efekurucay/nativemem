@@ -39,26 +39,25 @@ originals: a section can originate in any agent.
 
 ## Replicas
 
-- Replicas live in one region at the end of the file between `<!-- nativemem:instructions:begin -->`
-  and `<!-- nativemem:instructions:end -->`.
-- Each replica is a marker line `<!-- nativemem origin=<agent> id=<encoded native_id> -->`, then
-  `## <heading>`, a blank line and the body. The id is percent-encoded for characters outside
-  `[A-Za-z0-9._/-]` (test `replica_ids_with_odd_characters_round_trip`).
-- Replicas are sorted by origin and native id. The region is created with the first replica and
-  removed with the last, together with the blank line the tool added before it (test
-  `region_is_created_sorted_updated_and_removed_with_its_blank_line`).
-- Managed regions are excluded from original detection: the instruction region and the routing block
-  (`<!-- nativemem:begin -->` to `<!-- nativemem:end -->`). A block's own `## ` heading is not a
-  section (test `managed_regions_are_not_sections_and_end_a_section`). An unterminated region is an
-  error, not a guess.
-- Bytes outside the region are never changed by replica writes (test
-  `rewrite_body_keeps_every_other_byte`).
+- A replica is ordinary Markdown: a `## <heading>`, a blank line and its body. New copies are
+  appended to the receiving agent's global file. Identity stays in
+  `<state dir>/instruction-origins/<agent>/<profile hash>.json`. The state contains section
+  fingerprints and source ids, and stores no instruction text.
+- The scanner matches unchanged sections by heading and body fingerprints, then matches a unique
+  heading or body to recognize an edit. An ambiguous match stops the scan before planning any
+  deletion. Identical sections can use their relative order when the entire matching group has
+  the same size.
+- Full apply adopts replica identities from inline synchronization comments, backs up the native
+  file, and removes the comments while preserving the preamble, headings and bodies. The dry run
+  and the project-scoped session-only apply leave the native instructions alone.
+- Before replacing the file, the writer records the file hashes and identities for both sides.
+  The file hash selects the correct identities if a run stops during the write.
+- Explicit edits and deletes touch the selected section. Other rule text stays in place.
 
 ## Creating a section
 
 - `InstructionFile::create_original` (CLI `add --kind instruction`) appends `## <description>`, a
-  blank line and the body as a new user section, before the first managed region (the routing block
-  or the instruction region) and at the end of the file when there is none. One blank line separates
+  blank line and the body as a new user section, before the first replica or at the end of the file. One blank line separates
   it from what precedes and follows it; every byte outside the inserted text stays identical. A
   missing file is created. Tests: `insert_section_goes_before_the_first_managed_region_and_keeps_every_other_byte`,
   `insert_section_without_a_region_appends_with_one_blank_line`.
@@ -85,7 +84,7 @@ originals: a section can originate in any agent.
 ## Interaction with agents' own loading
 
 - OpenCode reads `~/.claude/CLAUDE.md` only while its own global `AGENTS.md` is absent. Creating that
-  file replaces the fallback; the synced region carries the Claude Code sections over. See
+  file replaces the fallback; the synced Markdown sections carry the Claude Code sections over. See
   `wiki/agents/opencode.md`.
 - Pi loads the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` in
   each directory, so an `AGENTS.override.md` in its home shadows the synced `AGENTS.md`. See
@@ -103,17 +102,17 @@ originals: a section can originate in any agent.
 
 ## Rules
 
-- MUST: Never modify the preamble or any byte outside the managed regions and the edited section.
+- MUST: Never modify the preamble or any byte outside the edited section and its separator.
 - MUST: Keep the heading as identity; never rename a section through a replica.
 - MUST: Back up the instruction file before every rewrite.
 - MUST: Create a section only through `create_original`, which refuses a taken id with `Error::Exists`.
-- SHOULD: Treat a parse error on an unterminated region as a stop, not something to repair.
+- SHOULD: Stop on ambiguous replica identity or incomplete synchronization markup.
 
 ## Verification checklist
 
 - [ ] A new instruction file path is added to the table and to the agent page
 - [ ] Round-trip and byte-preservation tests exist for a new adapter
-- [ ] The marker format matches `marker` in `crates/core/src/adapters/sections.rs`
+- [ ] Native files contain ordinary instruction sections and replica identity stays in the state directory
 
 ## Related docs
 
@@ -123,4 +122,4 @@ originals: a section can originate in any agent.
 
 ## Last updated
 
-2026-11-11
+2026-11-22

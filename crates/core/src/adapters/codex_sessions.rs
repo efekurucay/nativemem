@@ -4,11 +4,16 @@
 //! carries this tool's `nativemem_origin`, or Codex's import marker or import-ledger record; the
 //! latter map to the Claude session they were imported from.
 
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::codex_app_server::APPENDED_MESSAGE_ID;
+use super::codex_history::LEGACY_TURN_ID;
 use super::codex_imports;
 use super::codex_rollout::{ORIGIN_KEY, TITLE_KEY};
 use crate::error::{Error, Result};
@@ -25,6 +30,7 @@ const MAX_DEPTH: usize = 4;
 pub struct CodexSessions {
     home: PathBuf,
     options: SessionOptions,
+    projection_paths: RefCell<BTreeSet<PathBuf>>,
 }
 
 /// What one rollout holds.
@@ -39,7 +45,15 @@ pub struct Parsed {
 
 impl CodexSessions {
     pub fn new(home: PathBuf, options: SessionOptions) -> Self {
-        CodexSessions { home, options }
+        CodexSessions {
+            home,
+            options,
+            projection_paths: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    pub(super) fn projection_paths(&self) -> BTreeSet<PathBuf> {
+        self.projection_paths.take()
     }
 
     pub fn scan(&self, agent: &AgentId) -> Result<SessionScan> {
@@ -94,6 +108,9 @@ impl CodexSessions {
                 }
             }
             if parsed.has_cwd {
+                if text.contains(APPENDED_MESSAGE_ID) {
+                    self.projection_paths.borrow_mut().insert(path.clone());
+                }
                 out.observed
                     .push(parsed.session.observed(agent, native_id, path, replica_of));
             } else {
@@ -103,6 +120,35 @@ impl CodexSessions {
         }
         Ok(out)
     }
+}
+
+/// Read only rollout headers so project skills can be discovered without loading conversations.
+pub(super) fn project_dirs(home: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_rollouts(&home.join("sessions"), 0, &mut files)?;
+    let mut projects = BTreeSet::new();
+    for path in files {
+        let Ok(file) = fs::File::open(path) else {
+            continue;
+        };
+        let mut header = Vec::new();
+        if BufReader::new(file.take(64 * 1024))
+            .read_until(b'\n', &mut header)
+            .is_err()
+        {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_slice::<Value>(&header) {
+            if value["type"] == "session_meta" {
+                if let Some(cwd) = value["payload"]["cwd"].as_str().map(PathBuf::from) {
+                    if cwd.is_absolute() {
+                        projects.insert(cwd);
+                    }
+                }
+            }
+        }
+    }
+    Ok(projects.into_iter().collect())
 }
 
 /// The Claude session an import-ledger `source_path` names: `<project dir>/<file>`.
@@ -172,11 +218,44 @@ fn item_text(item: &Value) -> String {
         .unwrap_or_default()
 }
 
+pub(super) fn is_idle(text: &str) -> bool {
+    text.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|record| {
+            if record["type"] != "event_msg" {
+                return None;
+            }
+            match record["payload"]["type"].as_str()? {
+                "task_started" => Some(false),
+                "task_complete" | "turn_aborted" => Some(true),
+                _ => None,
+            }
+        })
+        .unwrap_or(false)
+}
+
+/// Session replicas rendered by this adapter have no native turn contexts.
+pub(super) fn has_local_turn(text: &str) -> bool {
+    text.lines()
+        .filter(|line| line.contains("\"turn_context\"") || line.contains("\"task_started\""))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|record| {
+            record["type"] == "turn_context"
+                || (record["type"] == "event_msg"
+                    && record["payload"]["type"] == "task_started"
+                    && !record["payload"]["turn_id"].as_str().is_some_and(|id| {
+                        id.starts_with("external-import-turn-") || id.starts_with(LEGACY_TURN_ID)
+                    }))
+        })
+}
+
 /// Parses a rollout. `None` for rollouts without `session_meta`.
 pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
     let mut meta: Option<Value> = None;
     let mut builder = TurnBuilder::default();
     let mut last_ts = mtime_ms;
+    let mut display_only = false;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -192,6 +271,19 @@ pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
             continue;
         };
         let kind = payload.get("type").and_then(Value::as_str);
+        if v["type"] == "event_msg" {
+            if kind == Some("task_started") {
+                display_only = payload["turn_id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with(LEGACY_TURN_ID));
+            }
+            if display_only {
+                if kind == Some("task_complete") {
+                    display_only = false;
+                }
+                continue;
+            }
+        }
         let mut text_turn = |role: Role, text: String| {
             let dup = builder
                 .turns
@@ -203,6 +295,11 @@ pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
         };
         match (v.get("type").and_then(Value::as_str), kind) {
             (Some("session_meta"), _) => meta = meta.or_else(|| Some(payload.clone())),
+            (Some("compacted"), _) => {
+                if let Some(summary) = payload["message"].as_str() {
+                    builder.text(Role::Summary, summary, last_ts);
+                }
+            }
             (Some("event_msg"), Some("user_message")) => {
                 let msg = payload.get("message").and_then(Value::as_str);
                 text_turn(Role::User, msg.unwrap_or_default().to_string());
@@ -218,6 +315,18 @@ pub fn parse(text: &str, thread_id: &str, mtime_ms: i64) -> Option<Parsed> {
                     Some("AgentMessage") => text_turn(Role::Assistant, item_text(item)),
                     _ => {}
                 }
+            }
+            (Some("response_item"), Some("message"))
+                if payload["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with(APPENDED_MESSAGE_ID)) =>
+            {
+                let role = match payload["role"].as_str() {
+                    Some("user") => Role::User,
+                    Some("assistant") => Role::Assistant,
+                    _ => continue,
+                };
+                builder.text(role, item_text(payload), last_ts);
             }
             (Some("response_item"), Some("function_call")) => {
                 let name = payload
@@ -306,6 +415,51 @@ mod tests {
             p[k] = v.clone();
         }
         line("2026-11-10T09:00:00.000Z", "session_meta", p)
+    }
+
+    #[test]
+    fn reads_only_appended_response_messages_with_a_tracked_id() {
+        let ts = "2026-11-10T09:00:01.000Z";
+        let mut raw = meta(json!({}));
+        raw += &line(
+            ts,
+            "event_msg",
+            json!({"type": "user_message", "message": "original"}),
+        );
+        raw += &line(
+            ts,
+            "response_item",
+            json!({"type": "message", "id": "msg_regular", "role": "user", "content": [{"type": "input_text", "text": "original"}]}),
+        );
+        raw += &line(
+            ts,
+            "response_item",
+            json!({"type": "message", "id": "msg_1d961050-4d1b-8123-8abc-def012345678", "role": "user", "content": [{"type": "input_text", "text": "continuation"}]}),
+        );
+        raw += &line(
+            ts,
+            "response_item",
+            json!({"type": "message", "id": "msg_1d961050-4d1b-8456-8abc-def012345678", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}),
+        );
+        raw += &line(
+            ts,
+            "response_item",
+            json!({"type": "message", "id": "msg_regular", "role": "user", "content": [{"type": "input_text", "text": "private environment"}]}),
+        );
+        let parsed = parse(&raw, "tid", 5).unwrap();
+        assert_eq!(
+            parsed
+                .session
+                .turns
+                .iter()
+                .map(|t| (t.role, t.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Role::User, "original"),
+                (Role::User, "continuation"),
+                (Role::Assistant, "answer")
+            ]
+        );
     }
 
     #[test]

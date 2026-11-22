@@ -1,8 +1,8 @@
 //! Agents that only read a global `AGENTS.md` (OpenCode, Pi): instruction sections, and project
-//! memory stored below `<dir>/nativemem/memory/` and announced by a routing block in that file.
+//! memory stored below `<dir>/nativemem/memory/`.
 //! An item file without a marker is an original of the agent.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::compat::Check;
 use crate::error::{Error, Result};
@@ -51,7 +51,6 @@ impl AgentsFileAdapter {
                 backups.clone(),
                 dir.join(MEMORY_DIR),
                 dir.clone(),
-                dir.join(INSTRUCTION_FILE),
             ),
             skills: {
                 let s = SkillStore::new(
@@ -185,6 +184,13 @@ impl Adapter for AgentsFileAdapter {
         self.agent.clone()
     }
 
+    fn finish(&self) -> Result<Vec<(String, String)>> {
+        if !self.blocked.contains(&Kind::Instruction) {
+            self.instructions.reconcile()?;
+        }
+        Ok(Vec::new())
+    }
+
     fn version(&self) -> Option<String> {
         match self.agent.as_str() {
             "opencode" => opencode_probes::version(self.search_path.as_deref()),
@@ -260,8 +266,25 @@ impl Adapter for AgentsFileAdapter {
         self.skills.visible_copy(native_id)
     }
 
+    fn project_skill_dirs(&self) -> Option<(&Path, &[PathBuf])> {
+        self.skills.project_skill_dirs()
+    }
+
     fn skill_report(&self) -> Result<SkillReport> {
         self.skills.report()
+    }
+
+    fn can_append_session(&self, _target: &Observed, _turns: &[crate::session::Turn]) -> bool {
+        self.sessions
+            .as_ref()
+            .is_some_and(OpencodeSessions::is_enabled)
+    }
+
+    fn append_session(&self, target: &Observed, item: &Item) -> Result<()> {
+        self.sessions
+            .as_ref()
+            .ok_or_else(|| self.unsupported("append session"))?
+            .append(target, item)
     }
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
@@ -403,8 +426,8 @@ mod tests {
                 .unwrap();
         assert_eq!(id, "AGENTS.md#claude:CLAUDE.md#a");
         assert_eq!(path, f.dir.join("AGENTS.md"));
-        assert!(text(&f).starts_with("<!-- nativemem:instructions:begin -->\n"));
-        assert!(!f.state.join("backups").exists());
+        assert_eq!(text(&f), "## A\n\na body\n");
+        assert!(!f.state.join("backups/T/pi/AGENTS.md").exists());
         let found = f.a.scan().unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].replica_of, Some(key("CLAUDE.md#a")));
@@ -456,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_replicas_live_below_the_base_with_a_routing_block() {
+    fn memory_replicas_leave_instructions_alone() {
         let f = fx();
         fs::write(f.dir.join("AGENTS.md"), "# Mine\n\n## Style\nkeep\n").unwrap();
         let (id, path) =
@@ -467,9 +490,7 @@ mod tests {
         let dir = f.dir.join("nativemem/memory").join(project);
         assert_eq!(path, dir.join("alpha.md"));
         assert!(dir.join("MEMORY.md").is_file() && dir.join("scope.json").is_file());
-        let agents = text(&f);
-        assert!(agents.starts_with("# Mine\n\n## Style\nkeep\n\n<!-- nativemem:begin -->\n"));
-        assert!(agents.contains(&format!("- /w/app → {}\n", dir.join("MEMORY.md").display())));
+        assert_eq!(text(&f), "# Mine\n\n## Style\nkeep\n");
 
         let found = f.a.scan().unwrap();
         assert_eq!(found.len(), 2);
@@ -497,9 +518,7 @@ mod tests {
             (id.as_str(), path),
             ("AGENTS.md#fresh-rule", f.dir.join("AGENTS.md"))
         );
-        let at = before
-            .find("<!-- nativemem:instructions:begin -->")
-            .unwrap();
+        let at = before.find("## A\n").unwrap();
         assert_eq!(
             text(&f),
             format!(
@@ -536,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn created_memory_is_an_original_with_index_scope_and_routing() {
+    fn created_memory_is_an_original_with_index_and_scope() {
         let f = fx();
         fs::write(f.dir.join("AGENTS.md"), "# Mine\n").unwrap();
         let mut it = memory("/w/app", "Alpha Note");
@@ -557,7 +576,7 @@ mod tests {
             fs::read_to_string(dir.join("scope.json")).unwrap(),
             "{\"cwd\":\"/w/app\"}"
         );
-        assert!(text(&f).contains(&format!("- /w/app → {}\n", dir.join("MEMORY.md").display())));
+        assert_eq!(text(&f), "# Mine\n");
 
         let found: Vec<_> = f.a.scan().unwrap();
         assert_eq!(found.len(), 1);
@@ -634,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn store_original_is_removed_with_backup_and_its_routing() {
+    fn store_original_is_removed_with_backup() {
         let f = fx();
         fs::write(f.dir.join("AGENTS.md"), "# Mine\n").unwrap();
         let (id, path) = f.a.create_original(&memory("/w/app", "alpha")).unwrap();

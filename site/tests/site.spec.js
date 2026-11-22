@@ -159,7 +159,7 @@ test("keyboard users can skip navigation and read the FAQ", async ({
   ).toBeFocused();
   await page.getByText("What actually syncs?", { exact: true }).click();
   await expect(
-    page.getByText("Project skills are implemented", { exact: false }),
+    page.getByText("OpenCode and Pi project notes are available in the manager", { exact: false }),
   ).toBeVisible();
 });
 

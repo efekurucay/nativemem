@@ -326,7 +326,8 @@ never listed), and an extra object, present on sessions only:
              { "role": "assistant", "text": "…", "ts_ms": 1794304860000 } ] }
 ```
 Reads one session from that agent's own store; it takes no lock and writes nothing. `role` is
-`user` or `assistant`; tool activity is already rendered into assistant text. Failures:
+`user`, `assistant` or `summary`. A summary marks a compaction checkpoint. Tool activity is
+already rendered into assistant text. Failures:
 `unknown_agent`, `invalid` when the id is not a session id (it does not end in `.jsonl`),
 `not_found` when the agent is not installed or holds no such session. Without `--json` it prints
 the title and a readable transcript.

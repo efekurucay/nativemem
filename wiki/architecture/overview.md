@@ -15,7 +15,7 @@ write safety in `wiki/architecture/safety.md`.
 | Piece | Role | Anchor |
 |---|---|---|
 | Adapter | One per agent (OpenCode and Pi share a generic one for `AGENTS.md`). Scans the agent's native store and writes, updates and removes entries in the agent's own format | `crates/core/src/model.rs` (`Adapter`), `crates/core/src/adapters/` |
-| Neutral model | `Item { kind, scope, name, description, category, body, source_dir }` and `Observed` (an item found on disk, with `replica_of` when it carries a marker) | `crates/core/src/model.rs` |
+| Neutral model | `Item { kind, scope, name, description, category, body, source_dir }` and `Observed` (an item found on disk, with `replica_of` when its replica identity is known) | `crates/core/src/model.rs` |
 | Ledger | SQLite file `<state dir>/ledger.db` | `crates/core/src/ledger.rs` |
 | Compatibility watch | Probes per adapter, `compat.json`, status and prompt; pauses the kinds of failing checks | `crates/core/src/compat.rs`, `wiki/architecture/compatibility.md` |
 | Engine | `plan` is pure; `apply` executes and updates the ledger. It knows nothing about formats | `crates/core/src/engine.rs` |
@@ -122,7 +122,7 @@ instruction sections (global scope) are creatable in all four agents; the defaul
 overridden). The ledger records the revision a replica was written with. A session replica with a
 lower revision is rewritten (the file is backed up first) while it is unmodified; a modified one is
 left alone. Adopted replicas are recorded at the current revision. Current values: Claude sessions
-1, Codex sessions 1, OpenCode sessions 1, Pi sessions 2, everything else 0
+2, Codex sessions 3, OpenCode sessions 2, Pi sessions 4, everything else 0
 (`SESSION_WRITER_REVISION` in the adapter files). Bump the constant whenever the written
 session format changes. Tests: `unmodified_replica_with_an_older_writer_revision_is_rewritten_once`,
 `modified_replica_with_an_older_writer_revision_is_left_alone`.
@@ -134,11 +134,11 @@ session format changes. Tests: `unmodified_replica_with_an_older_writer_revision
 | Memory | Faithful replication in both directions | Propagate, with backup | Written back to the original | `wiki/kinds/memory.md` |
 | Instruction | Faithful replication, one `## ` section per item | Propagate, with backup | Body written back; the heading is identity | `wiki/kinds/instruction-sections.md` |
 | Skill | Faithful replication of whole directories, no marker | Propagate, with backup of the directory | Written back to the origin and the others | `wiki/kinds/skills.md` |
-| Session | Snapshot: copy once, refresh while untouched | Never propagate | Never flow back | `wiki/kinds/sessions.md` |
+| Session | Copy once, refresh untouched copies, append compatible turns to native sessions | Never propagate | Keep local transcripts, report divergent continuations | `wiki/kinds/sessions.md` |
 
 ## CLI
 
-Commands: `status`, `snapshot --json`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
+Commands: `status`, `snapshot --json`, `sync` (dry run unless `--apply`; `--notify` with `--apply`; `--session-project <path>` for only one project's sessions), `doctor`, `items`,
 `delete`, `add`, `edit`, `skill show`, `session show`, `mcp serve|list|add|edit|remove|enable|disable|set-secret|delete-secret|test|login|logout|install|uninstall|status|import`
 (`wiki/architecture/hub.md`), `subagent list|add|edit|remove|run` (`wiki/architecture/hub.md`, "Subagents"), `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
 `--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
@@ -242,4 +242,4 @@ file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebr
 
 ## Last updated
 
-2026-11-11
+2026-11-22

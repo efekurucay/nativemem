@@ -19,7 +19,7 @@ use super::opencode_project::{self, Project};
 use super::sqlite_guard::{self, Stop, BUSY_TIMEOUT};
 use crate::error::{Error, Result};
 use crate::fsx::BackupSession;
-use crate::model::{AgentId, Item, ItemKey};
+use crate::model::{AgentId, Item, ItemKey, Observed};
 use crate::session::{
     clean_title, marker_text, parse_marker, result_content_text, title_from_turns,
     too_large_reason, Role, Session, SessionOptions, SessionScan, TurnBuilder, MAX_SOURCE_BYTES,
@@ -31,7 +31,7 @@ pub const DATABASE: &str = "opencode.db";
 /// have it and its readers do not use it, so it survives a lost ledger and is never shown.
 pub const MARKER_KEY: &str = "nativemem_origin";
 /// Bump when the written rows change; unmodified replicas are then rewritten.
-pub const SESSION_WRITER_REVISION: u32 = 1;
+pub const SESSION_WRITER_REVISION: u32 = 2;
 /// `version` of a replica when the installed OpenCode version cannot be found.
 const OBSERVED_VERSION: &str = "2.2.6";
 /// The agent every replica message names; OpenCode's default primary agent.
@@ -129,7 +129,7 @@ fn slug(key: &ItemKey) -> String {
 fn messages(
     session: &Session,
     id: &str,
-    marker: &str,
+    marker: Option<&str>,
     model: &Value,
     updated_ms: i64,
 ) -> Vec<Message> {
@@ -137,7 +137,9 @@ fn messages(
     let mut clock = session.created_ms.min(updated_ms);
     let mut run_open = false;
     let push = |rows: &mut Vec<Message>, kind: &'static str, ts: i64, mut data: Value| {
-        data[MARKER_KEY] = json!(marker);
+        if let Some(marker) = marker {
+            data[MARKER_KEY] = json!(marker);
+        }
         let id = message_id(id, ts, rows.len());
         rows.push(Message { id, kind, ts, data });
     };
@@ -147,6 +149,21 @@ fn messages(
             .clamp(session.created_ms.min(updated_ms), updated_ms)
             .max(clock);
         match turn.role {
+            Role::Summary => {
+                if run_open {
+                    push(&mut rows, "idle", clock, idle(clock));
+                    run_open = false;
+                }
+                push(
+                    &mut rows,
+                    "compaction",
+                    ts,
+                    json!({
+                        "status": "completed", "reason": "manual",
+                        "summary": turn.text, "time": { "created": ts },
+                    }),
+                );
+            }
             Role::User => {
                 if run_open {
                     push(&mut rows, "idle", clock, idle(clock));
@@ -195,11 +212,39 @@ fn idle(ts: i64) -> Value {
     json!({ "time": { "created": ts }, "outcome": "succeeded" })
 }
 
-/// The turns and replica marker of one session's `(type, data, time_created)` rows.
-fn parse(rows: &[(String, String, i64)]) -> (Vec<crate::session::Turn>, Option<ItemKey>) {
+/// The turns and replica marker of one session's `(id, type, data, time_created)` rows.
+fn parse(rows: &[(String, String, String, i64)]) -> (Vec<crate::session::Turn>, Option<ItemKey>) {
     let mut b = TurnBuilder::default();
     let mut origin = None;
-    for (i, (kind, data, row_ts)) in rows.iter().enumerate() {
+    let checkpoint = rows
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, (_, kind, data, ts))| {
+            if kind != "compaction" {
+                return None;
+            }
+            let v: Value = serde_json::from_str(data).ok()?;
+            (v["status"] == "completed").then_some((i, v, *ts))
+        })
+        .and_then(|(i, v, ts)| {
+            if !v["native"].is_null() {
+                return None;
+            }
+            let summary = v["summary"].as_str().filter(|s| !s.is_empty())?;
+            let boundary = v
+                .pointer("/metadata/keepID")
+                .and_then(Value::as_str)
+                .and_then(|keep| rows[..i].iter().position(|(id, ..)| id == keep))
+                .unwrap_or(i);
+            Some((boundary, summary.to_string(), ts))
+        });
+    for (i, (_, kind, data, row_ts)) in rows.iter().enumerate() {
+        if let Some((boundary, summary, ts)) = &checkpoint {
+            if *boundary == i {
+                b.text(Role::Summary, summary, *ts);
+            }
+        }
         let Ok(v) = serde_json::from_str::<Value>(data) else {
             continue;
         };
@@ -370,7 +415,7 @@ impl OpencodeSessions {
             "SELECT coalesce(sum(length(data)), 0) FROM session_message WHERE session_id = ?1",
         )?;
         let mut content = conn.prepare(
-            "SELECT type, data, time_created FROM session_message WHERE session_id = ?1 ORDER BY seq",
+            "SELECT id, type, data, time_created FROM session_message WHERE session_id = ?1 ORDER BY seq",
         )?;
         for (id, directory, title, created_ms, updated_ms) in found {
             let native_id = format!("{id}.jsonl");
@@ -381,7 +426,7 @@ impl OpencodeSessions {
                 continue;
             }
             let rows = content
-                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let (turns, origin) = parse(&rows);
             let title = match title.as_deref().filter(|t| !t.trim().is_empty()) {
@@ -434,6 +479,145 @@ impl OpencodeSessions {
         }
     }
 
+    pub(super) fn append(&self, target: &Observed, item: &Item) -> Result<()> {
+        let current = Session::from_body(&target.item.body)
+            .ok_or_else(|| Error::unsupported(AGENT, "invalid target session"))?;
+        let head = Session::from_body(&item.body)
+            .ok_or_else(|| Error::unsupported(AGENT, "invalid continuation"))?;
+        if target.path != self.db
+            || !head.includes(&current)
+            || head.turns.len() == current.turns.len()
+        {
+            return Err(Error::unsupported(
+                AGENT,
+                "the sessions do not have an append-only continuation",
+            ));
+        }
+        if self.busy.get() {
+            return Err(busy());
+        }
+        let marker = target.replica_of.as_ref().map(marker_text);
+        match self.append_rows(current, head, marker.as_deref()) {
+            Ok(()) => Ok(()),
+            Err(Stop::Busy) => {
+                self.busy.set(true);
+                Err(busy())
+            }
+            Err(Stop::Failed(e)) => Err(e),
+        }
+    }
+
+    fn append_rows(
+        &self,
+        current: Session,
+        mut head: Session,
+        marker: Option<&str>,
+    ) -> std::result::Result<(), Stop> {
+        let mut conn = Connection::open_with_flags(&self.db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(self.busy_timeout)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        sqlite_guard::backup_database(
+            &conn,
+            &self.db,
+            &self.state_dir,
+            &self.backups,
+            AGENT,
+            &|name| name == DATABASE,
+            self.busy_timeout,
+        )?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = &current.id;
+        let changed = || {
+            Stop::Failed(Error::unsupported(
+                AGENT,
+                "the session changed or is active; retry after it is idle",
+            ))
+        };
+        let row = tx
+            .query_row(
+                "SELECT directory, title, time_updated FROM session_v2
+             WHERE id = ?1 AND time_archived IS NULL AND parent_id IS NULL
+             AND coalesce(time_busy, 0) <= coalesce(time_idle, 0)",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(changed)?;
+        let mut stmt = tx.prepare(
+            "SELECT id, type, data, time_created FROM session_message WHERE session_id = ?1 ORDER BY seq"
+        )?;
+        let mut rows = stmt
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let (turns, _) = parse(&rows);
+        let title = row
+            .1
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map_or_else(|| title_from_turns(&turns), clean_title);
+        if Path::new(&row.0) != current.cwd
+            || row.2 != current.updated_ms
+            || title != current.title
+            || turns != current.turns
+        {
+            return Err(changed());
+        }
+        let max_seq: i64 = tx.query_row(
+            "SELECT max(coalesce((SELECT seq FROM event_sequence WHERE aggregate_id = ?1), -1),
+                        coalesce((SELECT max(seq) FROM session_message WHERE session_id = ?1), -1))",
+            [id],
+            |r| r.get(0),
+        )?;
+        let prefix = head.turns.drain(..current.turns.len()).collect::<Vec<_>>();
+        let updated = head.updated_ms.max(current.updated_ms);
+        head.created_ms = current.updated_ms;
+        let model = replica_model(&tx)?;
+        let new_rows = messages(&head, &format!("{id}:{max_seq}"), marker, &model, updated);
+        rows.extend(
+            new_rows
+                .iter()
+                .map(|m| (m.id.clone(), m.kind.to_string(), m.data.to_string(), m.ts)),
+        );
+        let (projected, _) = parse(&rows);
+        let expected = prefix.iter().chain(&head.turns);
+        if projected.len() != prefix.len() + head.turns.len()
+            || !projected
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| a.role == b.role && a.text == b.text)
+        {
+            return Err(Stop::Failed(Error::unsupported(
+                AGENT,
+                "the continuation would change the existing transcript",
+            )));
+        }
+        for (offset, message) in new_rows.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                params![message.id, id, message.kind, max_seq + offset as i64 + 1, message.ts, message.data.to_string()],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO event_sequence (aggregate_id, seq) VALUES (?1, ?2)
+             ON CONFLICT(aggregate_id) DO UPDATE SET seq = excluded.seq",
+            params![id, max_seq + new_rows.len() as i64],
+        )?;
+        tx.execute(
+            "UPDATE session_v2 SET time_updated = ?2, time_idle = ?2, idle_outcome = 'succeeded' WHERE id = ?1",
+            params![id, updated],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn write_rows(
         &self,
         key: &ItemKey,
@@ -482,7 +666,7 @@ impl OpencodeSessions {
             }
         }
         let model = replica_model(&tx)?;
-        let rows = messages(session, &id, &marker, &model, updated_ms);
+        let rows = messages(session, &id, Some(&marker), &model, updated_ms);
         let last_seq = rows.len() as i64 - 1;
         let now = now_ms();
         tx.execute(

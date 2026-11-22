@@ -11,8 +11,6 @@ use serde_json::{json, Value};
 use crate::model::ItemKey;
 use crate::session::{format_iso_ms, marker_text, uuid_v7, Role, Session};
 
-use super::codex_sessions::IMPORT_MARKER;
-
 /// `session_meta` values that Codex's `threads` row repeats.
 pub const CLI_VERSION: &str = "0.167.0-alpha.3.2";
 pub const SOURCE: &str = "vscode";
@@ -94,7 +92,7 @@ pub fn render(session: &Session, key: &ItemKey, thread: &str, now_ms: i64) -> St
     let mut started = 0;
     let mut chars = 0usize;
     for turn in &session.turns {
-        if turn.role == Role::User || turn_no == 0 {
+        if turn.role == Role::User || (turn_no == 0 && turn.role != Role::Summary) {
             if turn_no > 0 {
                 push(
                     "event_msg",
@@ -113,6 +111,15 @@ pub fn render(session: &Session, key: &ItemKey, thread: &str, now_ms: i64) -> St
         }
         chars += turn.text.len();
         match turn.role {
+            Role::Summary => {
+                push(
+                    "compacted",
+                    json!({
+                        "message": turn.text,
+                        "replacement_history": [message("user", "input_text", &turn.text)],
+                    }),
+                );
+            }
             Role::User => {
                 push(
                     "event_msg",
@@ -134,10 +141,6 @@ pub fn render(session: &Session, key: &ItemKey, thread: &str, now_ms: i64) -> St
             }
         }
     }
-    push(
-        "event_msg",
-        json!({ "type": "agent_message", "message": IMPORT_MARKER, "phase": null, "memory_citation": null }),
-    );
     let usage = json!({ "input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
         "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": chars.div_ceil(4) });
     push(
@@ -221,7 +224,6 @@ mod tests {
             "event_msg:task_started",
             "event_msg:user_message",
             "response_item:message",
-            "event_msg:agent_message",
             "event_msg:token_count",
             "event_msg:task_complete",
         ];
@@ -232,15 +234,14 @@ mod tests {
         assert_eq!(meta["cli_version"], "0.167.0-alpha.3.2");
         assert_eq!(meta["history_mode"], "legacy");
         assert_eq!(lines[1]["payload"]["turn_id"], "external-import-turn-1");
-        assert_eq!(lines[16]["payload"]["turn_id"], "external-import-turn-3");
-        assert_eq!(lines[16]["payload"]["completed_at"], 1_794_304_803);
+        assert_eq!(lines[15]["payload"]["turn_id"], "external-import-turn-3");
+        assert_eq!(lines[15]["payload"]["completed_at"], 1_794_304_803);
         assert_eq!(lines[4]["payload"].get("completed_at"), None);
         let stamps: Vec<&str> = lines
             .iter()
             .map(|l| l["timestamp"].as_str().unwrap())
             .collect();
         assert!(stamps.windows(2).all(|w| w[0] < w[1]), "monotonic");
-        assert_eq!(text.matches(IMPORT_MARKER).count(), 1);
         let pi = render(&s, &key("pi"), &id, 1);
         assert!(pi.lines().next().unwrap().contains("\"originator\":\"Pi\""));
     }

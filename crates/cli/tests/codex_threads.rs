@@ -163,3 +163,32 @@ fn drifted_schema_pauses_codex_sessions() {
     f.sync(true);
     assert_eq!((f.rollouts(), f.rows().len()), (0, 0));
 }
+
+#[test]
+fn session_project_applies_only_sessions_for_the_selected_directory() {
+    let f = fx();
+    ClaudeHome::new(&f.claude).add_session(
+        Path::new("/w/other"),
+        "s2",
+        Some("Unrelated"),
+        &[("user", "other project"), ("assistant", "done")],
+    );
+    let out = f.run(&["sync", "--session-project", "/w/app", "--apply", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!((f.rollouts(), f.rows().len()), (1, 1));
+    let selected = f.rows();
+    let (_, next) = f.sync(false);
+    assert_eq!(next["actions"].as_array().unwrap().len(), 1);
+    assert_eq!(f.sync(true).0, Some(0));
+    assert_eq!((f.rollouts(), f.rows().len()), (2, 2));
+
+    fs::remove_file(f.codex.join("state_5.sqlite")).unwrap();
+    CodexHome::new(&f.codex).write_state_db(5, &[]);
+    let out = f.run(&["sync", "--session-project", "/w/app", "--apply", "--json"]);
+    assert!(out.status.success());
+    assert_eq!(f.rows(), selected);
+}

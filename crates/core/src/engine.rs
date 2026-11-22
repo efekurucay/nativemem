@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::ledger::{ItemRow, Ledger, ReplicaRow};
 use crate::model::{content_hash, Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
+use crate::session::Session;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -26,6 +28,12 @@ pub enum Action {
         from: AgentId,
         item: Item,
         targets: Vec<AgentId>,
+    },
+    /// Append a compatible continuation to the same native session.
+    AppendSession {
+        key: ItemKey,
+        target: Box<Observed>,
+        item: Item,
     },
     Remove {
         key: ItemKey,
@@ -51,6 +59,7 @@ impl Action {
             Action::Adopt { item, .. } => &item.key,
             Action::Write { key, .. }
             | Action::WriteBack { key, .. }
+            | Action::AppendSession { key, .. }
             | Action::Remove { key, .. }
             | Action::Forget { key } => key,
             Action::Tombstone { replica, .. } => &replica.key,
@@ -60,9 +69,11 @@ impl Action {
     fn rank(&self) -> u8 {
         match self {
             Action::Adopt { .. } | Action::Tombstone { .. } => 0,
-            Action::Write { .. } | Action::WriteBack { .. } => 1,
-            Action::Remove { .. } => 2,
-            Action::Forget { .. } => 3,
+            Action::AppendSession { target, .. } if target.replica_of.is_none() => 1,
+            Action::AppendSession { .. } => 2,
+            Action::Write { .. } | Action::WriteBack { .. } => 3,
+            Action::Remove { .. } => 4,
+            Action::Forget { .. } => 5,
         }
     }
 
@@ -71,7 +82,9 @@ impl Action {
             Action::Adopt { name, .. }
             | Action::Remove { name, .. }
             | Action::Tombstone { name, .. } => name.clone(),
-            Action::Write { item, .. } | Action::WriteBack { item, .. } => item_label(item),
+            Action::Write { item, .. }
+            | Action::WriteBack { item, .. }
+            | Action::AppendSession { item, .. } => item_label(item),
             Action::Forget { key } => key.native_id.clone(),
         }
     }
@@ -140,6 +153,13 @@ impl fmt::Display for Action {
                 scope_label(&item.scope),
                 item.name,
                 from
+            ),
+            Action::AppendSession { target, item, .. } => write!(
+                f,
+                "~ {}  {}  {}  (append turns)",
+                target.agent,
+                scope_label(&item.scope),
+                item_label(item)
             ),
             Action::Remove {
                 agent, scope, name, ..
@@ -213,7 +233,9 @@ fn count(actions: &[Action], notes: &[Note]) -> Counts {
     for a in actions {
         match a {
             Action::Write { update: false, .. } => c.add += 1,
-            Action::Write { update: true, .. } | Action::WriteBack { .. } => c.update += 1,
+            Action::Write { update: true, .. }
+            | Action::WriteBack { .. }
+            | Action::AppendSession { .. } => c.update += 1,
             Action::Remove { .. } => c.remove += 1,
             Action::Adopt { .. } | Action::Forget { .. } | Action::Tombstone { .. } => {}
         }
@@ -323,7 +345,40 @@ fn scan_all(adapters: &[&dyn Adapter]) -> Result<Vec<Observed>> {
     for a in adapters {
         observed.extend(a.scan()?);
     }
+    let shared = discover_shared_project_skills(adapters, observed.iter())?;
+    if !shared.is_empty() {
+        observed.extend(shared);
+        observed.sort_by(|a, b| a.agent.cmp(&b.agent));
+    }
     Ok(observed)
+}
+
+pub fn discover_shared_project_skills<'a>(
+    adapters: &[&dyn Adapter],
+    observed: impl IntoIterator<Item = &'a Observed>,
+) -> Result<Vec<Observed>> {
+    let mut projects = BTreeSet::new();
+    let mut existing = BTreeSet::new();
+    for o in observed {
+        if let Scope::Project(cwd) = &o.item.scope {
+            if cwd.is_absolute() {
+                projects.insert(cwd.clone());
+            }
+        }
+        if o.item.kind == Kind::Skill {
+            existing.insert((o.agent.clone(), o.native_id.clone()));
+        }
+    }
+    let projects: Vec<_> = projects.into_iter().collect();
+    let mut shared = Vec::new();
+    for a in adapters {
+        shared.extend(
+            a.discover_shared_project_skills(&projects)?
+                .into_iter()
+                .filter(|o| existing.insert((o.agent.clone(), o.native_id.clone()))),
+        );
+    }
+    Ok(shared)
 }
 
 /// Skill copies carry no marker, so the copies of one name in several agents are one logical
@@ -389,6 +444,24 @@ pub fn plan(adapters: &[&dyn Adapter], ledger: &Ledger) -> Result<Plan> {
         if adapters.iter().any(|a| a.id() == key.origin) {
             plan_key(adapters, &originals, &replicas, ledger, &key, &mut plan)?;
         }
+    }
+    Ok(plan)
+}
+
+pub fn plan_session_project(
+    adapters: &[&dyn Adapter],
+    ledger: &Ledger,
+    project: &Path,
+) -> Result<Plan> {
+    let scope = Scope::Project(project.to_path_buf());
+    let mut observed = scan_all(adapters)?;
+    observed.retain(|item| item.item.kind == Kind::Session && item.item.scope == scope);
+    let (originals, replicas) = index(&observed);
+    let mut plan = Plan::default();
+    for key in originals.keys() {
+        plan_session(
+            adapters, &originals, &replicas, ledger, key, &scope, &mut plan,
+        )?;
     }
     Ok(plan)
 }
@@ -564,6 +637,32 @@ fn plan_key(
         conflict(plan, "edited on both sides");
         return Ok(());
     }
+    if let (Kind::Skill, Scope::Project(cwd)) = (kind, &scope) {
+        // Count the roots already on disk and those earlier targets will write in this plan.
+        let mut roots: BTreeSet<PathBuf> = std::iter::once(orig)
+            .chain(sides.iter().filter_map(|s| s.obs))
+            .filter_map(|o| {
+                o.path
+                    .parent()?
+                    .strip_prefix(cwd)
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
+            .collect();
+        absent.retain(|agent| {
+            let Some((owned, readable)) = adapters
+                .iter()
+                .find(|a| a.id() == **agent)
+                .and_then(|a| a.project_skill_dirs())
+            else {
+                return true;
+            };
+            if readable.iter().any(|root| roots.contains(root)) {
+                return false;
+            }
+            roots.insert(owned.to_path_buf())
+        });
+    }
     if let Some(c) = changed.first() {
         // The editing side is also a target: re-running its `write_replica` is
         // idempotent for the file content (write_if_changed skips) but regenerates
@@ -635,9 +734,8 @@ fn plan_key(
     Ok(())
 }
 
-/// Snapshot policy: a replica is created once per target agent and refreshed only while it is
-/// unmodified and the original has changed. Nothing ever flows back to the original, and a
-/// missing original or a replica the user deleted never causes a removal or a recreation.
+/// An appended continuation can refresh untouched snapshots. Divergent branches and edited
+/// transcripts stay on disk. Only adapters that support native append can extend the original.
 fn plan_session(
     adapters: &[&dyn Adapter],
     originals: &BTreeMap<ItemKey, &Observed>,
@@ -650,23 +748,86 @@ fn plan_session(
     let Some(orig) = originals.get(key).copied() else {
         return Ok(());
     };
-    let cur = content_hash(&orig.item);
-    let grown = ledger.get_item(key)?.is_some_and(|row| row.hash != cur);
+    let original = Session::from_body(&orig.item.body);
+    let cur = original
+        .as_ref()
+        .map_or_else(|| content_hash(&orig.item), Session::hash);
+    let base = ledger.get_item(key)?;
+    let grown = base.as_ref().is_some_and(|row| row.hash != cur);
+    let rows: BTreeMap<_, _> = ledger
+        .list_replicas(key)?
+        .into_iter()
+        .map(|row| (row.agent.clone(), row))
+        .collect();
+    let mut continuation = None;
+    if let Some(mut original) = original {
+        for (agent, row) in &rows {
+            let Some(replica) = replicas.get(&(key.clone(), agent.clone())) else {
+                continue;
+            };
+            if row.hash.is_empty() || row.replica_native_id != replica.native_id {
+                continue;
+            }
+            let Some(history) = Session::from_body(&replica.item.body) else {
+                continue;
+            };
+            let extends_original =
+                history.turns.len() > original.turns.len() && history.includes(&original);
+            let extends_previous = grown
+                && base
+                    .as_ref()
+                    .is_some_and(|base| history.appends_to_hash(&base.hash));
+            if !(extends_original || extends_previous)
+                || (history.hash() != row.hash && !history.appends_to_hash(&row.hash))
+            {
+                continue;
+            }
+            let head = continuation.as_ref().unwrap_or(&original);
+            if history.includes(head) && history.turns.len() > head.turns.len() {
+                continuation = Some(history);
+            } else if !head.includes(&history) {
+                plan.notes.push(Note::Conflict {
+                    key: key.clone(),
+                    reason: "session continued independently in more than one agent".to_string(),
+                });
+                return Ok(());
+            }
+        }
+        if let Some(history) = continuation {
+            original.turns = history.turns;
+            original.updated_ms = original.updated_ms.max(history.updated_ms);
+            continuation = Some(original);
+        }
+    }
+    let relay = continuation.as_ref().map(|session| session.to_item());
+    let tip = relay.as_ref().unwrap_or(&orig.item);
+    let head = Session::from_body(&tip.body);
     let label = item_label(&orig.item);
     for adapter in adapters {
         let agent = adapter.id();
-        if agent == key.origin
-            || !adapter.supports(Kind::Session, scope)
-            || !adapter.accepts(&orig.item)
-        {
+        if !adapter.supports(Kind::Session, scope) || !adapter.accepts(tip) {
+            continue;
+        }
+        if agent == key.origin {
+            if continuation.is_some()
+                && Session::from_body(&orig.item.body)
+                    .and_then(|copy| head.as_ref()?.appended_turns(&copy))
+                    .is_some_and(|tail| adapter.can_append_session(orig, tail))
+            {
+                plan.actions.push(Action::AppendSession {
+                    key: key.clone(),
+                    target: Box::new(orig.clone()),
+                    item: tip.clone(),
+                });
+            }
             continue;
         }
         let obs = replicas.get(&(key.clone(), agent.clone())).copied();
-        match (ledger.get_replica(key, &agent)?, obs) {
+        match (rows.get(&agent).cloned(), obs) {
             (None, None) => plan.actions.push(Action::Write {
                 key: key.clone(),
                 target: agent,
-                item: orig.item.clone(),
+                item: tip.clone(),
                 update: false,
             }),
             (None, Some(o)) => plan.actions.push(Action::Adopt {
@@ -703,12 +864,39 @@ fn plan_session(
             }
             (Some(_), None) => {}
             (Some(row), Some(o)) => {
+                if row.replica_native_id != o.native_id {
+                    continue;
+                }
+                let unchanged = content_hash(&o.item) == row.hash;
+                if let Some(tail) = Session::from_body(&o.item.body)
+                    .filter(|copy| unchanged || copy.appends_to_hash(&row.hash))
+                    .and_then(|copy| head.as_ref()?.appended_turns(&copy))
+                {
+                    if adapter.can_append_session(o, tail) {
+                        plan.actions.push(Action::AppendSession {
+                            key: key.clone(),
+                            target: Box::new(o.clone()),
+                            item: tip.clone(),
+                        });
+                        continue;
+                    }
+                }
+                if !unchanged {
+                    continue;
+                }
                 let outdated = row.revision < adapter.writer_revision(Kind::Session);
-                if (grown || outdated) && content_hash(&o.item) == row.hash {
+                let needs_write = match &continuation {
+                    Some(history) => Session::from_body(&o.item.body).is_some_and(|copy| {
+                        history.includes(&copy)
+                            && (history.turns.len() > copy.turns.len() || outdated)
+                    }),
+                    None => grown || outdated,
+                };
+                if needs_write {
                     plan.actions.push(Action::Write {
                         key: key.clone(),
                         target: agent,
-                        item: orig.item.clone(),
+                        item: tip.clone(),
                         update: true,
                     });
                 }
@@ -781,6 +969,13 @@ fn run(
             write_replica(adapter_for(adapters, target)?, ledger, key, item)?;
             touched.keys.insert(key.clone());
             touched.written.insert((key.clone(), target.clone()));
+        }
+        Action::AppendSession { key, target, item } => {
+            adapter_for(adapters, &target.agent)?.append_session(target, item)?;
+            touched.keys.insert(key.clone());
+            if target.replica_of.is_some() {
+                touched.written.insert((key.clone(), target.agent.clone()));
+            }
         }
         Action::WriteBack {
             key, item, targets, ..
@@ -874,9 +1069,11 @@ fn execute(
 ) -> Result<()> {
     // Keys with a skipped operation keep their ledger rows and their remaining removals.
     let mut blocked: BTreeSet<ItemKey> = BTreeSet::new();
+    let mut stale_sessions = BTreeSet::new();
     for action in actions {
-        if matches!(action, Action::Remove { .. } | Action::Forget { .. })
-            && blocked.contains(action.key())
+        if stale_sessions.contains(action.key())
+            || (matches!(action, Action::Remove { .. } | Action::Forget { .. })
+                && blocked.contains(action.key()))
         {
             continue;
         }
@@ -884,6 +1081,9 @@ fn execute(
             Ok(()) => report.done.push(action.clone()),
             Err(Error::Unsupported { agent, operation }) => {
                 blocked.insert(action.key().clone());
+                if matches!(action, Action::AppendSession { .. }) {
+                    stale_sessions.insert(action.key().clone());
+                }
                 report.notes.push(Note::Skipped {
                     agent: AgentId(agent),
                     label: action.label(),
@@ -1095,8 +1295,7 @@ mod tests {
         assert_eq!(r.done.len(), 1);
         let replica = f.codex_replica("alpha").unwrap();
         assert!(fs::read_to_string(replica).unwrap().contains("alpha body"));
-        let agents = f.agents_md();
-        assert!(agents.contains("nativemem:begin") && agents.contains("/w/app"));
+        assert!(!f.codex_root.join("AGENTS.md").exists());
         assert_eq!(f.ledger.list_items().unwrap().len(), 1);
     }
 
@@ -1155,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_original_removes_replica_and_routing() {
+    fn deleting_original_removes_replica() {
         let f = fx();
         f.fillers();
         let solo_dir = f.ch.add_project(Path::new("/w/solo"));
@@ -1169,13 +1368,11 @@ mod tests {
             "s",
         );
         f.sync();
-        assert!(f.agents_md().contains("/w/solo"));
+        assert!(f.codex_replica("solo").is_some());
 
         fs::remove_file(solo).unwrap();
         f.sync();
         assert!(f.codex_replica("solo").is_none());
-        let agents = f.agents_md();
-        assert!(!agents.contains("/w/solo") && agents.contains("/w/app"));
 
         for e in fs::read_dir(f.claude_mem()).unwrap() {
             let p = e.unwrap().path();
@@ -1399,8 +1596,8 @@ mod tests {
         assert_eq!(r.done.len(), 3);
         assert_eq!(f.claude_md(), RULES);
         let agents = f.agents_md();
-        assert!(agents.starts_with("<!-- nativemem:instructions:begin -->\n"));
-        assert_eq!(agents.matches("<!-- nativemem origin=claude").count(), 3);
+        assert!(agents.starts_with("## Alpha\n"));
+        assert!(!agents.contains("nativemem"));
         assert!(agents.contains("## Gamma\n\n```sh\n## not a heading\n```\ngamma end\n"));
         assert!(agents.contains("### Sub\nsub text"));
         assert_eq!(f.instruction_names(&f.codex), ["alpha*", "beta*", "gamma*"]);
@@ -1430,15 +1627,14 @@ mod tests {
         f.sync();
         assert_eq!(f.instruction_names(&f.codex), ["style"]);
         assert_eq!(f.instruction_names(&f.claude), ["style*"]);
-        assert_eq!(f.agents_md(), agents);
+        assert_eq!(f.agents_md(), "# Mine\n\n## Style\nbe terse\n\n");
         let claude = f.claude_md();
-        assert!(claude.starts_with("# Claude\n\n<!-- nativemem:instructions:begin -->\n"));
-        assert!(claude.contains("origin=codex id=AGENTS.md%23style -->\n## Style\n\nbe terse\n"));
+        assert_eq!(claude, "# Claude\n\n## Style\n\nbe terse\n");
         assert!(!claude.contains("Project memory"));
     }
 
     #[test]
-    fn routing_block_and_instruction_region_coexist_in_order() {
+    fn syncing_memory_leaves_the_instruction_region_alone() {
         let f = fx();
         let user = "# Mine\n\n## Style\nbe terse\n";
         f.write_agents_md(user);
@@ -1447,20 +1643,14 @@ mod tests {
         f.sync();
         let agents = f.agents_md();
         assert!(agents.starts_with(user));
-        let block = agents.find("<!-- nativemem:begin -->").unwrap();
-        let region = agents
-            .find("<!-- nativemem:instructions:begin -->")
-            .unwrap();
-        assert!(block < region, "{agents}");
         assert_eq!(f.instruction_names(&f.codex).len(), 4);
 
-        // Removing the memory removes the block and leaves the region intact.
         fs::remove_file(f.claude_mem().join("a.md")).unwrap();
         f.sync();
         let agents = f.agents_md();
         assert!(!agents.contains("nativemem:begin"));
-        assert!(agents.starts_with(&format!("{user}\n<!-- nativemem:instructions:begin -->")));
-        assert_eq!(agents.matches("<!-- nativemem origin=claude").count(), 3);
+        assert!(agents.starts_with(&format!("{user}\n## Alpha\n")));
+        assert!(!agents.contains("nativemem"));
     }
 
     #[test]
@@ -1537,12 +1727,8 @@ mod tests {
         f.write_claude_md(RULES);
         f.sync();
         let agents = f.agents_md();
-        let start = agents
-            .find("<!-- nativemem origin=claude id=CLAUDE.md%23beta")
-            .unwrap();
-        let end = agents
-            .find("<!-- nativemem origin=claude id=CLAUDE.md%23gamma")
-            .unwrap();
+        let start = agents.find("## Beta\n").unwrap();
+        let end = agents.find("## Gamma\n").unwrap();
         f.write_agents_md(&format!("{}{}", &agents[..start], &agents[end..]));
         f.sync();
         assert_eq!(f.instruction_names(&f.claude), ["alpha", "gamma"]);
@@ -1551,7 +1737,7 @@ mod tests {
         assert!(claude.starts_with("# Rules\n@RTK.md\n\n## Alpha\nalpha body\n\n## Gamma\n"));
         let backup = fs::read_to_string(f.state.join("backups/T/claude/CLAUDE.md")).unwrap();
         assert_eq!(backup, RULES);
-        assert_eq!(f.agents_md().matches("<!-- nativemem origin=").count(), 2);
+        assert_eq!(f.instruction_names(&f.codex), ["alpha*", "gamma*"]);
     }
 
     #[test]
@@ -1763,7 +1949,12 @@ mod tests {
         assert_eq!(r.done.len(), 9);
         for agent in ["codex", "opencode", "pi"] {
             let text = f.agents_md(agent);
-            assert_eq!(text.matches("<!-- nativemem origin=claude").count(), 3);
+            assert!(
+                text.contains("## Alpha\n")
+                    && text.contains("## Beta\n")
+                    && text.contains("## Gamma\n")
+            );
+            assert!(!text.contains("nativemem"));
         }
         assert_eq!(f.ledger.list_items().unwrap().len(), 3);
     }
@@ -1802,18 +1993,10 @@ mod tests {
         assert_eq!(f.files("claude"), claude_with_memory, "claude is only read");
         assert_ne!(claude_before, claude_with_memory);
         for (agent, base) in MEMORY_BASES {
-            let text = f.agents_md(agent);
-            assert!(
-                text.starts_with(&format!("{user}\n<!-- nativemem:begin -->\n")),
-                "{agent}"
-            );
+            assert_eq!(f.agents_md(agent), user, "{agent}");
             let file = f.replica_file(agent);
             assert!(file.starts_with(f.root(agent).join(base)));
-            let index = file.with_file_name("MEMORY.md");
-            assert!(
-                text.contains(&format!("- {CWD} → {}\n", index.display())),
-                "{agent}"
-            );
+            assert!(file.with_file_name("MEMORY.md").is_file());
             let item = fs::read_to_string(&file).unwrap();
             assert!(
                 item.starts_with("<!-- nativemem origin=claude id="),
@@ -1899,38 +2082,6 @@ mod tests {
                     "{edited} -> {agent}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn routing_block_and_instruction_region_coexist_in_pi_and_opencode() {
-        let f = tri();
-        fs::write(f.claude_root.join("CLAUDE.md"), "## Style\nbe terse\n").unwrap();
-        let original = f.add_memory("alpha body");
-        f.sync();
-        for agent in ["opencode", "pi"] {
-            let text = f.agents_md(agent);
-            let block = text.find("<!-- nativemem:begin -->").unwrap();
-            let region = text.find("<!-- nativemem:instructions:begin -->").unwrap();
-            assert!(block < region, "{agent}\n{text}");
-            assert_eq!(text.matches("<!-- nativemem:begin -->").count(), 1);
-            assert!(
-                text.ends_with("<!-- nativemem:instructions:end -->\n"),
-                "{agent}"
-            );
-        }
-        let with_both = f.agents_md("pi");
-        fs::remove_file(&original).unwrap();
-        f.sync();
-        for agent in ["opencode", "pi"] {
-            let text = f.agents_md(agent);
-            assert!(!text.contains("nativemem:begin"), "{agent}");
-            assert!(
-                text.trim_start()
-                    .starts_with("<!-- nativemem:instructions:begin -->"),
-                "{agent}\n{text:?}"
-            );
-            assert!(with_both.ends_with(text.trim_start()));
         }
     }
 
@@ -2048,7 +2199,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_created_original_removes_every_replica_and_routing() {
+    fn deleting_a_created_original_removes_every_replica() {
         for origin in ["pi", "opencode", "codex"] {
             let f = tri();
             let (id, _) = adapter_of(&f, origin)
@@ -2081,27 +2232,6 @@ mod tests {
         for agent in AGENTS {
             assert!(find(&f, agent, "note").is_none(), "{agent}");
         }
-    }
-
-    #[test]
-    fn routing_block_lists_a_project_that_only_has_originals() {
-        let f = tri();
-        let mut item = created_memory("note", "created body");
-        item.scope = Scope::Project(PathBuf::from("/w/only"));
-        let (id, _) = f.pi.create_original(&item).unwrap();
-        let index = f
-            .pi_root
-            .join("nativemem/memory")
-            .join(id.split_once('/').unwrap().0)
-            .join("MEMORY.md");
-        let line = format!("- /w/only → {}\n", index.display());
-        assert!(f.agents_md("pi").contains(&line));
-        f.sync();
-        for agent in ["codex", "opencode"] {
-            let text = f.agents_md(agent);
-            assert!(text.contains("- /w/only → "), "{agent}");
-        }
-        assert!(f.agents_md("pi").contains(&line));
     }
 
     #[test]
@@ -2350,6 +2480,34 @@ mod session_tests {
     }
 
     #[test]
+    fn pi_checkpoint_reaches_claude_and_codex_without_changing_the_turns() {
+        use std::io::Write;
+
+        let f = fx();
+        let p = f.pi_session("p1", "Pi chat", CHAT);
+        writeln!(
+            fs::OpenOptions::new().append(true).open(p).unwrap(),
+            "{}",
+            serde_json::json!({
+                "id": "checkpoint", "parentId": "e4", "type": "compaction",
+                "summary": "Project checkpoint", "firstKeptEntryId": "e3", "tokensBefore": 100
+            })
+        )
+        .unwrap();
+        f.sync();
+
+        let original = f.sessions(&f.pi).remove(0);
+        assert!(parsed(&original)
+            .turns
+            .iter()
+            .any(|turn| turn.role.as_str() == "summary"));
+        for agent in [&f.claude as &dyn Adapter, &f.codex] {
+            let replica = f.replica_of(agent);
+            assert_eq!(content_hash(&replica.item), content_hash(&original.item));
+        }
+    }
+
+    #[test]
     fn replica_of_a_new_cwd_creates_the_project_dir() {
         let f = fx();
         PiHome::new(&f.root.join("pi")).add_session(Path::new("/other/proj"), "p9", None, CHAT);
@@ -2416,7 +2574,7 @@ mod session_tests {
         let p = f.plan();
         assert!(p
             .to_string()
-            .contains("~ pi  /w/app  session \"Fix login\"  (from claude)"));
+            .contains("~ pi  /w/app  session \"Fix login\"  (append turns)"));
         f.sync();
         assert_eq!(parsed(&f.replica_of(&f.pi)).turns.len(), 5);
         assert_eq!(parsed(&f.replica_of(&f.codex)).turns.len(), 5);
@@ -2425,7 +2583,126 @@ mod session_tests {
     }
 
     #[test]
-    fn modified_replica_is_left_alone_without_a_note() {
+    fn a_continued_codex_copy_reaches_pi_without_rewriting_the_sources() {
+        let f = fx();
+        let original = f.claude_session("c1", "Fix login", CHAT);
+        let original_bytes = fs::read(&original).unwrap();
+        f.sync();
+        let source = f.replica_of(&f.codex).path;
+        let mut continued = fs::read_to_string(&source).unwrap();
+        continued.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": "2026-11-10T11:00:00.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "continued in Codex"}
+            })
+        ));
+        fs::write(&source, &continued).unwrap();
+        f.sync();
+        let third = parsed(&f.replica_of(&f.pi));
+        assert_eq!(third.turns.last().unwrap().text, "continued in Codex");
+        assert_eq!(fs::read_to_string(&source).unwrap(), continued);
+        assert_eq!(fs::read(&original).unwrap(), original_bytes);
+        let plan = f.plan();
+        assert!(plan.is_empty() && plan.notes.is_empty(), "{plan}");
+
+        let more: Vec<_> = CHAT
+            .iter()
+            .copied()
+            .chain([("user", "continued in Claude")])
+            .collect();
+        f.claude_session("c1", "Fix login", &more);
+        let plan = f.plan();
+        assert!(plan.actions.is_empty(), "{plan}");
+        assert!(
+            matches!(plan.notes.as_slice(), [Note::Conflict { .. }]),
+            "{plan}"
+        );
+    }
+
+    #[test]
+    fn a_continued_codex_copy_appends_to_the_same_pi_original() {
+        let f = fx();
+        let path = PiHome::new(&f.root.join("pi")).add_session(
+            Path::new(CWD),
+            "p1",
+            Some("Pi chat"),
+            CHAT,
+        );
+        let bytes = fs::read(&path).unwrap();
+        f.sync();
+        let codex = f.replica_of(&f.codex);
+        let mut raw = fs::read_to_string(&codex.path).unwrap();
+        raw.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": "2026-11-10T11:00:00.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "continued in Codex"}
+            })
+        ));
+        fs::write(&codex.path, &raw).unwrap();
+        f.sync();
+        let sessions = f.sessions(&f.pi);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].path, path);
+        let resumed = parsed(&sessions[0]);
+        assert_eq!(resumed.id, "p1");
+        assert_eq!(resumed.turns.last().unwrap().text, "continued in Codex");
+        assert!(fs::read(&path).unwrap().starts_with(&bytes));
+        assert_eq!(fs::read_to_string(&codex.path).unwrap(), raw);
+        assert!(f.plan().is_empty());
+    }
+
+    #[test]
+    fn a_continued_codex_copy_appends_to_the_same_claude_original() {
+        let f = fx();
+        let uuid = "12ae3481-b975-4a3a-8b3e-35d812ca3128";
+        let path = f.claude_session(uuid, "Fix login", CHAT);
+        let initial = parsed(&f.sessions(&f.claude)[0]);
+        let key = ItemKey {
+            origin: AgentId::new("claude"),
+            native_id: format!("fixture/{uuid}.jsonl"),
+        };
+        let raw: String = crate::adapters::claude_sessions::render(&initial, &key, uuid)
+            .lines()
+            .map(|line| {
+                let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                record
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(crate::adapters::claude_sessions::MARKER_KEY);
+                format!("{record}\n")
+            })
+            .collect();
+        fs::write(&path, &raw).unwrap();
+        f.sync();
+        let copy = f.replica_of(&f.codex);
+        let mut codex = fs::read_to_string(&copy.path).unwrap();
+        codex.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "timestamp": "2026-11-10T11:00:00.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "continued in Codex"}
+            })
+        ));
+        fs::write(&copy.path, &codex).unwrap();
+        f.sync();
+        let sessions = f.sessions(&f.claude);
+        assert_eq!(sessions.len(), 1);
+        let session = parsed(&sessions[0]);
+        assert_eq!(session.id, uuid);
+        assert_eq!(session.title, initial.title);
+        assert_eq!(session.turns.last().unwrap().text, "continued in Codex");
+        assert!(fs::read_to_string(&path).unwrap().starts_with(&raw));
+        assert_eq!(fs::read_to_string(&copy.path).unwrap(), codex);
+        assert!(f.plan().is_empty());
+    }
+
+    #[test]
+    fn independently_continued_histories_are_preserved_and_reported() {
         let f = fx();
         f.claude_session("c1", "Fix login", CHAT);
         f.sync();
@@ -2448,8 +2725,9 @@ mod session_tests {
         fs::write(&replica.path, &text).unwrap();
         let more: Vec<(&str, &str)> = CHAT.iter().copied().chain([("user", "grown")]).collect();
         f.claude_session("c1", "Fix login", &more);
-        let p = f.plan().to_string();
-        assert!(!p.contains(" pi "), "{p}");
+        let p = f.plan();
+        assert!(p.actions.is_empty(), "{p}");
+        assert!(matches!(p.notes.as_slice(), [Note::Conflict { .. }]), "{p}");
         assert_eq!(fs::read_to_string(&replica.path).unwrap(), text);
         assert_eq!(parsed(&f.replica_of(&f.pi)).turns.len(), 4);
     }
@@ -2747,7 +3025,7 @@ mod session_tests {
             content_hash(&f.sessions(&f.claude)[0].item)
         );
         let text = fs::read_to_string(&replica.path).unwrap();
-        assert_eq!(text.matches("<EXTERNAL SESSION IMPORTED>").count(), 1);
+        assert!(!text.contains("<EXTERNAL SESSION IMPORTED>"));
         assert!(
             text.contains("external-import-turn-2") && !text.contains("external-import-turn-3")
         );
@@ -2885,7 +3163,7 @@ mod session_tests {
             .get_replica(&key, &AgentId::new("claude"))
             .unwrap()
             .unwrap();
-        assert_eq!(row.revision, 1);
+        assert_eq!(row.revision, f.claude.writer_revision(Kind::Session));
         row.revision = 0;
         f.ledger.upsert_replica(&row).unwrap();
         assert!(f.plan().to_string().starts_with("~ claude"));
@@ -2971,7 +3249,15 @@ mod session_tests {
         ));
         fs::write(&replica.path, &text).unwrap();
         set_revision(&f, 0);
-        assert!(f.plan().is_empty());
+        let plan = f.plan();
+        assert!(
+            matches!(
+                plan.actions.as_slice(),
+                [Action::Write { target, update: true, .. }] if target.as_str() == "codex"
+            ),
+            "{plan}"
+        );
+        f.sync();
         assert_eq!(fs::read_to_string(&replica.path).unwrap(), text);
     }
 

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -155,6 +155,16 @@ pub trait Adapter {
     fn is_foreign_replica(&self, _replica: &Observed) -> bool {
         false
     }
+    /// Whether this adapter can append to an existing session while preserving its native rows.
+    fn can_append_session(&self, _target: &Observed, _turns: &[crate::session::Turn]) -> bool {
+        false
+    }
+    fn append_session(&self, _target: &Observed, _item: &Item) -> Result<()> {
+        Err(crate::error::Error::unsupported(
+            self.id().as_str(),
+            "append session",
+        ))
+    }
     /// Work deferred until the run's writes are done, for example a database row that must follow
     /// a written file. Returns `(label, reason)` for what had to be left for the next run.
     fn finish(&self) -> Result<Vec<(String, String)>> {
@@ -165,6 +175,14 @@ pub trait Adapter {
     /// visible copy already matches.
     fn visible_copy(&self, _native_id: &str) -> Option<String> {
         None
+    }
+    /// The writable project skill root and additional roots native to the agent's loader.
+    fn project_skill_dirs(&self) -> Option<(&Path, &[PathBuf])> {
+        None
+    }
+    /// Discover files in a shared native root for projects already known to any agent.
+    fn discover_shared_project_skills(&self, _projects: &[PathBuf]) -> Result<Vec<Observed>> {
+        Ok(Vec::new())
     }
     /// Skills this agent cannot take part with and copies that shadow or are shadowed by a
     /// visible copy with other content.

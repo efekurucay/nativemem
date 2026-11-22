@@ -15,10 +15,10 @@ An adapter writes only content an agent loads through its own native mechanism: 
 agent's memory directory, a section of its global instruction file, a transcript in its session
 directory. `nativemem` installs no plugin or extension, registers no hook, and does not edit agent
 configuration files (`config.toml`, `hooks.json`, `opencode.json`, `settings.json`, `config.yaml`,
-`~/.claude.json`). Agent databases are written in exactly two places, with the user's approval: the
-`threads` rows of Codex's state database for the rollouts this tool wrote, and the session rows of
-OpenCode's `opencode.db` for the replicas this tool wrote. Both run only while the compatibility probes
-pass and only after a database backup; no other database file is touched.
+`~/.claude.json`). Database writers cover Codex's `threads` rows for replicas, Codex's
+`thread_history_1.sqlite` turn and item rows for visible continuations, and OpenCode's
+`opencode.db` session rows for replicas and compatible appends. Each writer validates its
+schema and backs up the database.
 
 One exception, approved by the user: `nativemem mcp install` writes the entry named `nativemem` into
 each agent's own MCP configuration, and `mcp uninstall` removes it
@@ -39,15 +39,16 @@ It writes nothing else: no hook, no plugin, no other key, and no other file.
   visible, reviewable and reversible from the backup directory. So is the `nativemem` MCP entry.
   Project skill replicas go into the agent's own skills directory inside the repository
   (`<repo>/.<agent>/skills/`), which the agent reads natively; the user adds these to `.gitignore`.
-- Agent-owned databases have schemas that belong to the agent, so the two writers refuse to run when
-  the schema differs from the probed shape and never change or delete a row the agent made.
+- Agent-owned databases have schemas that belong to the agent, so the writers refuse to run when
+  the schema differs from the probed shape. An OpenCode append preserves every existing message row
+  and updates the session's sequence and idle timestamps in the same transaction.
 
 ## Consequences
 
-- Agents without native per-project memory get a routing block in their global instruction file
+- Project memory is independent of global instructions
   (`wiki/decisions/routing-block-for-agents-without-memory.md`).
-- Session writes into Codex include the `threads` row Codex lists from, and session writes into
-  OpenCode are rows of `opencode.db`; both run only while the schema probes pass
+- Session writes into Codex include the `threads` row Codex lists from and the paginated history
+  rows Codex displays. OpenCode stores sessions in `opencode.db`
   (`wiki/decisions/codex-session-writes-gated.md`, `wiki/decisions/opencode-session-writes-gated.md`).
 - MCP servers are not copied between agent configs: the hub holds them and each agent has the one
   `nativemem` entry (`wiki/decisions/mcp-hub.md`).
@@ -60,23 +61,25 @@ It writes nothing else: no hook, no plugin, no other key, and no other file.
 - `crates/core/src/adapters/memory_store.rs`
 - `crates/core/src/adapters/codex_imports.rs`
 - `crates/core/src/adapters/codex_threads.rs`
+- `crates/core/src/adapters/codex_history.rs`
 - `crates/core/src/adapters/opencode_sessions.rs`
 - `wiki/architecture/safety.md`
 
 ## Rules
 
 - MUST: Not add plugin, extension, hook or config-file edits beyond the `nativemem` MCP entry without a new decision record and the user's approval.
-- MUST: Not touch agent-owned databases except the Codex `threads` rows (`codex_threads.rs`) and the
-  OpenCode session rows (`opencode_sessions.rs`), under probe gating with a database backup.
+- MUST: Guard database writes by the native schema and back up before writing. Codex history rows
+  belong to `codex_history.rs`, Codex thread listing rows to `codex_threads.rs`, and OpenCode rows
+  to `opencode_sessions.rs`.
 - MUST: Edit the `nativemem` MCP entry only through `crates/hub/src/register.rs` (backup, atomic write, state lock).
-- SHOULD: Prefer a marked, regenerated region over an edit in place when a file is user-owned.
+- SHOULD: Keep replica identity outside user instruction text and preserve unrelated sections.
 
 ## Verification checklist
 
 - [ ] A grep of `crates/` for writes to `config.toml`, `hooks.json`, `settings.json`, `opencode.json`, `config.yaml` or `.claude.json` finds them only in `crates/hub/src/register.rs`
 - [ ] `crates/hub/src/register.rs` writes no key other than the `nativemem` entry (`crates/hub/tests/register.rs`)
 - [ ] A new write path lists its files on the agent page
-- [ ] A grep of `crates/` finds database writes only in `codex_threads.rs` and `opencode_sessions.rs`
+- [ ] Session database writes use the three established writers.
 
 ## Related docs
 
@@ -86,4 +89,4 @@ It writes nothing else: no hook, no plugin, no other key, and no other file.
 
 ## Last updated
 
-2026-11-11
+2026-11-22

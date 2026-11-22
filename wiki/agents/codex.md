@@ -9,16 +9,18 @@ sections and rollouts, and how session writes into Codex are guarded.
 
 Facts gathered read-only on a development machine running codex-cli 0.167.0 (rollouts from 0.149.0
 to 0.167.0; 215 live rollouts, 5 archived, 641 rows in the `threads` table, 79 sessions imported from
-Claude Code). SQLite files were inspected read-only (`immutable=1`, structure and non-content values). The `codex` binary is never driven by this repo.
+Claude Code). Those SQLite files were inspected read-only (`immutable=1`, structure and non-content
+values). Native continuation is verified with Codex 0.171.0 in isolated profiles.
 
 ## Status in nativemem
 
 | Kind | Status | Adapter |
 |---|---|---|
-| Project memory | Originals read from generated `memories/MEMORY.md` (read-only, never edited or deleted); in the nativemem-owned store, replicas and originals created through `add` (editable and deletable), plus a routing block | `crates/core/src/adapters/codex.rs`, `memory_store.rs` |
+| Project memory | Generated `memories/MEMORY.md` is read-only. Native app-server imports eligible default-profile Claude project notes into `memories_v2` and queues consolidation. The manager store remains available for editable entries | `crates/core/src/adapters/codex.rs`, `codex_memory.rs`, `memory_store.rs` |
 | Instruction sections | Read and write in `AGENTS.md`, including a new section through `add` | `codex.rs` through `sections.rs` |
 | Sessions | Originals read; replicas (with their `threads` row) written while the schema probes pass | `codex_sessions.rs`, `codex_rollout.rs`, `codex_imports.rs`, `codex_threads.rs` |
 | Skills (global) | Read and write in `<codex home>/skills/`; `.system` and directories without `SKILL.md` are left alone; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `codex.rs` |
+| Skills (project) | Read and write in `<repo>/.agents/skills/`. Discover projects from rollout headers and from projects known to other adapters | `codex.rs`, `codex_sessions.rs`, `skills.rs` |
 | MCP servers | Read by `mcp import`; `mcp install` and `uninstall` write the one table `[mcp_servers.nativemem]` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
 ## Native locations
@@ -41,9 +43,7 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
   contain a line `applies_to: cwd=<path>; ...`. Each block is one item: `native_id`
   `<cwd>#<slug(title)>`, `name` the slug, `description` the title, `body` the block text. Blocks
   without `applies_to` are reported as unscoped and skipped.
-- **Replica store**: described in `wiki/kinds/memory.md`. The `extensions/.../resources/<project>/scope.json`
-  layout follows what Codex's own memory prompt describes; it is not officially documented. Loading
-  is guaranteed by the routing block in `AGENTS.md`, not by that layout.
+- **Replica store**: described in `wiki/kinds/memory.md`. The auxiliary store is available in the manager. Codex loads memory through its own pipeline.
 - **Rollout** (JSONL, `{timestamp, [ordinal], type, payload}`): line types `session_meta`,
   `turn_context`, `event_msg`, `response_item`, `token_usage_record`, `compacted` and others. User and
   assistant text appears twice, as `response_item` messages and as events (`item_completed`
@@ -63,7 +63,7 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
 
 - Reads `memories/MEMORY.md` blocks, `AGENTS.md` sections, `memories/extensions/nativemem/resources/`
   replicas and `sessions/` rollouts (directory depth at most 4 below `sessions/`).
-- Writes replica memory items and the routing block, the instruction region at the end of
+- Writes replica memory items, plain instruction sections to
   `AGENTS.md`, and, while the schema probes pass, rollout files, the importer-ledger record for
   Claude-origin sessions and the `threads` row of every replica rollout (below). The ledger file is parsed and rewritten whole (every other key
   and record kept, key order not), backed up first, created only when the Codex home exists, and left
@@ -71,10 +71,10 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
 - A rollout written by this tool is shaped like Codex's own importer output: `session_meta`
   (`originator` `Codex Desktop` for a Claude origin, the origin agent's display name otherwise;
   `cli_version` and `source` as the importer writes them), one `external-import-turn-N` turn per user
-  message with event and `response_item` pairs, the `<EXTERNAL SESSION IMPORTED>` marker event once,
-  a `token_count` and the closing `task_complete`. `session_meta` also carries `nativemem_origin` and
+  message with event and `response_item` pairs, a `token_count` and the closing `task_complete`.
+  The conversation events contain only its turns. `session_meta` carries `nativemem_origin` and
   `nativemem_title`. The file mtime is the original's.
-- Never touches `~/.codex/sqlite/`, `thread_history_1.sqlite`, `session_index.jsonl`, `history.jsonl`,
+- Never touches `~/.codex/sqlite/`, `session_index.jsonl`, `history.jsonl`,
   `.codex-global-state.json` or `hooks.json`, and in `state_5.sqlite` only the
   `threads` rows of its own replicas.
 - `config.toml`: `mcp install` adds `[mcp_servers.nativemem]` with `command`, `args`,
@@ -89,9 +89,8 @@ The Codex home is `--codex-home`, else `NATIVEMEM_CODEX_HOME`, else `CODEX_HOME`
 Subagents run Codex as `codex exec --model <model> --skip-git-repo-check [args...] -o <answer file> -` with the
 prompt on stdin; the answer is the content of the answer file, a file in a scratch directory that is removed
 after the run (`build` and `parse_answer` in `crates/hub/src/harness.rs`; `wiki/architecture/hub.md`,
-"Subagents"). `[UNVERIFIED]`: every flag and the answer-file behaviour are taken as given, because the Codex
-binary is never run by this repo's work or tests; the staged check is a `nativemem subagent run` on a
-temp state directory by the user. The binary is looked up in `PATH`, `~/.local/bin`, `/opt/homebrew/bin` and
+"Subagents"). `[UNVERIFIED]`: the staged check for the subagent command uses a temporary state
+directory. The binary is looked up in `PATH`, `~/.local/bin`, `/opt/homebrew/bin` and
 `/usr/local/bin`.
 
 ## Sessions: listing and resume
@@ -130,8 +129,8 @@ rows against 443 native ones) and is derived from the rollout file, so file and 
   value is set explicitly, so none is relied on. No FTS table, view or other table needs a feed for
   the picker. `local_thread_catalog` (`sqlite/codex.db`) is filled by the app's own scan (49 of 73
   imported threads present), `session_index.jsonl` held none of the imported threads, and
-  `thread_history_1.sqlite` holds turn projections for `paginated` threads only (none of the legacy
-  rows), so none of them is written (INFERRED; the previous research said the same).
+  `thread_history_1.sqlite` holds the visible turn and item projections for paginated threads.
+  The continuation writer inserts missing rows for the messages appended by app-server.
 - Rows exist only for rollouts with `nativemem_origin`. A forced refresh (the engine rewrote the
   rollout) replaces the derived columns and keeps `name`, `archived`, `is_pinned`, `tokens_used` and
   everything else Codex or the user set. A rollout that lost its row is inserted on the next run, and
@@ -169,7 +168,7 @@ rows against 443 native ones) and is derived from the rollout file, so file and 
   SQLite's own locking (5 s `busy_timeout`, `BEGIN IMMEDIATE`), never changes the journal mode and skips
   a locked database.
 - **Context cap**: Codex loads project docs up to `project_doc_max_bytes = 32768` (binary strings,
-  OBSERVED), which matters for the routing block size.
+  OBSERVED).
 
 ## Version detection and compatibility probes
 
@@ -217,7 +216,14 @@ layout.
 | `codex exec` takes `--model`, `--skip-git-repo-check` and `-o <file>`, and `-` reads the prompt from stdin | `[UNVERIFIED]` | given for the task; the codex binary is never run |
 | `startup_timeout_sec` and `tool_timeout_sec` are the keys Codex reads for an MCP server | `[UNVERIFIED]` | given for the task, not testable read-only; the codex binary is never run |
 | A nativemem-written rollout is read back as a replica | VERIFIED | test `claude_session_becomes_a_codex_rollout_with_an_import_record` |
-| Codex lists a nativemem-written rollout plus row in `codex resume` and opens it | `[UNVERIFIED]` | needs the staged check |
+| Codex lists and opens a synced Claude session from `/resume` in the same working directory | VERIFIED on 0.171.0 | Synthetic Claude session, real Codex CLI, scoped sync. The following request included the imported conversation in a loopback provider test |
+| A synced Pi checkpoint and its retained turn reach the Codex model request | VERIFIED on 0.171.0 | A loopback provider captured the checkpoint and retained user turn after `codex exec resume`. The summarized prefix stayed in the rollout |
+| Codex's native external-agent importer accepts a memory-only selection and writes it without a global instruction file | VERIFIED on 0.171.0 | Temporary homes, synthetic Claude project memory, `externalAgentConfig/detect` and `externalAgentConfig/import` over app-server stdio with `features.external_agent_memory_import = true`. The note appeared under `memories_v2/extensions/external_agent_import/resources/` |
+| The native importer detects project memory changes, including deleted source notes | VERIFIED on 0.171.0 | A synthetic note was copied byte for byte, then updated and removed through the same native API. An unchanged project did not appear in the detection response |
+| Codex can use imported Claude memory in a new session | VERIFIED on 0.171.0 with a local model fixture | With native memories enabled, an ordinary app-server turn started consolidation. The worker read the imported note and wrote the native summary. A subsequent `codex exec` turn received the fixture fact in its model context |
+| A turn retrieves the imported note after native consolidation | `[UNVERIFIED]` | The importer queues consolidation. The fixture check used no model requests |
+| `thread/inject_items` persists user and assistant messages on an existing native thread | VERIFIED on 0.171.0 with experimental app-server capability | The appended `response_item` records carry their supplied message ids. Native resume included both them and the original history in the model request. `codex_history.rs` writes the visible counterparts, and the sync scanner reads each message once |
+| Paginated terminal transcripts use the native turn and item projection | VERIFIED on 0.171.0 in an isolated profile | Matching rows in `thread_history_1.sqlite` make both roles visible in native read APIs and interactive terminal resume under the same id |
 | Codex accepts `history_mode` `legacy` for a row written this way | `[UNVERIFIED]` | needs the staged check |
 
 ## Source anchors
@@ -237,7 +243,9 @@ layout.
 
 ## Rules
 
-- MUST: Write Codex's state database only through `codex_threads.rs` (rows of this tool's replicas, never a delete); never write its other SQLite files, `config.toml`, `hooks.json` or generated memory files. The probes open the state database read-only with `immutable=1`.
+- MUST: Write Codex's thread listing rows through `codex_threads.rs` and its visible continuation
+  rows through `codex_history.rs`. Keep `config.toml`, `hooks.json` and generated memory files
+  read-only. The state database probes use `immutable=1`.
 - MUST: Treat a rollout containing `<EXTERNAL SESSION IMPORTED>` as a replica, never an original.
 - MUST: Keep session writes behind the `codex.state_db` and `codex.threads_columns` probes.
 - MUST: Back up `external_agent_session_imports.json` before changing it; do not overwrite an
@@ -262,4 +270,4 @@ layout.
 
 ## Last updated
 
-2026-11-11
+2026-11-22

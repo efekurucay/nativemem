@@ -11,7 +11,7 @@ use nativemem_core::adapters::codex::CodexAdapter;
 use nativemem_core::adapters::opencode_sessions::DATABASE;
 use nativemem_core::adapters::pi::PiAdapter;
 use nativemem_core::adapters::sections::section_problem;
-use nativemem_core::adapters::skills::skill_name;
+use nativemem_core::adapters::skills::{skill_name, skill_project_key};
 use nativemem_core::compat::{self, AgentReport, CompatState};
 use nativemem_core::engine::{self, Action, ApplyOptions, Note};
 use nativemem_core::error::{Error, Result};
@@ -85,6 +85,9 @@ enum Command {
     Sync {
         #[arg(long)]
         apply: bool,
+        /// Sync only chat sessions whose working directory is this project
+        #[arg(long, conflicts_with = "no_sessions")]
+        session_project: Option<PathBuf>,
         /// Lift the mass-delete guard
         #[arg(long)]
         allow_mass_delete: bool,
@@ -512,11 +515,23 @@ fn lock_state(state: &Path) -> Outcome<File> {
 }
 
 fn scan_agents(agents: &Agents) -> Result<BTreeMap<String, ScanReport>> {
-    agents
-        .all()
-        .into_iter()
+    let adapters = agents.all();
+    let mut scans: BTreeMap<String, ScanReport> = adapters
+        .iter()
         .map(|a| Ok((a.id().to_string(), a.inspect()?)))
-        .collect()
+        .collect::<Result<_>>()?;
+    let shared = engine::discover_shared_project_skills(
+        &adapters,
+        scans.values().flat_map(|scan| &scan.observed),
+    )?;
+    for skill in shared {
+        scans
+            .entry(skill.agent.to_string())
+            .or_default()
+            .observed
+            .push(skill);
+    }
+    Ok(scans)
 }
 
 fn status(
@@ -686,6 +701,9 @@ fn delete(
         id: id.to_string(),
     })?;
     refuse_session(id)?;
+    if skill_project_key(id).is_some() {
+        scan_agents(agents)?;
+    }
     adapter.remove(id)?;
     let backup_dir = roots.state.join("backups").join(backups.stamp());
     if json {
@@ -750,6 +768,7 @@ fn session_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<(
             let who = match t.role {
                 Role::User => "You",
                 Role::Assistant => "Assistant",
+                Role::Summary => "Conversation summary",
             };
             println!("\n{who}:\n{}", t.text);
         }
@@ -769,7 +788,14 @@ fn skill_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<()>
         id: id.to_string(),
     };
     let adapter = agents.named(agent)?.ok_or_else(not_found)?;
-    let skill = find_entry(adapter, id)?.ok_or_else(not_found)?;
+    let skill = if skill_project_key(id).is_some() {
+        scan_agents(agents)?
+            .remove(agent)
+            .and_then(|scan| scan.observed.into_iter().find(|o| o.native_id == id))
+    } else {
+        find_entry(adapter, id)?
+    }
+    .ok_or_else(not_found)?;
     let file = skill.path.join("SKILL.md");
     let text = String::from_utf8_lossy(&std::fs::read(&file).map_err(|e| Error::io(&file, e))?)
         .into_owned();
@@ -1006,6 +1032,13 @@ fn action_json(action: &Action) -> Option<(&'static str, Value)> {
         Action::WriteBack { key, item, .. } => {
             ("update", key.origin.as_str(), &item.name, &item.scope, key)
         }
+        Action::AppendSession { key, target, item } => (
+            "update",
+            target.agent.as_str(),
+            &item.name,
+            &item.scope,
+            key,
+        ),
         Action::Remove {
             key,
             agent,
@@ -1091,6 +1124,7 @@ fn sync(
     apply: bool,
     allow_mass_delete: bool,
     json: bool,
+    session_project: Option<&Path>,
 ) -> Result<bool> {
     let adapters = agents.all();
     if !json {
@@ -1098,15 +1132,47 @@ fn sync(
             println!("{line}");
         }
     }
+    let plan = |ledger: &Ledger| match session_project {
+        Some(project) => engine::plan_session_project(&adapters, ledger, project),
+        None => engine::plan(&adapters, ledger),
+    };
     if apply {
         let ledger = Ledger::open(&roots.state)?;
-        let plan = engine::plan(&adapters, &ledger)?;
-        let report = engine::apply(
+        let plan = plan(&ledger)?;
+        let mut report = engine::apply(
             plan,
             &adapters,
             &ledger,
             &ApplyOptions { allow_mass_delete },
         )?;
+        if session_project.is_none() {
+            if let Some(claude) = &agents.claude {
+                claude.reconcile_memory_origins()?;
+                if let Some(codex) = agents.codex.as_ref().filter(|_| {
+                    claude.supports(Kind::Memory, &Scope::Project(roots.claude.clone()))
+                }) {
+                    match codex.sync_native_memories() {
+                        Ok(notes) => {
+                            report
+                                .notes
+                                .extend(notes.into_iter().map(|(label, reason)| Note::Skipped {
+                                    agent: codex.id(),
+                                    label,
+                                    reason,
+                                }))
+                        }
+                        Err(Error::Unsupported { operation, .. }) => {
+                            report.notes.push(Note::Skipped {
+                                agent: codex.id(),
+                                label: "native project memory".into(),
+                                reason: operation,
+                            })
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
         if json {
             print_json(&sync_json(true, &report.done, &report.notes));
         } else {
@@ -1120,7 +1186,7 @@ fn sync(
     } else {
         Ledger::in_memory()?
     };
-    let plan = engine::plan(&adapters, &ledger)?;
+    let plan = plan(&ledger)?;
     if json {
         print_json(&sync_json(false, &plan.actions, &plan.notes));
     } else {
@@ -1169,10 +1235,21 @@ const EXIT_ATTENTION: u8 = 2;
 fn run(cli: &Cli) -> Outcome<u8> {
     let roots = resolve(cli)?;
     let backups = BackupSession::new();
+    let session_project = match &cli.command {
+        Command::Sync {
+            session_project: Some(project),
+            ..
+        } => {
+            let project = std::path::absolute(project).map_err(Error::from)?;
+            Some(project.canonicalize().unwrap_or(project))
+        }
+        _ => None,
+    };
     let requested_kind = match &cli.command {
         Command::Items { kind, .. } => kind.as_deref().and_then(Kind::parse),
         Command::Skill(_) => Some(Kind::Skill),
         Command::Session(_) => Some(Kind::Session),
+        Command::Sync { .. } if session_project.is_some() => Some(Kind::Session),
         _ => None,
     };
     let lists_without_sessions = matches!(cli.command, Command::Items { .. } | Command::Skill(_))
@@ -1222,7 +1299,12 @@ fn run(cli: &Cli) -> Outcome<u8> {
             );
         }
     }
-    let agents = Agents::open(&roots, &backups, sessions, &blocked);
+    let mut agents = Agents::open(&roots, &backups, sessions, &blocked);
+    if let Some(project) = &session_project {
+        agents.codex = agents
+            .codex
+            .map(|adapter| adapter.with_session_project(project.clone()));
+    }
     let attention = |needs: bool| if needs { EXIT_ATTENTION } else { 0 };
     match &cli.command {
         Command::Status { json } => {
@@ -1256,8 +1338,17 @@ fn run(cli: &Cli) -> Outcome<u8> {
             allow_mass_delete,
             notify,
             json,
+            ..
         } => {
-            let needs = sync(&roots, &agents, &reports, *apply, *allow_mass_delete, *json)?;
+            let needs = sync(
+                &roots,
+                &agents,
+                &reports,
+                *apply,
+                *allow_mass_delete,
+                *json,
+                session_project.as_deref(),
+            )?;
             if *apply {
                 let notes = if *notify {
                     compat::pending_notifications(&reports, &mut state)

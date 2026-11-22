@@ -25,6 +25,7 @@ const IMAGE_PLACEHOLDER: &str = "[external unsupported block: image]";
 pub enum Role {
     User,
     Assistant,
+    Summary,
 }
 
 impl Role {
@@ -32,6 +33,7 @@ impl Role {
         match self {
             Role::User => "user",
             Role::Assistant => "assistant",
+            Role::Summary => "summary",
         }
     }
 
@@ -39,6 +41,7 @@ impl Role {
         match s {
             "user" => Some(Role::User),
             "assistant" => Some(Role::Assistant),
+            "summary" => Some(Role::Summary),
             _ => None,
         }
     }
@@ -76,6 +79,11 @@ pub fn sha_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+fn hash_field(hash: &mut Sha256, text: &str) {
+    hash.update((text.len() as u64).to_le_bytes());
+    hash.update(text.as_bytes());
 }
 
 impl Session {
@@ -128,18 +136,48 @@ impl Session {
     /// SHA-256 over the working directory, title, and each turn's role and text. Ids and
     /// timestamps are left out: they differ between an original and its replica.
     pub fn hash(&self) -> String {
-        let mut h = Sha256::new();
-        let mut field = |s: &str| {
-            h.update((s.len() as u64).to_le_bytes());
-            h.update(s.as_bytes());
-        };
-        field(&self.cwd.to_string_lossy());
-        field(&self.title);
+        let mut hash = self.hash_context();
         for t in &self.turns {
-            field(t.role.as_str());
-            field(&t.text);
+            hash_field(&mut hash, t.role.as_str());
+            hash_field(&mut hash, &t.text);
         }
-        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+        format!("{:x}", hash.finalize())
+    }
+
+    fn hash_context(&self) -> Sha256 {
+        let mut hash = Sha256::new();
+        hash_field(&mut hash, &self.cwd.to_string_lossy());
+        hash_field(&mut hash, &self.title);
+        hash
+    }
+
+    /// True when a strict prefix exactly matches the recorded transcript on this side.
+    pub(crate) fn appends_to_hash(&self, recorded: &str) -> bool {
+        let mut hash = self.hash_context();
+        for turn in &self.turns {
+            if format!("{:x}", hash.clone().finalize()) == recorded {
+                return true;
+            }
+            hash_field(&mut hash, turn.role.as_str());
+            hash_field(&mut hash, &turn.text);
+        }
+        false
+    }
+
+    /// A prefix comparison across agents ignores metadata and timestamps.
+    pub(crate) fn includes(&self, prefix: &Self) -> bool {
+        self.cwd == prefix.cwd
+            && self.turns.len() >= prefix.turns.len()
+            && self
+                .turns
+                .iter()
+                .zip(&prefix.turns)
+                .all(|(a, b)| a.role == b.role && a.text == b.text)
+    }
+
+    pub(crate) fn appended_turns(&self, prefix: &Self) -> Option<&[Turn]> {
+        (self.turns.len() > prefix.turns.len() && self.includes(prefix))
+            .then(|| &self.turns[prefix.turns.len()..])
     }
 
     /// The engine item: kind `Session`, scope `Project(cwd)`, `name` the session's own id,

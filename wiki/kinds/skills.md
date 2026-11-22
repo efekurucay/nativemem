@@ -42,12 +42,12 @@ directories without a top-level `SKILL.md`, anything outside the agent's own ski
 
 ### Project skills
 
-| Agent | Project directory | Also reads (never written) |
+| Agent | Project directory written for the agent | Also reads |
 |---|---|---|
 | Claude Code | `<repo>/.claude/skills/<name>/` | |
 | OpenCode | `<repo>/.opencode/skills/<name>/` | `<repo>/.claude/skills/`, `<repo>/.agents/skills/` |
 | Pi | `<repo>/.pi/skills/<name>/` | `<repo>/.agents/skills/` |
-| Codex | not implemented | |
+| Codex | `<repo>/.agents/skills/<name>/` | |
 
 The `native_id` of a project skill is `skill:<project-key>/<name>`, where `project-key` is the same
 key the memory store uses (`slug` of the last path component plus `-` and the first 8 hex of the
@@ -95,6 +95,12 @@ differs from a visible copy, `doctor` prints a notice. Pi also reads paths from 
 those are not visible roots, so a skill Pi can reach only that way is still copied into Pi's own
 directory `[UNVERIFIED: duplicate-name behaviour]`.
 
+The project directory `.agents/skills/` is writable for Codex and readable by OpenCode and Pi.
+OpenCode also reads `.claude/skills/`. When a compatible project skill already exists in one of
+these roots or the current plan will place it there, the reader needs no separate copy. Existing
+agent-specific copies remain part of synchronization. A project root that aliases a global skills
+directory is excluded from project reads and writes.
+
 ## CLI and app
 
 `items --kind skill`, `status` (`skills` per agent), `sync`, `delete --id <native id>`,
@@ -104,14 +110,18 @@ The app lists global skills on the "Skills" sidebar row and project skills in th
 The detail shows the project or Global, all original/copy directory paths, and a Finder action for
 any copy (`docs/desktop.md`; `SkillTests.projectSkillsLiveInTheFolderTreeAndShowEachCopyPath`).
 
-Claude project directories are scanned even when they contain no memory entries. OpenCode and Pi
-also discover projects from their scanned sessions. With transcript loading disabled and the session kind
+Claude project directories are scanned even when they contain no memory entries. Codex discovers
+projects from rollout headers (the first line, bounded to 64 KiB) and adds project scopes from other
+agents so it can identify a pre-existing shared skill. OpenCode and Pi also discover projects from
+their scanned sessions. With transcript loading disabled and the session kind
 not paused, Pi reads only
 session headers (the first line, bounded to 64 KiB); OpenCode queries distinct `session_v2.directory`
 values read-only without reading message rows or waiting on a locked database. Unavailable OpenCode
 metadata leaves memory-store paths and the path index available. Tests:
 `pi_project_skills_are_discovered_from_session_projects` and
-`no_sessions_snapshot_discovers_project_skills_without_reading_message_rows` in the CLI tests.
+`no_sessions_snapshot_discovers_project_skills_without_reading_message_rows`,
+`codex_project_skills_are_discovered_without_loading_conversations` and
+`an_existing_codex_project_skill_is_seen_from_a_claude_only_project` in the CLI tests.
 `Adapter::inspect` shares the skill scan's diagnostics with status and the desktop snapshot without
 hashing the global skill trees a second time for their report. After writing a project skill, the adapter keeps
 its absolute working directory in `<agent home>/nativemem/skill-projects.json` (paths only, backed up
@@ -138,7 +148,7 @@ Tests: `skill_show_by_id_distinguishes_projects_from_global_skills` in `crates/c
 - MUST: Copy skills as whole trees, never rewrite or translate a file.
 - MUST: Never write through a symlink; back up the whole directory before an overwrite or removal.
 - MUST: Never touch dot-directories, `synced` or directories without a top-level `SKILL.md`.
-- MUST: Never write into a visible root (`~/.agents/skills`).
+- MUST: Never write into the global visible root (`~/.agents/skills`).
 - SHOULD: Keep skill ids prefixed `skill:` so no other kind's id is mistaken for one.
 
 ## Verification checklist
@@ -156,4 +166,4 @@ Tests: `skill_show_by_id_distinguishes_projects_from_global_skills` in `crates/c
 
 ## Last updated
 
-2026-11-11
+2026-11-22

@@ -14,7 +14,7 @@ rationale: `wiki/decisions/session-snapshot-policy.md`. Agent-side listing and r
 ## Neutral model
 
 `Session` in `crates/core/src/session.rs`: `id`, `cwd`, `title`, `created_ms`, `updated_ms` and an
-ordered list of turns (`user` or `assistant`, text, timestamp).
+ordered list of turns (`user`, `assistant` or `summary`, with text and timestamp).
 
 - Thinking blocks and provider signatures are dropped; they are opaque and bound to a provider.
 - Images become the text `[external unsupported block: image]`.
@@ -56,19 +56,28 @@ Implemented in `plan_session` in `crates/core/src/engine.rs`.
 |---|---|---|
 | No replica in a target agent that supports sessions | Write one, once per (original, target agent) | `claude_session_reaches_pi_and_round_trips` |
 | Original grew, replica unmodified (its hash equals the ledger's) | Rewrite the replica, backing up the file | `grown_original_refreshes_an_unmodified_replica_with_backup` |
-| Replica edited or continued in its own agent | Left alone from then on, no conflict note | `modified_replica_is_left_alone_without_a_note` |
+| Tracked replica has compatible appended turns | Relay the continuation to untouched copies and preserve the source transcripts | `a_continued_codex_copy_reaches_pi_without_rewriting_the_sources` |
+| Idle OpenCode session is a strict prefix of the compatible history | Append missing rows under the same session id, keeping existing rows | `a_continuation_appends_to_the_same_native_open_code_session` |
+| Idle Codex session is a strict prefix and the tail contains user or assistant turns | Append through its native app-server and verify the rollout under the same thread id | `reads_only_appended_response_messages_with_a_tracked_id`, live tests in `wiki/guides/verify-with-real-agents.md` |
+| Pi v3 session is a strict prefix and the tail contains user or assistant turns | Append to the current leaf after checking the target bytes, keeping the same native id | `a_continued_codex_copy_appends_to_the_same_pi_original` |
+| Claude Code session with a native UUID is a strict prefix and the tail contains user or assistant turns | Append linked user and assistant records, keeping the transcript prefix and native id | `a_continued_codex_copy_appends_to_the_same_claude_original` |
+| Tracked continuations diverge | Report a conflict and preserve both histories | `independently_continued_histories_are_preserved_and_reported` |
+| Replica has an edit other than appending turns | Preserve the local file | `modified_replica_is_left_alone_without_a_note` |
 | Target agent does not accept the session (`Adapter::accepts`; Claude Code when the session is older than its retention minus a day) | Nothing: no write, no note, no tombstone, and a missing copy is not a deletion | `a_session_older_than_the_retention_is_planned_for_other_agents_but_not_claude`, `a_replica_pruned_by_the_agent_is_not_reported_as_deleted_but_a_young_one_is` in `crates/cli/tests/doctor.rs` |
 | Replica deleted by the user after it was written | Tombstone: a replica ledger row with an empty hash; never recreated | `deleted_replica_is_tombstoned_and_never_recreated` |
 | Replica file exists but was not scanned (outside the window, too large) | Not treated as deleted | `crates/core/src/engine.rs` (`plan_session`) |
 | Original missing (the agent pruned it) | Replicas stay | `vanished_original_leaves_replicas_alone` |
-| Replica is itself a candidate original | Never; replicas are never replicated again | `replicas_are_never_originals_for_a_third_agent` |
+| Replica is itself a candidate original | It stays linked to the original; relayed turns keep that session identity | `replicas_are_never_originals_for_a_third_agent` |
 | Ledger lost, marked replica found | Adopt it into the ledger, write nothing | `lost_ledger_adopts_replicas_and_never_loops` |
 | Writer revision of the adapter is higher than the replica's | Rewrite once while unmodified | `unmodified_replica_with_an_older_writer_revision_is_rewritten_once` |
 
-Edits never flow back to the original. Session items are left out of the mass-delete total. The
-reason deletes never propagate: Claude Code prunes transcripts by itself, and that must not
-erase history in other agents. Session ids are refused by CLI `delete` and `edit` with code
-`unsupported`.
+To relay extra turns, the planner hashes each candidate prefix against the replica's own recorded
+hash. The planner compares candidate histories by their ordered turn roles and text. It keeps the
+most complete compatible history under the original identity. In OpenCode the append transaction
+checks the native session is idle and still matches the plan before inserting any rows. A stale
+append skips the remaining writes for that session during the run. Session items are left out of the
+mass-delete total. Claude Code prunes transcripts by itself, and that must not erase history in other
+agents. Session ids are refused by CLI `delete` and `edit` with code `unsupported`.
 
 ## Markers
 
@@ -76,10 +85,10 @@ A marker survives a lost ledger, so a replica is never mistaken for an original.
 
 | Agent | Marker | Anchor |
 |---|---|---|
-| Claude Code | Extra top-level key `nativemem_origin: "<agent>:<native id>"` on every line the tool writes. Claude reads lines by known keys, so the key is ignored and the file stays a valid transcript; a continued replica keeps it because Claude only appends | `MARKER_KEY` in `crates/core/src/adapters/claude_sessions.rs` |
+| Claude Code | Generated replicas carry the top-level key `nativemem_origin: "<agent>:<native id>"`. Appended native message records carry their own UUID and parent link | `MARKER_KEY` in `crates/core/src/adapters/claude_sessions.rs` |
 | Pi | A `custom` entry with `customType: "nativemem-origin"` and `data.origin`. Pi keeps custom entries out of the model context | `MARKER_TYPE` in `crates/core/src/adapters/pi.rs` |
 | OpenCode | Extra key `nativemem_origin: "<agent>:<native id>"` inside the `data` JSON of every `session_message` row the tool writes. OpenCode's own rows never have it and its readers use only the keys they know, so the key is not shown (excess keys being ignored is `[UNVERIFIED]`); the first message row decides, so a lost ledger still recognises the replica. A column such as `session_v2.metadata` was not chosen because no observed row fills it, so its shape is unknown | `MARKER_KEY` in `crates/core/src/adapters/opencode_sessions.rs` |
-| Codex | `nativemem_origin` and `nativemem_title` in `session_meta`, plus Codex's own import marker event `<EXTERNAL SESSION IMPORTED>`. Any rollout containing that event is a replica whichever program wrote it | `ORIGIN_KEY`, `TITLE_KEY` in `crates/core/src/adapters/codex_rollout.rs`, `IMPORT_MARKER` in `crates/core/src/adapters/codex_sessions.rs` |
+| Codex | `nativemem_origin` and `nativemem_title` in `session_meta`. The reader also recognizes rollouts containing Codex's own import marker event `<EXTERNAL SESSION IMPORTED>` | `ORIGIN_KEY`, `TITLE_KEY` in `crates/core/src/adapters/codex_rollout.rs`, `IMPORT_MARKER` in `crates/core/src/adapters/codex_sessions.rs` |
 
 A rollout Codex imported itself maps to its Claude original through `external_agent_session_imports.json`
 (`source_path` names the transcript); a marked rollout without a record is ignored (test
@@ -88,6 +97,13 @@ adopts the imported thread as the Codex replica with an empty hash, so it is nev
 `a_session_imported_by_codex_is_adopted_not_written_again`).
 
 ## Writers by agent
+
+The neutral transcript carries textual compaction checkpoints as `summary` turns. The prefix
+remains in the stored transcript. The checkpoint is placed before the messages the source keeps
+for model context. Pi uses `firstKeptEntryId` on the active branch and OpenCode uses
+`metadata.keepID`. Each writer emits the target format's checkpoint: a Claude compact boundary
+and summary, a Codex compacted item, a Pi compaction entry, or an OpenCode completed compaction.
+Provider-owned, opaque replacement windows are outside the textual transcript model.
 
 - **Claude Code**: `projects/<dir>/<session id>.jsonl`. Reading takes `user` and `assistant` lines in
   file order, drops `isMeta` and `isSidechain` lines, one turn per text block. Title is the last
@@ -111,7 +127,16 @@ adopts the imported thread as the Codex replica with an empty hash, so it is nev
   shaped like Codex's own importer output (`wiki/agents/codex.md`). The thread id is a UUIDv7 of the
   creation time with the rest derived from the origin, so a refresh rewrites the same file. For a
   Claude origin the matching record is also added to `external_agent_session_imports.json` so Codex's
-  importer does not import the session again. Anchors: `crates/core/src/adapters/codex_sessions.rs`,
+  importer does not import the session again. For a compatible append, a Codex installation with
+  the native app-server API (verified on 0.171.0) resumes the idle thread and persists user and
+  assistant messages through `thread/inject_items`. Their reserved message ids let the scanner
+  recognise these messages without duplicating native events or reading harness context.
+  The appended messages enter model requests. The visible history uses matching native turn
+  and item rows in `thread_history_1.sqlite` for paginated sessions. Legacy sessions receive
+  matching display events in their rollout. These events are excluded from the sync scanner's
+  turn list so each message travels once.
+  Compaction summaries are excluded from in-place appends. Full rewrites preserve replicas
+  containing native turn records by skipping them. Anchors: `codex_sessions.rs`, `codex_app_server.rs`,
   `codex_rollout.rs`, `codex_imports.rs`.
 
 - **OpenCode**: originals and replicas are rows of `<data home>/opencode.db`
@@ -125,8 +150,8 @@ adopts the imported thread as the Codex replica with an empty hash, so it is nev
   window flag compares `time_updated`. Sub-agent sessions (`parent_id` set) are counted as
   automated and never read; no structural marker separates a headless `opencode run` from an
   interactive session. A replica is written as in `wiki/agents/opencode.md` (rows, ids, times,
-  `event_sequence`, project row). Refresh while unmodified rewrites the replica's own rows in place;
-  a replica with a row that lacks the marker was continued in OpenCode and is left alone. Because
+  `event_sequence`, project row). Compatible continuations append new rows to idle sessions with the
+  same id and keep local message rows. Other refreshes rewrite only rows the replica writer owns. Because
   every replica is a row and not a file, a replica the user deleted is not observed, the ledger row
   stays and the session is never written again. Decision: `wiki/decisions/opencode-session-writes-gated.md`.
 
@@ -149,7 +174,8 @@ with a `skipped` note and repaired on the next run. Decision:
 `items --kind session --json` lists sessions with an empty `body` and a `session` object
 (`created_ms`, `updated_ms`, `turns`, the number of turns); no other kind carries it. `session show
 --agent <id> --id <native id> --json` prints one session's title, cwd, times and turns
-(`role`, `text`, `ts_ms`) and nothing else: it takes no lock and writes nothing. It answers
+(`role`, `text`, `ts_ms`) and nothing else: it takes no lock and writes nothing. The roles are
+`user`, `assistant` and `summary`. It answers
 `unknown_agent`, `invalid` for an id that is not a session id and `not_found`. The desktop app lists
 the sessions of a project folder (`SessionIndex`, copies folded into their original through
 `replica_of`) and shows the transcript read-only; "Show in Finder" is offered for the agents that keep
@@ -168,6 +194,10 @@ opt-in:
 |---|---|
 | `--session-days <N>` (`NATIVEMEM_SESSION_DAYS`) | Only sessions whose file was modified in the last N days; checked on the file's mtime before anything is parsed |
 | `--exclude-automated-sessions` | Leave out headless runs and sub-agent threads |
+
+`sync --session-project <path>` selects chat sessions for exactly one working directory. It
+scopes both the preview and apply, including Codex thread-row repairs. Use it with
+`--session-days` to shorten the time window.
 | `--no-sessions` | Session sync off |
 
 Sources over 200 MB and sessions without a resolvable working directory are skipped and listed by
@@ -206,7 +236,8 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 
 ## Rules
 
-- MUST: Sessions never delete, never flow back, and never make a replica an original.
+- MUST: Preserve native source transcripts and relay only compatible continuations.
+- MUST: Never delete a session or make a replica an original.
 - MUST: Every written session carries a marker that survives a lost ledger.
 - MUST: Bump the adapter's `SESSION_WRITER_REVISION` when the written format changes.
 - MUST: Render tool activity through `render_tool` so all targets read the same.
@@ -234,4 +265,4 @@ Test: `automated_claude_and_codex_sessions_are_counted_and_optionally_excluded`.
 
 ## Last updated
 
-2026-11-11
+2026-11-22

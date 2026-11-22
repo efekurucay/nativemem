@@ -361,6 +361,24 @@ impl SkillStore {
         self.project_subdir.is_some()
     }
 
+    pub(super) fn project_skill_dirs(&self) -> Option<(&Path, &[PathBuf])> {
+        Some((self.project_subdir.as_deref()?, &self.project_visible_roots))
+    }
+
+    pub(super) fn project_directory(&self, cwd: &Path) -> Option<PathBuf> {
+        let dir = cwd.join(self.project_subdir.as_ref()?);
+        let resolved = dir.canonicalize().ok();
+        let is_global = std::iter::once(&self.dir)
+            .chain(&self.visible_roots)
+            .any(|global| {
+                dir == *global
+                    || resolved
+                        .as_ref()
+                        .is_some_and(|dir| global.canonicalize().ok().as_ref() == Some(dir))
+            });
+        (!is_global).then_some(dir)
+    }
+
     fn names(&self) -> Vec<String> {
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return Vec::new();
@@ -445,11 +463,9 @@ impl SkillStore {
 
     /// Same as `write` but into a project skills directory.
     pub fn write_project(&self, cwd: &Path, item: &Item) -> Result<(String, PathBuf)> {
-        let subdir = self
-            .project_subdir
-            .as_ref()
+        let dir = self
+            .project_directory(cwd)
             .ok_or_else(|| Error::unsupported(self.agent.as_str(), "project skills"))?;
-        let dir = cwd.join(subdir);
         let (_, path) = self.write_into(&dir, cwd, item)?;
         self.remember_project(cwd)?;
         let pk = project_key(cwd);
@@ -614,10 +630,6 @@ impl SkillStore {
 
     /// Remove a project skill by its native id. Scans `cwds` for the matching project key.
     pub fn remove_project(&self, native_id: &str, cwds: &[PathBuf]) -> Result<()> {
-        let subdir = self
-            .project_subdir
-            .as_ref()
-            .ok_or_else(|| Error::unsupported(self.agent.as_str(), "project skills"))?;
         let pk = skill_project_key(native_id)
             .ok_or_else(|| Error::unsupported(self.agent.as_str(), "not a project skill id"))?;
         let name = skill_name(native_id)
@@ -627,25 +639,23 @@ impl SkillStore {
             .iter()
             .find(|c| project_key(c) == pk)
             .ok_or_else(|| Error::Parse(format!("project skill not found: {native_id:?}")))?;
-        self.remove_from(&cwd.join(subdir), cwd, name)
+        let dir = self
+            .project_directory(cwd)
+            .ok_or_else(|| Error::unsupported(self.agent.as_str(), "project skills"))?;
+        self.remove_from(&dir, cwd, name)
     }
 
     /// Scan project skill directories for the given project paths.
     pub fn scan_projects(&self, cwds: &[PathBuf]) -> Result<Vec<Observed>> {
-        let Some(ref subdir) = self.project_subdir else {
+        if self.project_subdir.is_none() {
             return Ok(Vec::new());
-        };
+        }
         let projects = self.known_projects(cwds)?;
-        let global_dir = self.dir.canonicalize().ok();
         let mut out = Vec::new();
         for cwd in &projects {
-            // Skip the agent home: its skills directory is the global one, already scanned.
-            if let Some(g) = &global_dir {
-                if cwd.join(subdir).canonicalize().ok().as_ref() == Some(g) {
-                    continue;
-                }
-            }
-            let dir = cwd.join(subdir);
+            let Some(dir) = self.project_directory(cwd) else {
+                continue;
+            };
             let Ok(entries) = fs::read_dir(&dir) else {
                 continue;
             };

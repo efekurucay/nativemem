@@ -12,7 +12,7 @@ use crate::model::{AgentId, ItemKey};
 use crate::session::{
     clean_title, derived_uuid, format_iso_ms, join_user_blocks, marker_text, parse_iso_ms,
     parse_marker, result_content_text, title_from_turns, too_large_reason, truncate_chars, Role,
-    Session, SessionOptions, SessionScan, Source, TurnBuilder,
+    Session, SessionOptions, SessionScan, Source, Turn, TurnBuilder,
 };
 
 /// Extra top-level key on every line a replica is written with. Claude Code reads lines by
@@ -21,6 +21,7 @@ use crate::session::{
 pub const MARKER_KEY: &str = "nativemem_origin";
 const CLAUDE_VERSION: &str = "2.1.322";
 const LAST_PROMPT_LIMIT: usize = 200;
+const APPENDED_UUID: &str = "2a6c739e-3b0b-8";
 
 pub struct ClaudeSessions {
     home: PathBuf,
@@ -198,7 +199,18 @@ pub fn parse(text: &str, stem: &str, mtime_ms: i64) -> Parsed {
                     .get("message")
                     .and_then(|m| m.get("content"))
                     .unwrap_or(&Value::Null);
-                if kind == "user" {
+                if kind == "user" && flag("isCompactSummary") {
+                    if let Some(summary) = content.as_str() {
+                        builder.text(Role::Summary, summary, ts);
+                    } else if let Some(parts) = content.as_array() {
+                        let summary = parts
+                            .iter()
+                            .filter_map(|p| p["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        builder.text(Role::Summary, summary, ts);
+                    }
+                } else if kind == "user" {
                     add_user(&mut builder, content, ts);
                 } else {
                     add_assistant(&mut builder, content, ts);
@@ -243,37 +255,20 @@ pub fn render(session: &Session, key: &ItemKey, uuid: &str) -> String {
     let mut parent: Option<String> = None;
     for (i, turn) in session.turns.iter().enumerate() {
         let id = derived_uuid(&format!("{marker}#{i}"));
-        let message = match turn.role {
-            Role::User => json!({ "role": "user", "content": turn.text }),
-            Role::Assistant => json!({
-                "id": format!("msg_{}", id.replace('-', "")),
-                "type": "message",
-                "role": "assistant",
-                "model": "<synthetic>",
-                "content": [{ "type": "text", "text": turn.text }],
-                "stop_reason": "end_turn",
-                "stop_sequence": null,
-                "usage": { "input_tokens": 0, "output_tokens": 0 },
-            }),
-        };
-        let mut line = json!({
-            "parentUuid": parent,
-            "isSidechain": false,
-            "type": turn.role.as_str(),
-            "message": message,
-            "uuid": id,
-            "timestamp": format_iso_ms(turn.ts_ms),
-            "userType": "external",
-            "entrypoint": "cli",
-            "cwd": cwd,
-            "sessionId": uuid,
-            "version": CLAUDE_VERSION,
-            "gitBranch": "HEAD",
-            MARKER_KEY: marker,
-        });
-        if turn.role == Role::Assistant {
-            line["requestId"] = json!(format!("req_{}", id.replace('-', "")));
+        if turn.role == Role::Summary {
+            let boundary = derived_uuid(&format!("{marker}#{i}:compact"));
+            lines.push(json!({
+                "type": "system", "subtype": "compact_boundary",
+                "content": "Conversation compacted", "isMeta": false,
+                "level": "info", "compactMetadata": { "trigger": "manual", "preTokens": 0 },
+                "uuid": boundary, "parentUuid": null, "logicalParentUuid": parent,
+                "timestamp": format_iso_ms(turn.ts_ms), "cwd": cwd,
+                "sessionId": uuid, "version": CLAUDE_VERSION, "isSidechain": false,
+            }));
+            parent = Some(boundary);
         }
+        let mut line = message_record(turn, &id, parent.as_deref(), &cwd, uuid);
+        line[MARKER_KEY] = json!(marker);
         lines.push(line);
         parent = Some(id);
     }
@@ -288,12 +283,102 @@ pub fn render(session: &Session, key: &ItemKey, uuid: &str) -> String {
             "sessionId": uuid,
         }));
     }
-    let mut out = String::new();
-    for l in lines {
-        out.push_str(&l.to_string());
-        out.push('\n');
+    lines.into_iter().map(|line| format!("{line}\n")).collect()
+}
+
+fn message_record(turn: &Turn, id: &str, parent: Option<&str>, cwd: &str, uuid: &str) -> Value {
+    let message = if turn.role == Role::Assistant {
+        json!({
+            "id": format!("msg_{}", id.replace('-', "")), "type": "message",
+            "role": "assistant", "model": "<synthetic>",
+            "content": [{ "type": "text", "text": turn.text }], "stop_reason": "end_turn",
+            "stop_sequence": null, "usage": { "input_tokens": 0, "output_tokens": 0 },
+        })
+    } else {
+        json!({ "role": "user", "content": turn.text })
+    };
+    let mut line = json!({
+        "parentUuid": parent,
+        "isSidechain": false,
+        "type": if turn.role == Role::Summary { "user" } else { turn.role.as_str() },
+        "message": message,
+        "uuid": id,
+        "timestamp": format_iso_ms(turn.ts_ms),
+        "userType": "external",
+        "entrypoint": "cli",
+        "cwd": cwd,
+        "sessionId": uuid,
+        "version": CLAUDE_VERSION,
+        "gitBranch": "HEAD",
+    });
+    if turn.role == Role::Assistant {
+        line["requestId"] = json!(format!("req_{}", id.replace('-', "")));
+    } else if turn.role == Role::Summary {
+        line["isCompactSummary"] = json!(true);
+        line["isVisibleInTranscriptOnly"] = json!(true);
     }
-    out
+    line
+}
+
+pub(super) fn continuation(raw: &str, current: &Session, turns: &[Turn]) -> Option<String> {
+    let mut records = raw
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok());
+    let mut parent = records.clone().find_map(|value| {
+        let kind = value["type"].as_str()?;
+        if value["isSidechain"] == true
+            || value["isMeta"] == true
+            || !matches!(kind, "user" | "assistant" | "attachment")
+        {
+            return None;
+        }
+        value["uuid"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    })?;
+    let mut prompt = records.find(|value| value["type"] == "last-prompt");
+    let cwd = current.cwd.to_string_lossy();
+    let mut suffix = if raw.ends_with('\n') {
+        String::new()
+    } else {
+        "\n".to_string()
+    };
+    for turn in turns {
+        let uuid = derived_uuid(&format!("{}:{parent}", current.id));
+        let id = format!("{APPENDED_UUID}{}", &uuid[15..]);
+        let line = message_record(turn, &id, Some(&parent), &cwd, &current.id);
+        suffix.push_str(&format!("{line}\n"));
+        parent = id;
+    }
+    if let Some(record) = prompt.as_mut() {
+        record["leafUuid"] = json!(parent);
+        suffix.push_str(&format!("{record}\n"));
+    }
+    Some(suffix)
+}
+
+pub(super) fn owns_replica_records(raw: &str, key: &ItemKey) -> bool {
+    let origin = marker_text(key);
+    let mut index = 0;
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .all(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                if record["type"] == "system" && record["subtype"] == "compact_boundary" {
+                    return record["uuid"] == derived_uuid(&format!("{origin}#{index}:compact"));
+                }
+                if matches!(record["type"].as_str(), Some("user" | "assistant")) {
+                    index += 1;
+                }
+                record[MARKER_KEY] == origin
+                    || record["uuid"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with(APPENDED_UUID))
+                    || record["type"] == "last-prompt"
+            })
+        })
 }
 
 #[cfg(test)]

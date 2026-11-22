@@ -16,7 +16,7 @@ repo, and `opencode.json` and `service.json` (which hold secrets) are never open
 
 | Kind | Status | Adapter |
 |---|---|---|
-| Project memory | OpenCode has no native memory: the store holds replicas and originals created through `add`, announced by a routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
+| Project memory | OpenCode has no native memory: the auxiliary store holds replicas and originals created through `add` | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
 | Instruction sections | Read and write in `AGENTS.md`, including a new section through `add` | `agents_file.rs` through `sections.rs` |
 | Sessions | Read as originals and written as copies while `opencode.db` exists and the session probes pass | `crates/core/src/adapters/opencode_sessions.rs`, `opencode_project.rs`, `agents_file.rs` |
 | Skills | Read and write in `<opencode home>/skills/` | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
@@ -84,8 +84,8 @@ else `~/.config/opencode`.
 
 - Reads `AGENTS.md` sections, the replica store and, while `opencode.db` exists, root-level non-archived sessions (`wiki/kinds/sessions.md`).
 - Writes session copies into `opencode.db` only as `wiki/decisions/opencode-session-writes-gated.md` describes.
-- Writes instruction replicas in the region at the end of `AGENTS.md`, the replica memory store under
-  `nativemem/memory/`, and the routing block in `AGENTS.md`.
+- Writes instruction replicas as ordinary Markdown in `AGENTS.md`, the replica memory store under
+  `nativemem/memory/`.
 - `opencode.json` / `opencode.jsonc`: `mcp install` adds `mcp.nativemem` = `{type: "local", command: [binary,
   "mcp", "serve", ...], enabled: true}` (under `mcp.servers` when the file keeps its servers there) and
   `mcp uninstall` removes it. The file that already holds the entry is used, else `opencode.json` when it
@@ -93,7 +93,8 @@ else `~/.config/opencode`.
   syntax tree edit (`jsonc-parser`): comments, trailing commas and formatting stay
   (`crates/hub/src/register.rs`; tests `opencode_gets_the_entry_with_comments_and_formatting_intact`,
   `opencode_follows_the_servers_layout_and_the_file_that_exists`).
-- Never touches any other file of the data directory, or a database row OpenCode created.
+- Compatible turns can be appended to the same idle native session. The transaction preserves all
+  existing messages and advances only the session's sequence and idle timestamps.
 - Subagents run OpenCode headless: `opencode run --model <model> --format json [args...] "<prompt>"`; the
   answer is the `text` events of the JSON lines, joined by a blank line (`build` and `parse_answer` in
   `crates/hub/src/harness.rs`; `wiki/architecture/hub.md`, "Subagents"). A prompt that starts with a dash is
@@ -108,7 +109,7 @@ else `~/.config/opencode`.
   exactly.
 - The TUI picker filters by project and by `path` equal to the cwd's subpath, ordered by
   `time_updated` then `id`, hiding sessions with a `parent_id` or `time_archived`.
-- None of this has been confirmed by running OpenCode; it comes from binary strings (INFERRED).
+- The filtering and sort details are inferred from binary strings.
 - Retention: no cleanup or expiry of aged sessions was found in the binary strings (INFERRED), so a
   copy is not deleted by OpenCode; only the user's archive flag hides a session.
 - The OpenCode background service may hold the database open and cache session lists; whether a copy
@@ -117,14 +118,14 @@ else `~/.config/opencode`.
 ## Quirks
 
 - **OpenCode stops reading `~/.claude/CLAUDE.md` once its own global `AGENTS.md` exists.** Creating
-  that file replaces the fallback, so the synced region must carry the Claude Code sections over.
+  that file replaces the fallback, so the synced file carries the Claude Code sections over.
   This is why the instruction replicas matter for OpenCode.
 - **Skills are read from several roots**, including `~/.claude/skills` and `~/.agents/skills`, so
   skills copied into several directories appear more than once (duplicate-name policy
   `[UNVERIFIED]`). `nativemem` writes only `<opencode home>/skills/`.
 - **Hot reload**: config documents and local instruction files are watched; no restart is needed.
 - **The default read permission is allow for files outside the project** except `.env` patterns
-  (OBSERVED in binary strings), so the routing block's absolute-path reads work. `~` expansion in the
+  (OBSERVED in binary strings), so absolute-path reads work. `~` expansion in the
   `read` tool is `[UNVERIFIED]`, so routing lines use absolute paths.
 - **MCP key layout is ambiguous**: the file uses `mcp.<name>` while the CLI's `mcp add` writes
   `mcp.servers.<name>` in 2.2.6. `mcp install` follows the layout the file already has (`mcp.servers` when
@@ -161,12 +162,18 @@ need to read and write `AGENTS.md` (test `opencode_probes_cover_the_config_dir_a
 | Fact | Evidence level | Source |
 |---|---|---|
 | Sessions are listed from the table that owns `time_suspended` | OBSERVED | live database rows and binary strings |
+| OpenCode reconstructs compacted model context from the session's checkpoint and retained messages | VERIFIED from source on 2.3.2 | [Session history](https://github.com/anomalyco/opencode/blob/v2.3.2/packages/core/src/session/history.ts) |
+| OpenCode exports a synced Pi checkpoint as part of the session | VERIFIED on 2.3.2 | `opencode --standalone session export` in an isolated profile after scoped sync |
+| The native session import command creates a session from an export and rejects an existing session id | VERIFIED from source on 2.3.2 | [Session import handler](https://github.com/anomalyco/opencode/blob/v2.3.2/packages/cli/src/commands/handlers/session/import.ts) |
+| Fresh sessions load project instructions and can attach configured project references | VERIFIED from source on 2.3.2 | [Instruction loader](https://github.com/anomalyco/opencode/blob/v2.3.2/packages/core/src/config/plugin/instruction.ts), [reference guidance](https://github.com/anomalyco/opencode/blob/v2.3.2/packages/core/src/reference/instructions.ts) |
+| A fresh turn loads project guidance from `AGENTS.md`. Standalone project notes require an explicit context mechanism | VERIFIED on 2.3.2 for the tested paths | An isolated real CLI sent the control rule to a local model endpoint. The model request contained none of the fixture notes from the project root, `.opencode/memory/`, the global config or data memory folders, or Claude Code's project notes. [Official instructions](https://opencode.ai/docs/instructions/) |
 | `path` must be `''` for root sessions | INFERRED | picker query in binary strings |
 | `-c` needs `directory` equal to the cwd | INFERRED | binary strings |
 | Project id derivation | VERIFIED against local repositories (SHA-1 of the normalised remote; root commit; `directory:` hash) | read-only recomputation |
 | Without a global `AGENTS.md` OpenCode falls back to `~/.claude/CLAUDE.md` | OBSERVED | `README.md` Notes, binary strings |
 | `session export` / `import` as the safest writer path | `[UNVERIFIED]`, not used | help text only |
-| Rows written as in the decision page are listed by `opencode -c` and the picker and open | `[UNVERIFIED]` | needs the staged check |
+| The `/sessions` picker lists and opens a synced Claude session | VERIFIED on 2.3.2 | Synthetic Claude session in the same working directory |
+| `opencode -c` automatically selects a synced copy | `[UNVERIFIED]` | needs the staged check |
 | Excess keys in a message's `data` JSON are ignored | `[UNVERIFIED]` | not testable read-only |
 | A restart of the OpenCode service is needed to see copies | `[UNVERIFIED]` | not testable read-only |
 | Project id: cache file, then origin hash, then first root commit | VERIFIED against local rows | read-only recomputation |
@@ -218,4 +225,4 @@ need to read and write `AGENTS.md` (test `opencode_probes_cover_the_config_dir_a
 
 ## Last updated
 
-2026-11-11
+2026-11-22

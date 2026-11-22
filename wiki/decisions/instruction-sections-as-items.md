@@ -12,8 +12,8 @@ Record why a global instruction file is synced as one item per `## ` section ins
 
 One item is one top-level section of a global instruction file: the text from a `## ` heading through
 the line before the next `## ` heading. The heading is the item's identity. Everything before the
-first section is preamble and is never an item. Replicas live in one marked region at the end of the
-receiving file; the rest of the file stays byte-identical.
+first section is preamble and is never an item. Replicas live as ordinary Markdown sections in the
+receiving file. Their identity is recorded by the sync tool in its state directory.
 
 ## Why
 
@@ -21,8 +21,8 @@ receiving file; the rest of the file stays byte-identical.
   overwrite a file the user owns, and the files differ legitimately between agents.
 - Sections give the three-way decision a unit small enough to avoid false conflicts: an edit to one
   section does not collide with an edit to another.
-- A marked region keeps text the user wrote outside it untouched and makes removal clean: the region
-  is created with the first replica and removed with the last.
+- Independent section identity lets the agent read a regular Markdown file. The sync tool can
+  match edits using section fingerprints and apply changes to the intended section.
 - Using the heading as identity means a renamed heading is a delete plus an add, and a replica's
   heading edit is restored while its body edit travels back.
 
@@ -44,12 +44,12 @@ receiving file; the rest of the file stays byte-identical.
 
 - MUST: Never modify the preamble.
 - MUST: Treat the heading as identity.
-- MUST: Keep replica writes inside the managed region.
+- MUST: Keep replica identity in the state directory.
 
 ## Verification checklist
 
 - [ ] Tests `replica_heading_edit_is_restored` and `rewrite_body_keeps_every_other_byte` pass
-- [ ] The marker format in `wiki/kinds/instruction-sections.md` matches `sections.rs`
+- [ ] Replica identity and ambiguity handling match `sections.rs`
 
 ## Related docs
 
