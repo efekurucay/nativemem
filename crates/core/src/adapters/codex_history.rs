@@ -597,7 +597,7 @@ mod tests {
         assert_eq!(count(&db), 1);
         db.execute(
             "UPDATE thread_history_projection_state SET next_rollout_ordinal=?1",
-            [raw.lines().count()],
+            [raw.lines().count() as i64],
         )
         .unwrap();
         sync(home, &state, &stamp, &path, THREAD, &raw).unwrap();

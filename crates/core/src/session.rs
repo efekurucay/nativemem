@@ -75,10 +75,11 @@ pub struct Session {
 }
 
 pub fn sha_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn hash_field(hash: &mut Sha256, text: &str) {
@@ -141,7 +142,7 @@ impl Session {
             hash_field(&mut hash, t.role.as_str());
             hash_field(&mut hash, &t.text);
         }
-        format!("{:x}", hash.finalize())
+        hex(&hash.finalize())
     }
 
     fn hash_context(&self) -> Sha256 {
@@ -155,7 +156,7 @@ impl Session {
     pub(crate) fn appends_to_hash(&self, recorded: &str) -> bool {
         let mut hash = self.hash_context();
         for turn in &self.turns {
-            if format!("{:x}", hash.clone().finalize()) == recorded {
+            if hex(&hash.clone().finalize()) == recorded {
                 return true;
             }
             hash_field(&mut hash, turn.role.as_str());
