@@ -20,6 +20,7 @@ public enum McpAuth: String, Codable, Sendable {
 
 public enum McpAuthState: String, Codable, Sendable {
     case none
+    case unchecked
     case signedIn = "signed_in"
     case needsLogin = "needs_login"
 }
@@ -217,7 +218,7 @@ public struct McpImportPlan: Codable, Sendable {
 
 /// What a server is doing, from `mcp list` and the last `mcp test`.
 public enum McpServerState: Equatable, Sendable {
-    /// The test has not answered yet.
+    case notTested
     case checking
     case connected
     case needsSignIn
@@ -227,10 +228,11 @@ public enum McpServerState: Equatable, Sendable {
     /// A message shown when the server needs sign-in; the hub's own wording starts like this.
     static let signInMessagePrefix = "Sign in again"
 
-    public static func derive(_ server: McpServer, test: McpTestResult?) -> McpServerState {
+    public static func derive(_ server: McpServer, test: McpTestResult?, isTesting: Bool = false) -> McpServerState {
         if !server.enabled { return .disabled }
+        if isTesting { return .checking }
         if server.auth == .oauth && server.authState == .needsLogin { return .needsSignIn }
-        guard let test else { return .checking }
+        guard let test else { return .notTested }
         if test.ok { return .connected }
         let message = test.error ?? "The server did not answer."
         if message.hasPrefix(signInMessagePrefix) { return .needsSignIn }
@@ -241,12 +243,13 @@ public enum McpServerState: Equatable, Sendable {
     public var needsAttention: Bool {
         switch self {
         case .needsSignIn, .error: true
-        case .checking, .connected, .disabled: false
+        case .notTested, .checking, .connected, .disabled: false
         }
     }
 
     public var title: String {
         switch self {
+        case .notTested: "Not tested"
         case .checking: "Checking…"
         case .connected: "Connected"
         case .needsSignIn: "Needs sign-in"

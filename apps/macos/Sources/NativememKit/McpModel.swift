@@ -21,7 +21,6 @@ public final class McpModel {
     public var selectedName: String?
     public var errorMessage: String?
 
-    private var testTask: Task<Void, Never>?
     private var loadGeneration = 0
 
     public init() {}
@@ -40,7 +39,7 @@ public final class McpModel {
     }
 
     public func state(of server: McpServer) -> McpServerState {
-        McpServerState.derive(server, test: tests[server.name])
+        McpServerState.derive(server, test: tests[server.name], isTesting: testing.contains(server.name))
     }
 
     public func toolCount(of server: McpServer) -> Int? {
@@ -53,7 +52,6 @@ public final class McpModel {
         loadGeneration += 1
         isLoaded = false
         isLoading = false
-        testTask?.cancel()
         tests = [:]
     }
 
@@ -61,7 +59,7 @@ public final class McpModel {
         if !isLoaded && !isLoading { await reload() }
     }
 
-    /// Reads the servers and the registration, then tests every enabled server in the background.
+    /// Reads server configuration and agent registrations without connecting to a server.
     public func reload() async {
         guard let cli else { return }
         loadGeneration += 1
@@ -90,7 +88,6 @@ public final class McpModel {
         }
         isLoaded = true
         keepSelectionAndTests()
-        startTests()
     }
 
     private func refreshServers() async {
@@ -110,25 +107,6 @@ public final class McpModel {
         if let selectedName, !names.contains(selectedName) { self.selectedName = nil }
     }
 
-    /// Servers that need sign-in answer without a connection, so they are not tested.
-    private func startTests() {
-        guard let cli else { return }
-        testTask?.cancel()
-        let names = servers
-            .filter { $0.enabled && !($0.auth == .oauth && $0.authState == .needsLogin) }
-            .map(\.name)
-        testTask = Task {
-            await withTaskGroup(of: (String, McpTestResult).self) { group in
-                for name in names {
-                    group.addTask { (name, await Self.runTest(cli, name)) }
-                }
-                for await (name, result) in group where !Task.isCancelled {
-                    tests[name] = result
-                }
-            }
-        }
-    }
-
     private nonisolated static func runTest(_ cli: NativememCLI, _ name: String) async -> McpTestResult {
         do {
             return try await cli.mcpTest(name)
@@ -140,12 +118,25 @@ public final class McpModel {
     // MARK: - Servers
 
     public func test(_ name: String) async {
-        guard let cli else { return }
+        guard let cli, !testing.contains(name) else { return }
         testing.insert(name)
         tests[name] = nil
         let result = await Self.runTest(cli, name)
         testing.remove(name)
-        if servers.contains(where: { $0.name == name }) { tests[name] = result }
+        if servers.contains(where: { $0.name == name }) {
+            tests[name] = result
+            if result.ok {
+                setAuthState(.signedIn, for: name)
+            } else if result.error?.hasPrefix(McpServerState.signInMessagePrefix) == true {
+                setAuthState(.needsLogin, for: name)
+            }
+        }
+    }
+
+    private func setAuthState(_ state: McpAuthState, for name: String) {
+        if let position = servers.firstIndex(where: { $0.name == name && $0.auth == .oauth }) {
+            servers[position].authState = state
+        }
     }
 
     /// Returns when `mcp login` exits; the command opens the browser itself.
@@ -156,7 +147,8 @@ public final class McpModel {
             _ = try await cli.mcpLogin(name)
             signingIn.remove(name)
             await refreshServers()
-            await test(name)
+            tests[name] = nil
+            setAuthState(.signedIn, for: name)
         } catch {
             signingIn.remove(name)
             errorMessage = error.localizedDescription
@@ -168,10 +160,11 @@ public final class McpModel {
         do {
             _ = try await cli.mcpLogout(name)
             tests[name] = nil
+            await refreshServers()
+            setAuthState(.needsLogin, for: name)
         } catch {
             errorMessage = error.localizedDescription
         }
-        await refreshServers()
     }
 
     public func setEnabled(_ name: String, _ enabled: Bool) async {
@@ -182,7 +175,7 @@ public final class McpModel {
             errorMessage = error.localizedDescription
         }
         await refreshServers()
-        if enabled { await test(name) } else { tests[name] = nil }
+        tests[name] = nil
     }
 
     public func remove(_ name: String) async {
@@ -209,9 +202,7 @@ public final class McpModel {
         }
         await refreshServers()
         selectedName = draft.trimmedName
-        if servers.first(where: { $0.name == draft.trimmedName })?.enabled == true {
-            Task { await test(draft.trimmedName) }
-        }
+        tests[draft.trimmedName] = nil
     }
 
     // MARK: - Agents

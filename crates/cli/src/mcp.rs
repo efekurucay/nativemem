@@ -11,7 +11,7 @@ use nativemem_core::fsx::BackupSession;
 use nativemem_hub::config::parse_spec_json;
 use nativemem_hub::connect::test_server;
 use nativemem_hub::import::{self, AgentRoots, Status};
-use nativemem_hub::oauth::{self, AuthState, LoginOptions};
+use nativemem_hub::oauth::{self, LoginOptions};
 use nativemem_hub::register::{self, AgentOutcome, Backups, Entry};
 use nativemem_hub::secrets::validate_secret_id;
 use nativemem_hub::{FileStore, HubConfig, HubError, KeychainStore, SecretStore, ServerSpec};
@@ -34,6 +34,9 @@ pub enum McpCommand {
     Serve,
     /// List the configured servers
     List {
+        /// List configuration without checking Keychain for OAuth tokens
+        #[arg(long)]
+        no_auth_check: bool,
         /// Print one JSON document
         #[arg(long)]
         json: bool,
@@ -175,7 +178,7 @@ impl McpArgs {
     pub fn json(&self) -> bool {
         match &self.command {
             McpCommand::Serve => false,
-            McpCommand::List { json }
+            McpCommand::List { json, .. }
             | McpCommand::Add { json }
             | McpCommand::Edit { json, .. }
             | McpCommand::Remove { json, .. }
@@ -225,13 +228,13 @@ fn masked(values: &std::collections::BTreeMap<String, String>) -> Value {
         .into()
 }
 
-fn server_json(name: &str, spec: &ServerSpec, auth_state: AuthState) -> Value {
+fn server_json(name: &str, spec: &ServerSpec, auth_state: &str) -> Value {
     let mut doc = json!({
         "name": name,
         "transport": spec.transport.as_str(),
         "enabled": spec.enabled,
         "auth": spec.auth.as_str(),
-        "auth_state": auth_state.as_str(),
+        "auth_state": auth_state,
         "args": spec.args,
         "env": masked(&spec.env),
         "headers": masked(&spec.headers),
@@ -249,17 +252,21 @@ fn server_json(name: &str, spec: &ServerSpec, auth_state: AuthState) -> Value {
     doc
 }
 
-fn list(config: &HubConfig, store: &dyn SecretStore, json: bool) -> Outcome<()> {
+fn list(config: &HubConfig, store: Option<&dyn SecretStore>, json: bool) -> Outcome<()> {
     let mut states = Vec::new();
     for (name, spec) in &config.servers {
-        states.push(oauth::auth_state(name, spec, store)?);
+        states.push(match store {
+            Some(store) => oauth::auth_state(name, spec, store)?.as_str(),
+            None if spec.auth.as_str() == "oauth" => "unchecked",
+            None => "none",
+        });
     }
     if json {
         let servers: Vec<Value> = config
             .servers
             .iter()
             .zip(&states)
-            .map(|((n, s), state)| server_json(n, s, *state))
+            .map(|((n, s), state)| server_json(n, s, state))
             .collect();
         print_json(&json!({ "servers": servers }));
         return Ok(());
@@ -273,7 +280,7 @@ fn list(config: &HubConfig, store: &dyn SecretStore, json: bool) -> Outcome<()> 
             spec.transport.as_str(),
             if spec.enabled { "enabled" } else { "disabled" },
             spec.auth.as_str(),
-            state.as_str(),
+            state,
             match spec.secret_ids().join(", ") {
                 s if s.is_empty() => "none".to_string(),
                 s => s,
@@ -307,7 +314,11 @@ pub fn run(
         McpCommand::Serve => {
             nativemem_hub::serve::run_stdio(HubConfig::load(state)?, store, state.clone())?;
         }
-        McpCommand::List { .. } => list(&HubConfig::load(state)?, &*store, json)?,
+        McpCommand::List { no_auth_check, .. } => list(
+            &HubConfig::load(state)?,
+            (!no_auth_check).then_some(&*store),
+            json,
+        )?,
         McpCommand::Add { .. } => {
             let (name, spec) = parse_spec_json(&read_stdin()?)?;
             let name = name.ok_or_else(|| {

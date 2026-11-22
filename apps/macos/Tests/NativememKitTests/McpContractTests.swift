@@ -120,7 +120,8 @@ import Testing
 
     @Test func aServerWithoutAnswerIsChecking() throws {
         let github = try servers()[0]
-        #expect(McpServerState.derive(github, test: nil) == .checking)
+        #expect(McpServerState.derive(github, test: nil) == .notTested)
+        #expect(McpServerState.derive(github, test: nil, isTesting: true) == .checking)
     }
 
     @Test func aPassingTestMeansConnected() throws {

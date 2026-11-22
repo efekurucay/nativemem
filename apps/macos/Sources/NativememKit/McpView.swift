@@ -196,6 +196,8 @@ private struct McpStateLabel: View {
 
     var body: some View {
         switch state {
+        case .notTested:
+            Text(state.title).font(.caption).foregroundStyle(.secondary)
         case .checking:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.small)
@@ -299,12 +301,13 @@ private struct McpServerDetail: View {
             Button("Test") { Task { await model.test(server.name) } }
                 .disabled(!server.enabled || isTesting || isSigningIn)
             if server.auth == .oauth {
-                if server.authState == .signedIn {
+                if server.authState != .needsLogin {
                     Button("Sign out") { Task { await model.signOut(server.name) } }
-                        .disabled(isSigningIn)
-                } else {
+                        .disabled(isSigningIn || isTesting)
+                }
+                if server.authState != .signedIn {
                     Button("Sign in") { Task { await model.signIn(server.name) } }
-                        .disabled(isSigningIn)
+                        .disabled(isSigningIn || isTesting)
                 }
             }
             Toggle("Enabled", isOn: Binding(

@@ -139,6 +139,22 @@ fn fake_spec(name: &str) -> String {
 }
 
 #[test]
+fn listing_configuration_can_skip_secret_store_entirely() {
+    let fx = Fx::new();
+    let spec = json!({
+        "name": "docs", "transport": "http", "url": "http://127.0.0.1:1/mcp", "auth": "oauth",
+    })
+    .to_string();
+    assert_eq!(fx.json(&["add", "--json"], &spec).0, 0);
+    fs::create_dir_all(fx.secrets()).unwrap();
+    fs::write(fx.secrets().join("secrets.json"), "invalid test data").unwrap();
+    assert_eq!(fx.json(&["list", "--json"], "").0, 1);
+    let (code, listing) = fx.json(&["list", "--no-auth-check", "--json"], "");
+    assert_eq!(code, 0);
+    assert_eq!(listing["servers"][0]["auth_state"], "unchecked");
+}
+
+#[test]
 fn add_list_edit_enable_disable_remove() {
     let fx = Fx::new();
     let (code, doc) = fx.json(&["add", "--json"], &fake_spec("alpha"));
