@@ -120,6 +120,10 @@ nativemem-sync/
 │   │   ├── AppModel.swift        observable state, grouping, copy folding
 │   │   ├── MemoryIndex.swift     agent display names, project keys, grouping of items
 │   │   ├── ProjectTree.swift     folder tree built from project paths
+│   │   ├── MaintenanceReport.swift, IndexRepairSheet.swift  findings for existing lists and a preview of Claude Code index repairs
+│   │   ├── ContextReview.swift, ContextReviewSheet.swift  resumable full and updates-only card reviews
+│   │   ├── ReviewAdviceSheet.swift  opt-in subagent advice for memory, instructions, and skill text
+│   │   ├── SkillEditorSheet.swift  compare skill copies and edit one SKILL.md
 │   │   ├── SyncSession.swift     preview then apply flow
 │   │   ├── BodyText.swift, MarkdownBlocks.swift  body rendering
 │   │   └── SidebarView, ItemListView, ItemDetailView, OverviewView, SyncSheet, ContentView
@@ -191,4 +195,4 @@ nativemem-sync/
 
 ## Last updated
 
-2026-11-22
+2026-11-23

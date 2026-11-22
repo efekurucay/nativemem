@@ -50,6 +50,10 @@ public final class AppModel {
     public private(set) var status: StatusDocument?
     public private(set) var doctor: DoctorDocument?
     public private(set) var isLoading = false
+    private var reviewedSelection: SidebarSelection?
+    private var reviewedContext: MaintenanceReport?
+    private var reviewedRevision: Int?
+    public private(set) var isReviewingContext = false
     public private(set) var isLoadingSessions = false
     public private(set) var sessionsLoaded = false
     public private(set) var sessionError: String?
@@ -131,6 +135,69 @@ public final class AppModel {
         return index.sections(for: selection, matching: itemSearch)
     }
 
+    var contextReport: MaintenanceReport? {
+        guard reviewedSelection == sidebar, reviewedRevision == dataRevision, !showsSessions else { return nil }
+        return reviewedContext
+    }
+
+    func reviewContext() async {
+        guard let selection = sidebar, !showsSessions, !isReviewingContext, !isEditing else { return }
+        isReviewingContext = true
+        defer { isReviewingContext = false }
+        let previous = dataRevision
+        await reload()
+        if dataRevision != previous, sidebar == selection {
+            reviewedSelection = selection
+            await refreshContext(for: selection)
+        }
+    }
+
+    func makeContextReview(updatesOnly: Bool = false) async -> ContextReview? {
+        guard let selection = sidebar, let key = ContextReview.key(for: selection), !showsSessions else { return nil }
+        await reviewContext()
+        guard selection == sidebar, let report = contextReport, errorMessage == nil else { return nil }
+        let baseline = contextCoverageIsComplete
+            ? UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode([ReviewRecord].self, from: $0) }
+            : nil
+        let progress = contextCoverageIsComplete
+            ? UserDefaults.standard.data(forKey: "progress." + key)
+                .flatMap { try? JSONDecoder().decode([String: ContextReview.Answer].self, from: $0) }
+            : nil
+        return ContextReview(selection: selection, items: index.items(in: selection), report: report,
+                             baseline: baseline, progress: progress ?? [:], updatesOnly: updatesOnly)
+    }
+
+    func saveContextReview(_ selection: SidebarSelection, answers: [String: ContextReview.Answer], complete: Bool) {
+        guard contextCoverageIsComplete, errorMessage == nil, let key = ContextReview.key(for: selection) else { return }
+        let progressKey = "progress." + key
+        if !complete {
+            guard let data = try? JSONEncoder().encode(answers) else { return }
+            UserDefaults.standard.set(data, forKey: progressKey)
+            return
+        }
+        let records = index.items(in: selection).map { ReviewRecord($0, wasSkipped: answers[$0.id]?.decision == .skip) }
+        guard let data = try? JSONEncoder().encode(records) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+        UserDefaults.standard.removeObject(forKey: progressKey)
+    }
+
+    private var contextCoverageIsComplete: Bool {
+        guard let doctor else { return false }
+        let kinds = [Item.memoryKind, Item.instructionKind, Item.skillKind]
+        return !doctor.agents.contains { agent in agent.paused.contains { kinds.contains($0) } }
+    }
+
+    private func refreshContext(for selection: SidebarSelection) async {
+        let revision = dataRevision
+        let items = index.items(in: selection)
+        let report = await Task.detached(priority: .userInitiated) {
+            MaintenanceReport(items: items)
+        }.value
+        guard !Task.isCancelled, revision == dataRevision, reviewedSelection == selection else { return }
+        reviewedContext = report
+        reviewedRevision = revision
+    }
+
     public var selectedItem: LogicalItem? {
         guard let id = selectedItemID else { return nil }
         return showsSessions ? sessionIndex.item(id: id) : index.item(id: id)
@@ -181,6 +248,10 @@ public final class AppModel {
             isLoadingSessions = false
             sessionError = nil
             dataRevision += 1
+            if let selection = reviewedSelection, !isReviewingContext {
+                await refreshContext(for: selection)
+                guard generation == reloadGeneration else { return }
+            }
             mcp.invalidate()
             subagents.invalidate()
             if showsSessions { await loadSessions() }
@@ -241,10 +312,10 @@ public final class AppModel {
             selectedItemID = nil
             editDraft = nil
             editError = nil
+            await reload()
         } catch {
             errorMessage = error.localizedDescription
         }
-        await reload()
     }
 
     // MARK: - Creating

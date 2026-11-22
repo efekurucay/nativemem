@@ -95,7 +95,7 @@ struct Raw {
     end: usize,
 }
 
-fn fence_run(line: &str) -> Option<(char, usize, &str)> {
+pub(super) fn fence_run(line: &str) -> Option<(char, usize, &str)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
         return None;

@@ -8,6 +8,19 @@ use crate::model::AgentId;
 
 /// Write via a temp file in the same directory, fsync, rename. Creates parent dirs.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic(path, bytes, None)
+}
+
+/// Replace a regular file while retaining its permissions.
+pub fn atomic_write_with_permissions(
+    path: &Path,
+    bytes: &[u8],
+    permissions: fs::Permissions,
+) -> Result<()> {
+    write_atomic(path, bytes, Some(permissions))
+}
+
+fn write_atomic(path: &Path, bytes: &[u8], permissions: Option<fs::Permissions>) -> Result<()> {
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -20,6 +33,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = dir.join(format!(".{file_name}.nativemem-tmp-{}", std::process::id()));
     let write = || -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
+        if let Some(permissions) = permissions {
+            f.set_permissions(permissions)?;
+        }
         f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path)

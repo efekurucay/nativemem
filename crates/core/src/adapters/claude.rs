@@ -15,7 +15,7 @@ use crate::slug::slugify;
 
 use super::claude_probes;
 use super::claude_sessions::{self, ClaudeSessions, MARKER_KEY};
-use super::sections::InstructionFile;
+use super::sections::{self, InstructionFile};
 use super::skills::{self, skill_name, SkillReport, SkillStore};
 
 const INSTRUCTION_FILE: &str = "CLAUDE.md";
@@ -76,6 +76,15 @@ struct Scan {
 struct Doc {
     fm: Vec<String>,
     body: String,
+}
+
+pub struct MemoryIndexRepair {
+    pub path: PathBuf,
+    pub removed: Vec<String>,
+    pub added: Vec<String>,
+    pub creates_index: bool,
+    pub token: String,
+    pub applied: bool,
 }
 
 impl ClaudeAdapter {
@@ -469,7 +478,7 @@ impl ClaudeAdapter {
     fn update_index(&self, mem: &Path, file: &str, name: &str, description: &str) -> Result<()> {
         let path = mem.join(INDEX_FILE);
         let old = read_optional(&path)?.unwrap_or_else(|| NEW_INDEX.to_string());
-        let line = format!("- [{name}]({file}) — {description}");
+        let line = index_entry(name, file, description);
         let mut out = String::new();
         let mut placed = false;
         for l in old.split_inclusive('\n') {
@@ -510,6 +519,133 @@ impl ClaudeAdapter {
             return Ok(());
         }
         self.overwrite(&path, &out)
+    }
+
+    /// Build or apply a review of one native MEMORY.md. Only recognized index links
+    /// and entries for readable, regular notes participate.
+    pub fn repair_memory_index(
+        &self,
+        project_dir: &str,
+        expected: Option<&str>,
+    ) -> Result<MemoryIndexRepair> {
+        let mut components = Path::new(project_dir).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+            || project_dir.contains(['/', '\\'])
+        {
+            return Err(Error::Parse("invalid Claude project directory".into()));
+        }
+        let projects = self.projects_dir();
+        let project = projects.join(project_dir);
+        let memory = project.join("memory");
+        for directory in [&projects, &project, &memory] {
+            let metadata = fs::symlink_metadata(directory).map_err(|e| Error::io(directory, e))?;
+            if !metadata.is_dir() {
+                return Err(Error::Parse(
+                    "Claude memory index must be in a regular project directory".into(),
+                ));
+            }
+        }
+        let path = memory.join(INDEX_FILE);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(Error::Parse(
+                    "Claude memory index is not a regular file".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::io(&path, e)),
+        }
+        let old = read_optional(&path)?;
+        let mut updated = String::new();
+        let mut listed = BTreeSet::new();
+        let mut removed = Vec::new();
+        let mut fence = None;
+        for line in old.as_deref().unwrap_or(NEW_INDEX).split_inclusive('\n') {
+            let run = sections::fence_run(line.trim_end_matches(['\r', '\n']));
+            if let Some((character, length)) = fence {
+                if run.is_some_and(|(c, n, rest)| {
+                    character == c && n >= length && rest.trim().is_empty()
+                }) {
+                    fence = None;
+                }
+            } else if let Some((c, n, _)) =
+                run.filter(|(c, _, rest)| *c != '`' || !rest.contains('`'))
+            {
+                fence = Some((c, n));
+            } else if let Some(target) = index_target(line) {
+                match fs::symlink_metadata(memory.join(&target)) {
+                    Ok(_) => {
+                        listed.insert(target);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        removed.push(target);
+                        continue;
+                    }
+                    Err(e) => return Err(Error::io(memory.join(target), e)),
+                }
+            }
+            updated.push_str(line);
+        }
+        if fence.is_some() {
+            return Err(Error::Parse(
+                "close the unfinished code fence before repairing this index".into(),
+            ));
+        }
+        let eol = if old.as_ref().is_some_and(|text| text.contains("\r\n")) {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let mut added = Vec::new();
+        for note in memory_files(&memory)? {
+            let file = file_name(&note);
+            if listed.contains(&file)
+                || !fs::symlink_metadata(&note)
+                    .map_err(|e| Error::io(&note, e))?
+                    .is_file()
+            {
+                continue;
+            }
+            let bytes = fs::read(&note).map_err(|e| Error::io(&note, e))?;
+            let Some(doc) = std::str::from_utf8(&bytes).ok().and_then(parse_doc) else {
+                continue;
+            };
+            let Some(name) = field(&doc.fm, "name", false) else {
+                continue;
+            };
+            let description = field(&doc.fm, "description", false).unwrap_or_else(|| name.clone());
+            if !updated.is_empty() && !updated.ends_with('\n') {
+                updated.push_str(eol);
+            }
+            updated.push_str(&index_entry(&name, &file, &description));
+            updated.push_str(eol);
+            added.push(file);
+        }
+        let creates_index = old.is_none() && !added.is_empty();
+        let changed = creates_index || !removed.is_empty() || !added.is_empty();
+        let bytes = serde_json::to_vec(&(project_dir, &old, &updated))
+            .map_err(|e| Error::Parse(e.to_string()))?;
+        let token = sha_hex(&bytes);
+        if let Some(expected) = expected {
+            if token != expected || read_optional(&path)? != old {
+                return Err(Error::Parse(
+                    "memory index or notes changed; preview the repair again".into(),
+                ));
+            }
+            if changed {
+                self.overwrite(&path, &updated)?;
+            }
+        }
+        Ok(MemoryIndexRepair {
+            path,
+            removed,
+            added,
+            creates_index,
+            token,
+            applied: expected.is_some() && changed,
+        })
     }
 
     /// The directory name of the project `cwd` below `projects/`. A project without one gets the
@@ -1046,16 +1182,36 @@ fn render(fm: &str, body: &str) -> String {
 fn is_index_line(line: &str, file: &str) -> bool {
     // Match only the first link target on the line so a description that happens
     // to reference another memory file cannot collide with that file's row.
-    let Some(rest) = line.strip_prefix("- [") else {
-        return false;
-    };
-    let Some((_label, after)) = rest.split_once("](") else {
-        return false;
-    };
-    let Some((target, _)) = after.split_once(')') else {
-        return false;
-    };
-    target == file
+    index_target(line).is_some_and(|target| target == file)
+}
+
+fn index_entry(name: &str, file: &str, description: &str) -> String {
+    let label = name.replace(['[', ']', '\r', '\n'], " ");
+    let description = description.replace(['\r', '\n'], " ");
+    let target = sections::encode(file);
+    format!("- [{label}]({target}) — {description}")
+}
+
+fn index_target(line: &str) -> Option<String> {
+    let rest = line
+        .strip_prefix("- [")
+        .or_else(|| line.strip_prefix("* ["))
+        .or_else(|| line.strip_prefix("+ ["))?;
+    let (_, after) = rest.split_once("](")?;
+    let (target, _) = after.split_once(')')?;
+    let target = target
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(target);
+    if target.contains([':', '#', '?']) {
+        return None;
+    }
+    let decoded = sections::decode(target)?;
+    let name = decoded.strip_prefix("./").unwrap_or(&decoded);
+    (name.to_ascii_lowercase().ends_with(".md")
+        && !name.contains(['/', '\\'])
+        && name != INDEX_FILE)
+        .then(|| name.to_string())
 }
 
 fn kv(line: &str, key: &str) -> Option<String> {

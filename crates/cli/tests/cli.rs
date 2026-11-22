@@ -95,6 +95,57 @@ fn a_full_apply_removes_memory_routing_without_removing_notes() {
 }
 
 #[test]
+fn memory_index_repair_previews_exact_changes_and_refuses_stale_tokens() {
+    let f = Fx::new();
+    let dir = f.claude_file.parent().unwrap();
+    let index = dir.join("MEMORY.md");
+    let old = "# Notes\r\n\r\nKeep this paragraph.\r\n- [Missing](missing.md) — gone\r\n\r\n```md\r\n- [Example](example.md)\r\n```\r\n";
+    fs::write(&index, old).unwrap();
+    let args = ["repair-memory-index", "--project-dir=-w-app", "--json"];
+    let (status, preview) = f.json(&args);
+    assert_eq!(status, Some(0));
+    assert_eq!(preview["removed"], json!(["missing.md"]));
+    assert_eq!(preview["added"], json!(["a.md"]));
+    assert_eq!(preview["applied"], false);
+    assert_eq!(fs::read_to_string(&index).unwrap(), old);
+    assert!(!f.state.join("backups").exists());
+
+    let external = format!("{old}Keep this update.\r\n");
+    fs::write(&index, &external).unwrap();
+    let stale = format!("--apply={}", preview["token"].as_str().unwrap());
+    let (status, error) = f.json(&[args.as_slice(), &[stale.as_str()]].concat());
+    assert_eq!(status, Some(1));
+    assert_eq!(error["code"], "parse");
+    assert_eq!(fs::read_to_string(&index).unwrap(), external);
+
+    let (_, preview) = f.json(&args);
+    let fresh = format!("--apply={}", preview["token"].as_str().unwrap());
+    let (status, result) = f.json(&[args.as_slice(), &[fresh.as_str()]].concat());
+    assert_eq!(status, Some(0));
+    assert_eq!(result["applied"], true);
+    let repaired = fs::read_to_string(&index).unwrap();
+    assert_eq!(
+        repaired,
+        format!(
+            "{}- [alpha](a.md) — about alpha\r\n",
+            external.replace("- [Missing](missing.md) — gone\r\n", "")
+        )
+    );
+    assert!(fs::read_dir(f.state.join("backups")).unwrap().any(|stamp| {
+        fs::read_to_string(
+            stamp
+                .unwrap()
+                .path()
+                .join("claude/projects/-w-app/memory/MEMORY.md"),
+        )
+        .is_ok_and(|backup| backup == external)
+    }));
+    let (_, clean) = f.json(&args);
+    assert_eq!(clean["removed"], json!([]));
+    assert_eq!(clean["added"], json!([]));
+}
+
+#[test]
 fn full_apply_cleans_instruction_markers_in_all_four_agents() {
     let f = four_agents();
     let profiles = [
@@ -1550,6 +1601,63 @@ fn skills_of(f: &Fx, agent: &str) -> std::path::PathBuf {
         other => f.state.with_file_name(other),
     };
     home.join("skills")
+}
+
+#[test]
+fn skill_edit_backs_up_text_rejects_stale_edits_and_syncs() {
+    let f = four_agents();
+    let dir = skill_dir(&skills_of(&f, "claude"), "demo-skill", "before");
+    let file = dir.join("SKILL.md");
+    let source = fs::read_to_string(&file).unwrap();
+    let changed = source.replace("before", "after");
+    fs::write(dir.join("other.txt"), "keep").unwrap();
+    assert_eq!(f.json(&["sync", "--apply", "--json"]).0, Some(0));
+    let (code, shown) = f.json(&[
+        "skill",
+        "show",
+        "--agent",
+        "claude",
+        "--id",
+        "skill:demo-skill",
+        "--json",
+    ]);
+    assert_eq!(code, Some(0));
+    assert!(shown["manifest"].as_str().unwrap().contains(" other.txt"));
+    let hash = shown["text_hash"].as_str().unwrap();
+    let args = [
+        "skill",
+        "edit",
+        "--agent",
+        "claude",
+        "--id",
+        "skill:demo-skill",
+        "--expect",
+        hash,
+        "--json",
+    ];
+    fs::write(skills_of(&f, "codex").join("demo-skill/SKILL.md"), &changed).unwrap();
+    assert_eq!(run_stdin(&f, &changed, &args).0, Some(0));
+    assert_eq!(run_stdin(&f, &source, &args).0, Some(1));
+    assert_eq!(fs::read_to_string(&file).unwrap(), changed);
+    assert_eq!(fs::read_to_string(dir.join("other.txt")).unwrap(), "keep");
+    assert!(fs::read_dir(f.state.join("backups")).unwrap().any(|stamp| {
+        fs::read_to_string(
+            stamp
+                .unwrap()
+                .path()
+                .join("claude/skills/demo-skill/SKILL.md"),
+        )
+        .is_ok_and(|text| text == source)
+    }));
+    let (code, report) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["summary"]["update"], 2);
+    for agent in ["codex", "opencode", "pi"] {
+        assert_eq!(
+            fs::read_to_string(skills_of(&f, agent).join("demo-skill/SKILL.md")).unwrap(),
+            changed
+        );
+    }
 }
 
 #[test]

@@ -8,7 +8,8 @@ extension SyncPlan {
             (summary.update, "to update"),
             (summary.remove, "to remove"),
         ].filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }
-        return parts.isEmpty ? "Everything is in sync." : parts.joined(separator: ", ")
+        let status = parts + unresolvedCounts
+        return status.isEmpty ? "Everything is in sync." : status.joined(separator: ", ")
     }
 
     public var resultSummary: String {
@@ -17,9 +18,17 @@ extension SyncPlan {
             (summary.update, "updated"),
             (summary.remove, "removed"),
         ].filter { $0.0 > 0 }.map { "\($0.1) \($0.0)" }
-        guard !parts.isEmpty else { return "Nothing needed to change." }
-        let text = parts.joined(separator: ", ")
+        let status = parts + unresolvedCounts
+        guard !status.isEmpty else { return "Nothing needed to change." }
+        let text = status.joined(separator: ", ")
         return text.prefix(1).uppercased() + text.dropFirst() + "."
+    }
+
+    private var unresolvedCounts: [String] {
+        [
+            (summary.conflicts, summary.conflicts == 1 ? "conflict" : "conflicts"),
+            (summary.skipped, "skipped"),
+        ].filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }
     }
 
     public var hasChanges: Bool { !actions.isEmpty }

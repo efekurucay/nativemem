@@ -6,6 +6,7 @@ struct ItemDetailView: View {
     let item: LogicalItem
     let onDelete: () async -> Void
     @State private var confirmingDelete = false
+    @State private var showingSkillEditor = false
 
     var body: some View {
         Group {
@@ -17,12 +18,14 @@ struct ItemDetailView: View {
         }
         .toolbar {
             ToolbarItemGroup {
-                if !model.isEditing {
-                    Button("Edit", systemImage: "pencil") {
-                        model.beginEdit()
+                if !model.isEditing && model.contextReport == nil {
+                    if item.primary.isSkill {
+                        Button("Edit", systemImage: "pencil") { showingSkillEditor = true }
+                    } else {
+                        Button("Edit", systemImage: "pencil") { model.beginEdit() }
+                            .disabled(editBlockedReason != nil)
+                            .help(editBlockedReason ?? "Edit this memory")
                     }
-                    .disabled(editBlockedReason != nil)
-                    .help(editBlockedReason ?? "Edit this memory")
                 }
                 Button("Show in Finder", systemImage: "folder") {
                     NSWorkspace.shared.activateFileViewerSelecting([
@@ -30,10 +33,11 @@ struct ItemDetailView: View {
                     ])
                 }
                 .help("Show in Finder")
-                if !model.isEditing {
+                if !model.isEditing && model.contextReport == nil {
                     Button("Delete…", systemImage: "trash", role: .destructive) {
                         confirmingDelete = true
                     }
+                    .disabled(isGeneratedMemory)
                     .help(item.primary.isSkill ? "Delete this skill" : "Delete this memory")
                 }
             }
@@ -48,14 +52,30 @@ struct ItemDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("It will be removed from \(agentDisplayName(item.primary.agent)) now and from the other agents at the next sync. A backup is kept in ~/.nativemem/backups.")
+            Text(deleteImpact)
         }
+        .sheet(isPresented: $showingSkillEditor) {
+            SkillEditorSheet(model: model, item: item)
+        }
+    }
+
+    private var isGeneratedMemory: Bool {
+        item.primary.agent == "codex" && item.primary.kind == Item.memoryKind && item.primary.nativeId.contains("#")
+    }
+
+    private var deleteImpact: String {
+        let source = "This entry will be removed from \(agentDisplayName(item.primary.agent)) now. A backup will be kept."
+        guard !item.copies.isEmpty else { return source }
+        let copies = item.copies.map { "\(agentDisplayName($0.agent)) · \($0.path)" }.joined(separator: "\n")
+        return "\(source)\n\nThe next sync can remove these linked copies:\n\(copies)"
     }
 
     private var editBlockedReason: String? {
         if item.primary.isSkill { return "Skills are edited as files: edit the skill files directly." }
         if item.originalMissing { return "The original is missing, so there is nothing to edit." }
-        if model.uneditableItemIDs.contains(item.id) { return "Its agent regenerates this entry, so it cannot be edited." }
+        if isGeneratedMemory || model.uneditableItemIDs.contains(item.id) {
+            return "Its agent regenerates this entry, so it cannot be edited."
+        }
         return nil
     }
 
@@ -78,9 +98,13 @@ struct ItemDetailView: View {
                     }
                 }
 
+                if let report = model.contextReport {
+                    reviewActions(report)
+                }
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Lives in").font(.headline)
-                    if item.primary.isSkill {
+                    if item.primary.isSkill || model.contextReport != nil {
                         Text(item.project.path ?? "Global · available across projects")
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -101,7 +125,7 @@ struct ItemDetailView: View {
                                         ])
                                     }
                                     .labelStyle(.iconOnly)
-                                    .help("Show \(agentDisplayName(copy.agent)) skill in Finder")
+                                    .help("Show \(agentDisplayName(copy.agent)) file in Finder")
                                 }
                                 Text(copy.path)
                                     .font(.caption.monospaced())
@@ -124,10 +148,55 @@ struct ItemDetailView: View {
                     SkillTextView(model: model, item: item)
                 } else {
                     BodyText(blocks: MarkdownBlocks.parse(item.primary.body))
+                    if model.contextReport != nil {
+                        ForEach(item.copies.filter { !$0.hash.isEmpty && $0.hash != item.primary.hash }, id: \.self) { copy in
+                            DisclosureGroup("\(agentDisplayName(copy.agent)) copy") {
+                                BodyText(blocks: MarkdownBlocks.parse(copy.body))
+                            }
+                        }
+                    }
                 }
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func reviewActions(_ report: MaintenanceReport) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let duplicates = report.duplicates.first(where: { $0.notes.contains(where: { $0.id == item.id }) }) {
+                Text("This note shares its body with another note. Compare their descriptions and categories before removing either.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                ForEach(duplicates.notes.filter { $0.id != item.id }) { other in
+                    Button("Open \(other.primary.name) · \(agentDisplayName(other.primary.agent))", systemImage: "doc.on.doc") {
+                        model.requestItem(other.id)
+                    }
+                }
+            }
+            if item.primary.isSkill {
+                let differentAgents = item.copies.filter { $0.hash != item.primary.hash }.map { agentDisplayName($0.agent) }
+                if !differentAgents.isEmpty {
+                    Label("Different copies · \(differentAgents.joined(separator: ", "))", systemImage: "exclamationmark.circle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+            }
+            HStack {
+                if item.primary.isSkill {
+                    Button("Compare & Edit", systemImage: "pencil") { showingSkillEditor = true }
+                } else {
+                    Button("Edit", systemImage: "pencil") { model.beginEdit() }
+                        .disabled(editBlockedReason != nil)
+                        .help(editBlockedReason ?? "Edit the source entry")
+                }
+                Button("Remove…", systemImage: "trash", role: .destructive) {
+                    confirmingDelete = true
+                }
+                .disabled(isGeneratedMemory)
+                .help(isGeneratedMemory ? "Codex regenerates this entry" : "Review the impact before removing this entry")
+            }
+            .buttonStyle(.bordered)
         }
     }
 

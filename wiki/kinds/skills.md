@@ -64,6 +64,13 @@ makes the copies of one name one logical item: the origin is the origin the ledg
 the first agent in adapter order (claude, codex, opencode, pi) that holds it; the other copies are
 its replicas. `items` applies the same linking, so `replica_of` is set for skills.
 
+The desktop Compare & Edit sheet shows which files differ using the manifests from `skill show --json`.
+It edits the selected agent's own regular `SKILL.md` with `skill edit`, which checks the text hash
+under the state lock and backs up the file before replacing it. Other files are outside this edit.
+Ask Subagent sends the name, description and current editor text to a user-selected subagent.
+An edit recommendation can replace the draft for the selected copy. Save writes the draft.
+Use the existing Sync preview to review propagation after saving.
+
 ## Propagation
 
 Mirror policy, the decision table of `wiki/architecture/overview.md` with these differences:
@@ -74,6 +81,8 @@ Mirror policy, the decision table of `wiki/architecture/overview.md` with these 
 - First run on a machine where identical copies exist: adoption only, zero writes
   (`identical_copies_everywhere_change_nothing_on_disk`).
 - A write-back from a replica does not rewrite the editing agent's own directory.
+- When the original and an edited copy have identical content, the ledger records that match
+  and sync updates the remaining copies. A copy with different edits still raises a conflict.
 - Writes copy the tree into `.<name>.nativemem-tmp-<pid>` next to the target, verify its manifest,
   then swap by rename (`SkillStore::write`). The old directory is backed up whole first
   (`fsx::backup_dir`). Executable bits are kept. No temporary directory remains

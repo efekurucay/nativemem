@@ -633,9 +633,43 @@ fn plan_key(
         plan.actions.push(Action::Forget { key: key.clone() });
         return Ok(());
     }
+    let mut converged = Vec::new();
+    if kind == Kind::Skill && orig_changed {
+        changed.retain(|side| {
+            if let Some(observed) = side.obs {
+                if content_hash(&observed.item) == cur {
+                    converged.push(observed);
+                    return false;
+                }
+            }
+            true
+        });
+    }
     if changed.len() > 1 || (changed.len() == 1 && orig_changed) {
         conflict(plan, "edited on both sides");
         return Ok(());
+    }
+    for copy in converged {
+        plan.actions.push(Action::Adopt {
+            item: ItemRow {
+                key: key.clone(),
+                kind,
+                scope: scope.clone(),
+                hash: cur.clone(),
+            },
+            replica: ReplicaRow {
+                key: key.clone(),
+                agent: copy.agent.clone(),
+                replica_native_id: copy.native_id.clone(),
+                path: copy.path.clone(),
+                hash: cur.clone(),
+                revision: adapters
+                    .iter()
+                    .find(|a| a.id() == copy.agent)
+                    .map_or(0, |a| a.writer_revision(kind)),
+            },
+            name: copy.item.name.clone(),
+        });
     }
     if let (Kind::Skill, Scope::Project(cwd)) = (kind, &scope) {
         // Count the roots already on disk and those earlier targets will write in this plan.

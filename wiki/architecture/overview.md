@@ -199,6 +199,28 @@ file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebr
 (`apps/macos/Sources/NativememKit/NativememCLI.swift`). Compatibility notices from the snapshot's
 `doctor` member appear on Overview (`wiki/architecture/compatibility.md`).
 
+**Context Maintenance** runs from Review in the existing project, global, and skill lists. Findings
+appear on existing rows. The snapshot groups identical memory bodies within a project and identifies
+linked copies with different hashes. Item detail provides source and copy paths, edits, and backed-up
+removals. Skill usage is shown as unknown. The Sync toolbar previews propagation. Claude Code index
+findings open a repair preview in the same list. The CLI checks the preview token under the state lock
+before changing a native index, and backs up an existing index before writing it.
+Review Cards opens a one-entry-at-a-time review with keep, edit, remove and skip.
+Findings include guidance on what to check. On editable memory and instruction cards, Ask Subagent
+sends the entry name, description and body to an explicitly selected configured subagent. An edit
+recommendation can populate the editor. The existing save and removal actions own disk writes.
+The completed review records entry IDs, names, hashes and skipped cards in the desktop preferences
+for that scope. The next review prioritizes skipped cards and new, changed or absent entries.
+Review Updates in the Review Cards menu shows only those entries and cards with a finding.
+A scope without a completed baseline opens the full card list. Both actions use the same progress
+and completion baseline for that scope.
+An in-progress review records its decisions and content fingerprints in the same scoped preferences.
+Reopening it skips completed cards whose fingerprints still match and shows cards that changed.
+Sync preview and results report unresolved conflicts and skipped items alongside applied changes.
+Skill editing compares directory manifests and writes the chosen copy's SKILL.md with a backup.
+Ask Subagent in the skill editor reviews its current SKILL.md draft and can return an edit to that
+same editor for the user's review.
+
 ## Source anchors
 
 - `crates/core/src/model.rs`
@@ -242,4 +264,4 @@ file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebr
 
 ## Last updated
 
-2026-11-22
+2026-11-23

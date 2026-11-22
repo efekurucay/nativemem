@@ -196,6 +196,13 @@ public struct SkillText: Codable, Hashable, Sendable {
     public var name: String
     public var path: String
     public var text: String
+    public var textHash: String?
+    public var manifest: String?
+}
+
+struct SkillEditResult: Decodable, Sendable {
+    let path: String
+    let textHash: String
 }
 
 public struct SessionTurn: Codable, Hashable, Sendable {
