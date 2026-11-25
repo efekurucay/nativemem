@@ -84,6 +84,7 @@ Rollback from the backup directory is described there too.
 - `crates/core/src/adapters/codex_threads.rs`
 - `crates/core/src/adapters/codex_history.rs`
 - `crates/core/src/adapters/sqlite_guard.rs`
+- `crates/core/src/adapters/codex_history.rs`
 - `crates/core/src/adapters/opencode_sessions.rs`
 - `README.md` (Safety section)
 
