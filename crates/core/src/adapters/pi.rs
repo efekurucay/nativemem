@@ -15,7 +15,8 @@ use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
 use crate::session::{
     clean_title, derived_uuid, format_iso_ms, is_session_id, join_user_blocks, marker_text,
     parse_iso_ms, parse_marker, result_content_text, set_mtime, title_from_turns, too_large_reason,
-    Role, Session, SessionOptions, SessionReport, SessionScan, Source, TurnBuilder,
+    Role, Session, SessionOptions, SessionReport, SessionScan, Source, Turn, TurnBuilder,
+    MAX_SOURCE_BYTES,
 };
 
 use super::agents_file::AgentsFileAdapter;
@@ -27,12 +28,13 @@ const AGENT: &str = "pi";
 /// the model context.
 pub const MARKER_TYPE: &str = "nativemem-origin";
 /// Bump when the written session format changes; unmodified replicas are then rewritten.
-const SESSION_WRITER_REVISION: u32 = 2;
+const SESSION_WRITER_REVISION: u32 = 4;
 /// Assistant messages of a replica carry this `api`. Pi restores the model a session recorded from
 /// the last `model_change` or the last assistant message that is not virtual
 /// (`core/virtual-models.js` `getBranchSelection`), and warns when that model does not exist. A
 /// virtual message never names a restorable model, so the replica opens with Pi's own default.
 const REPLICA_API: &str = "pi-virtual";
+const APPENDED_ENTRY_ID: &str = "8a3257fe-76bb-8";
 
 pub struct PiAdapter {
     home: PathBuf,
@@ -192,10 +194,33 @@ pub fn parse(text: &str, mtime_ms: i64) -> Option<Parsed> {
         }
     }
 
+    let checkpoint = path
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(position, &index)| {
+            let entry = &entries[index];
+            if entry["type"] != "compaction" {
+                return None;
+            }
+            let summary = entry["summary"].as_str().filter(|s| !s.is_empty())?;
+            let kept = entry["firstKeptEntryId"].as_str();
+            let boundary = path[..position]
+                .iter()
+                .position(|&index| entries[index]["id"].as_str() == kept)
+                .unwrap_or(position);
+            let ts = entry["timestamp"].as_str().and_then(parse_iso_ms);
+            Some((boundary, summary, ts))
+        });
     let mut builder = TurnBuilder::default();
     let mut last_ts = header_ms.unwrap_or(mtime_ms);
-    for i in path {
+    for (position, i) in path.into_iter().enumerate() {
         let e = &entries[i];
+        if let Some((boundary, summary, ts)) = checkpoint {
+            if position == boundary {
+                builder.text(Role::Summary, summary, ts.unwrap_or(last_ts));
+            }
+        }
         if e.get("type").and_then(Value::as_str) != Some("message") {
             continue;
         }
@@ -231,15 +256,7 @@ pub fn parse(text: &str, mtime_ms: i64) -> Option<Parsed> {
 pub fn render(session: &Session, key: &ItemKey, uuid: &str) -> String {
     let marker = marker_text(key);
     let mut used: HashSet<String> = HashSet::new();
-    let mut next_id = |seed: String| {
-        let full = derived_uuid(&seed);
-        let mut id = full[..8].to_string();
-        if !used.insert(id.clone()) {
-            id = full.clone();
-            used.insert(id.clone());
-        }
-        id
-    };
+    let mut next_id = |seed: String| entry_id(&mut used, &seed);
     let created = format_iso_ms(session.created_ms);
     let mut lines = vec![json!({
         "type": "session",
@@ -262,30 +279,7 @@ pub fn render(session: &Session, key: &ItemKey, uuid: &str) -> String {
     parent = title_id;
     for (i, turn) in session.turns.iter().enumerate() {
         let id = next_id(format!("{marker}#{i}"));
-        let message = match turn.role {
-            Role::User => json!({
-                "role": "user",
-                "content": [{ "type": "text", "text": turn.text }],
-                "timestamp": turn.ts_ms,
-            }),
-            Role::Assistant => json!({
-                "role": "assistant",
-                "content": [{ "type": "text", "text": turn.text }],
-                "api": REPLICA_API,
-                "provider": "nativemem",
-                "model": "replica",
-                "usage": {
-                    "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
-                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
-                },
-                "stopReason": "stop",
-                "timestamp": turn.ts_ms,
-            }),
-        };
-        lines.push(json!({
-            "type": "message", "id": id, "parentId": parent,
-            "timestamp": format_iso_ms(turn.ts_ms), "message": message,
-        }));
+        lines.push(turn_entry(turn, &id, &parent));
         parent = id;
     }
     let mut out = String::new();
@@ -294,6 +288,68 @@ pub fn render(session: &Session, key: &ItemKey, uuid: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+fn entry_id(used: &mut HashSet<String>, seed: &str) -> String {
+    let full = derived_uuid(seed);
+    let short = full[..8].to_string();
+    if used.insert(short.clone()) {
+        short
+    } else {
+        used.insert(full.clone());
+        full
+    }
+}
+
+fn turn_entry(turn: &Turn, id: &str, parent: &str) -> Value {
+    let timestamp = format_iso_ms(turn.ts_ms);
+    if turn.role == Role::Summary {
+        return json!({
+            "type": "compaction", "id": id, "parentId": parent, "timestamp": timestamp,
+            "summary": turn.text, "firstKeptEntryId": id, "tokensBefore": 0,
+        });
+    }
+    let mut message = json!({
+        "role": turn.role.as_str(), "content": [{ "type": "text", "text": turn.text }],
+        "timestamp": turn.ts_ms,
+    });
+    if turn.role == Role::Assistant {
+        message["api"] = json!(REPLICA_API);
+        message["provider"] = json!("pi");
+        message["model"] = json!("virtual");
+        message["usage"] = json!({
+            "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
+        });
+        message["stopReason"] = json!("stop");
+    }
+    json!({
+        "type": "message", "id": id, "parentId": parent, "timestamp": timestamp, "message": message,
+    })
+}
+
+fn owns_replica_records(text: &str, key: &ItemKey) -> bool {
+    let mut used = HashSet::new();
+    let marker = marker_text(key);
+    text.lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+        .all(|(index, line)| {
+            let seed = match index {
+                0 => format!("{marker}#marker"),
+                1 => format!("{marker}#title"),
+                _ => format!("{marker}#{}", index - 2),
+            };
+            let expected = entry_id(&mut used, &seed);
+            record_id(line).is_some_and(|id| id == expected || id.starts_with(APPENDED_ENTRY_ID))
+        })
+}
+
+fn record_id(line: &str) -> Option<String> {
+    serde_json::from_str::<Value>(line).ok()?["id"]
+        .as_str()
+        .map(str::to_string)
 }
 
 fn file_name(p: &Path) -> String {
@@ -334,6 +390,10 @@ impl PiAdapter {
         self.blocked = kinds.to_vec();
         self.instructions = self.instructions.with_blocked_kinds(kinds);
         self
+    }
+
+    pub fn adopt_memory_notes(&self) -> Result<()> {
+        self.instructions.adopt_memory_notes()
     }
 
     /// Directories Pi also reads skills from; copies there are never written.
@@ -464,9 +524,19 @@ impl PiAdapter {
             dir.join(format!("{ts}{suffix}"))
         });
         let text = render(&session, key, &uuid);
-        let current = fs::read_to_string(&path).ok();
+        let current = match fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(Error::io(&path, e)),
+        };
         if current.as_deref() != Some(text.as_str()) {
-            if current.is_some() {
+            if let Some(raw) = current.as_deref() {
+                if !owns_replica_records(raw, key) {
+                    return Err(Error::unsupported(
+                        AGENT,
+                        "rewrite a session with native entries",
+                    ));
+                }
                 fsx::backup(
                     &self.backups,
                     &self.state_dir,
@@ -485,6 +555,10 @@ impl PiAdapter {
 impl Adapter for PiAdapter {
     fn id(&self) -> AgentId {
         AgentId::new(AGENT)
+    }
+
+    fn finish(&self) -> Result<Vec<(String, String)>> {
+        self.instructions.finish()
     }
 
     fn version(&self) -> Option<String> {
@@ -509,6 +583,90 @@ impl Adapter for PiAdapter {
         } else {
             0
         }
+    }
+
+    fn can_append_session(&self, _target: &Observed, turns: &[Turn]) -> bool {
+        self.options.is_some() && !turns.iter().any(|turn| turn.role == Role::Summary)
+    }
+
+    fn append_session(&self, target: &Observed, item: &Item) -> Result<()> {
+        let unavailable = |operation| Error::unsupported(AGENT, operation);
+        let current = Session::from_body(&target.item.body)
+            .ok_or_else(|| unavailable("invalid target session"))?;
+        let head =
+            Session::from_body(&item.body).ok_or_else(|| unavailable("invalid continuation"))?;
+        let turns = head
+            .appended_turns(&current)
+            .filter(|turns| self.can_append_session(target, turns))
+            .ok_or_else(|| unavailable("append requires compatible message turns"))?;
+        let root = self
+            .sessions_dir()
+            .canonicalize()
+            .map_err(|_| unavailable("session directory is missing"))?;
+        let path = target
+            .path
+            .canonicalize()
+            .map_err(|_| unavailable("target session is missing"))?;
+        if !path.starts_with(&root) {
+            return Err(unavailable("target is outside the session directory"));
+        }
+        let metadata = fs::metadata(&path).map_err(|e| Error::io(&path, e))?;
+        if metadata.len() > MAX_SOURCE_BYTES {
+            return Err(unavailable("target session exceeds the size limit"));
+        }
+        let raw = fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+        let header = raw
+            .lines()
+            .next()
+            .and_then(|line| serde_json::from_str::<Value>(line).ok());
+        if !header.is_some_and(|value| value["version"] == 3) {
+            return Err(unavailable("target session uses another file version"));
+        }
+        let valid = parse(&raw, current.updated_ms).is_some_and(|parsed| {
+            parsed.session.id == current.id && parsed.session.hash() == current.hash()
+        });
+        if !valid {
+            return Err(unavailable("target session changed after planning"));
+        }
+        let mut parent = raw
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .and_then(record_id)
+            .ok_or_else(|| unavailable("target session has no leaf entry"))?;
+        let mut appended = if raw.ends_with('\n') {
+            String::new()
+        } else {
+            "\n".to_string()
+        };
+        for turn in turns {
+            let uuid = derived_uuid(&format!("{}:{parent}", current.id));
+            let id = format!("{APPENDED_ENTRY_ID}{}", &uuid[15..]);
+            appended.push_str(&turn_entry(turn, &id, &parent).to_string());
+            appended.push('\n');
+            parent = id;
+        }
+        if raw.len() as u64 + appended.len() as u64 > MAX_SOURCE_BYTES {
+            return Err(unavailable("continuation exceeds the session size limit"));
+        }
+        let projected = parse(&format!("{raw}{appended}"), head.updated_ms)
+            .is_some_and(|parsed| parsed.session.includes(&head) && head.includes(&parsed.session));
+        if !projected {
+            return Err(unavailable(
+                "continuation changes the existing conversation",
+            ));
+        }
+        fsx::backup(
+            &self.backups,
+            &self.state_dir,
+            &self.id(),
+            &self.home,
+            &target.path,
+        )?;
+        if !fsx::append_checked(&path, raw.as_bytes(), appended.as_bytes())? {
+            return Err(unavailable("target session changed while appending"));
+        }
+        Ok(())
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
@@ -539,6 +697,10 @@ impl Adapter for PiAdapter {
 
     fn visible_copy(&self, native_id: &str) -> Option<String> {
         self.instructions.visible_copy(native_id)
+    }
+
+    fn project_skill_dirs(&self) -> Option<(&Path, &[PathBuf])> {
+        self.instructions.project_skill_dirs()
     }
 
     fn skill_report(&self) -> Result<SkillReport> {
@@ -606,6 +768,48 @@ mod tests {
         );
         assert_eq!(encode_cwd("/Users/x"), "--Users-x--");
         assert_eq!(encode_cwd("C:\\w\\app"), "--C--w-app--");
+    }
+
+    #[test]
+    fn places_the_active_checkpoint_before_its_retained_turns() {
+        let mut t = header();
+        t += &msg(
+            "a1",
+            Value::Null,
+            json!({"role": "user", "content": "history"}),
+        );
+        t += &msg(
+            "a2",
+            json!("a1"),
+            json!({"role": "user", "content": "retained"}),
+        );
+        t += &format!(
+            "{}\n",
+            json!({
+                "id": "a3", "parentId": "a2", "type": "compaction",
+                "summary": "checkpoint", "firstKeptEntryId": "a2", "tokensBefore": 100
+            })
+        );
+        t += &msg(
+            "a4",
+            json!("a3"),
+            json!({"role": "user", "content": "later"}),
+        );
+        let session = parse(&t, 4000).unwrap().session;
+        let turns: Vec<_> = session
+            .turns
+            .iter()
+            .map(|t| (t.role.as_str(), t.text.as_str()))
+            .collect();
+        assert_eq!(
+            turns,
+            [
+                ("user", "history"),
+                ("summary", "checkpoint"),
+                ("user", "retained"),
+                ("user", "later")
+            ]
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ private struct LoadingCLI {
             fi
             if [ -f session-delay ]; then /bin/sleep 0.2; fi
             /bin/cat sessions.json ;;
-          'mcp list --json')
+          'mcp list --no-auth-check --json')
             echo '{"servers":[{"name":"demo","transport":"stdio","enabled":true,"auth":"none","auth_state":"none","args":[],"env":{},"headers":{},"secrets":[]}]}' ;;
           'mcp status --json') echo '{"agents":[]}' ;;
           'mcp test --json -- demo') echo '{"ok":true,"tools":[]}' ;;
@@ -144,9 +144,11 @@ private struct LoadingCLI {
         #expect(fake.calls.count == 1)
         await model.mcp.loadIfNeeded()
         await model.mcp.loadIfNeeded()
-        for _ in 0..<500 where model.mcp.tests["demo"] == nil { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(model.mcp.tests["demo"] == nil)
+        #expect(fake.calls.filter { $0.hasPrefix("mcp test") }.isEmpty)
+        await model.mcp.test("demo")
         #expect(model.mcp.tests["demo"]?.ok == true)
-        #expect(fake.calls.filter { $0 == "mcp list --json" }.count == 1)
+        #expect(fake.calls.filter { $0 == "mcp list --no-auth-check --json" }.count == 1)
         #expect(fake.calls.filter { $0 == "mcp test --json -- demo" }.count == 1)
         await model.subagents.loadIfNeeded()
         await model.subagents.loadIfNeeded()
@@ -154,7 +156,7 @@ private struct LoadingCLI {
         #expect(fake.calls.filter { $0 == "subagent list --json" }.count == 1)
         await model.reload()
         #expect(!model.mcp.isLoaded && !model.subagents.isLoaded)
-        #expect(fake.calls.filter { $0 == "mcp list --json" }.count == 1)
+        #expect(fake.calls.filter { $0 == "mcp list --no-auth-check --json" }.count == 1)
     }
 
     @Test func aSlowSnapshotCannotOverwriteANewerReload() async throws {

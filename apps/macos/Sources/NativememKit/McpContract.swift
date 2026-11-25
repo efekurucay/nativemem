@@ -20,12 +20,44 @@ public enum McpAuth: String, Codable, Sendable {
 
 public enum McpAuthState: String, Codable, Sendable {
     case none
+    case unchecked
     case signedIn = "signed_in"
     case needsLogin = "needs_login"
 }
 
+public struct McpOAuthSettings: Codable, Hashable, Sendable {
+    public var clientID: String?
+    public var clientSecret: String?
+    public var callbackPort: Int?
+    public var scopes: [String]
+    public var resourceMetadataURL: String?
+    public var authorizationParams: [String: String]
+
+    private enum CodingKeys: String, CodingKey {
+        case scopes
+        case clientID = "client_id"
+        case clientSecret = "client_secret"
+        case callbackPort = "callback_port"
+        case resourceMetadataURL = "resource_metadata_url"
+        case authorizationParams = "authorization_params"
+    }
+
+    public init(
+        clientID: String? = nil, clientSecret: String? = nil, callbackPort: Int? = nil,
+        scopes: [String] = [], resourceMetadataURL: String? = nil,
+        authorizationParams: [String: String] = [:]
+    ) {
+        self.clientID = clientID
+        self.clientSecret = clientSecret
+        self.callbackPort = callbackPort
+        self.scopes = scopes
+        self.resourceMetadataURL = resourceMetadataURL
+        self.authorizationParams = authorizationParams
+    }
+}
+
 /// One server of the hub, as `mcp list --json` prints it. A secret value is never part of it:
-/// `env` and `headers` hold `secret:<id>` references or the word `<literal>`.
+/// `env`, `headers` and the OAuth client secret hold `secret:<id>` references or `<literal>`.
 public struct McpServer: Codable, Hashable, Sendable, Identifiable {
     public static let secretPrefix = "secret:"
 
@@ -40,19 +72,21 @@ public struct McpServer: Codable, Hashable, Sendable, Identifiable {
     public var url: String?
     public var env: [String: String]
     public var headers: [String: String]
+    public var oauth: McpOAuthSettings?
     public var secrets: [String]
 
     public var id: String { name }
 
     private enum CodingKeys: String, CodingKey {
-        case name, transport, enabled, auth, command, args, cwd, url, env, headers, secrets
+        case name, transport, enabled, auth, command, args, cwd, url, env, headers, oauth, secrets
         case authState = "auth_state"
     }
 
     public init(
         name: String, transport: McpTransport, enabled: Bool = true, auth: McpAuth = .none,
         authState: McpAuthState = .none, command: String? = nil, args: [String] = [], cwd: String? = nil,
-        url: String? = nil, env: [String: String] = [:], headers: [String: String] = [:], secrets: [String] = []
+        url: String? = nil, env: [String: String] = [:], headers: [String: String] = [:],
+        oauth: McpOAuthSettings? = nil, secrets: [String] = []
     ) {
         self.name = name
         self.transport = transport
@@ -65,6 +99,7 @@ public struct McpServer: Codable, Hashable, Sendable, Identifiable {
         self.url = url
         self.env = env
         self.headers = headers
+        self.oauth = oauth
         self.secrets = secrets
     }
 
@@ -217,7 +252,7 @@ public struct McpImportPlan: Codable, Sendable {
 
 /// What a server is doing, from `mcp list` and the last `mcp test`.
 public enum McpServerState: Equatable, Sendable {
-    /// The test has not answered yet.
+    case notTested
     case checking
     case connected
     case needsSignIn
@@ -227,10 +262,11 @@ public enum McpServerState: Equatable, Sendable {
     /// A message shown when the server needs sign-in; the hub's own wording starts like this.
     static let signInMessagePrefix = "Sign in again"
 
-    public static func derive(_ server: McpServer, test: McpTestResult?) -> McpServerState {
+    public static func derive(_ server: McpServer, test: McpTestResult?, isTesting: Bool = false) -> McpServerState {
         if !server.enabled { return .disabled }
+        if isTesting { return .checking }
         if server.auth == .oauth && server.authState == .needsLogin { return .needsSignIn }
-        guard let test else { return .checking }
+        guard let test else { return .notTested }
         if test.ok { return .connected }
         let message = test.error ?? "The server did not answer."
         if message.hasPrefix(signInMessagePrefix) { return .needsSignIn }
@@ -241,12 +277,13 @@ public enum McpServerState: Equatable, Sendable {
     public var needsAttention: Bool {
         switch self {
         case .needsSignIn, .error: true
-        case .checking, .connected, .disabled: false
+        case .notTested, .checking, .connected, .disabled: false
         }
     }
 
     public var title: String {
         switch self {
+        case .notTested: "Not tested"
         case .checking: "Checking…"
         case .connected: "Connected"
         case .needsSignIn: "Needs sign-in"

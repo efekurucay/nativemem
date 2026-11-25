@@ -196,6 +196,8 @@ private struct McpStateLabel: View {
 
     var body: some View {
         switch state {
+        case .notTested:
+            Text(state.title).font(.caption).foregroundStyle(.secondary)
         case .checking:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.small)
@@ -251,6 +253,22 @@ private struct McpServerDetail: View {
                         if server.transport == .http {
                             LabeledContent("Sign-in", value: server.auth == .oauth ? "OAuth" : "None")
                         }
+                        if let oauth = server.oauth {
+                            if let clientID = oauth.clientID { LabeledContent("OAuth client ID") { mono(clientID) } }
+                            if let clientSecret = oauth.clientSecret {
+                                LabeledContent("OAuth client secret") { mono(clientSecret) }
+                            }
+                            if let port = oauth.callbackPort {
+                                LabeledContent("OAuth callback") { mono("http://127.0.0.1:\(port)/callback") }
+                            }
+                            if let metadata = oauth.resourceMetadataURL {
+                                LabeledContent("Protected resource metadata") { mono(metadata) }
+                            }
+                            if !oauth.scopes.isEmpty {
+                                LabeledContent("OAuth scopes") { mono(oauth.scopes.joined(separator: "\n")) }
+                            }
+                            valueRows("Authorization parameters", oauth.authorizationParams)
+                        }
                         valueRows(server.transport == .stdio ? "Environment" : "Headers",
                                   server.transport == .stdio ? server.env : server.headers)
                     }
@@ -299,12 +317,13 @@ private struct McpServerDetail: View {
             Button("Test") { Task { await model.test(server.name) } }
                 .disabled(!server.enabled || isTesting || isSigningIn)
             if server.auth == .oauth {
-                if server.authState == .signedIn {
+                if server.authState != .needsLogin {
                     Button("Sign out") { Task { await model.signOut(server.name) } }
-                        .disabled(isSigningIn)
-                } else {
+                        .disabled(isSigningIn || isTesting)
+                }
+                if server.authState != .signedIn {
                     Button("Sign in") { Task { await model.signIn(server.name) } }
-                        .disabled(isSigningIn)
+                        .disabled(isSigningIn || isTesting)
                 }
             }
             Toggle("Enabled", isOn: Binding(

@@ -73,6 +73,15 @@ pub(crate) fn resolve(spec: &ServerSpec, store: &dyn SecretStore) -> Result<Reso
     for (k, v) in &spec.headers {
         out.headers.insert(k.clone(), one(v)?);
     }
+    if let (Some(source), Some(target)) = (&spec.oauth, &mut out.oauth) {
+        target.client_id = source.client_id.as_deref().map(&mut one).transpose()?;
+        target.client_secret = source.client_secret.as_deref().map(&mut one).transpose()?;
+        target.resource_metadata_url = source
+            .resource_metadata_url
+            .as_deref()
+            .map(&mut one)
+            .transpose()?;
+    }
     Ok(Resolved { spec: out, secrets })
 }
 
@@ -146,8 +155,7 @@ async fn open(
             }
             let config = config.custom_headers(headers);
             if spec.auth == Auth::Oauth {
-                let url = spec.url.clone().unwrap_or_default();
-                let auth = oauth::authorized_client(name, &url, store, state)
+                let auth = oauth::authorized_client(name, spec, store, state)
                     .await
                     .map_err(|e| match e {
                         None => ConnectError::NeedsLogin(name.to_string()),

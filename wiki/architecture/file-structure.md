@@ -57,11 +57,13 @@ nativemem-sync/
 │   │       ├── testkit.rs        fixture builders: ClaudeHome, CodexHome, PiHome, OpencodeData (temp dirs only; `testkit_opencode_schema.sql` is the real structure of OpenCode's session tables)
 │   │       └── adapters/
 │   │           ├── mod.rs        adapter module list
-│   │           ├── claude.rs     Claude Code: project memory, CLAUDE.md sections, session replicas
+│   │           ├── claude.rs     Claude Code: native project notes, state-only replica identity, CLAUDE.md sections, session replicas
 │   │           ├── claude_sessions.rs  Claude transcript reader and writer
 │   │           ├── codex.rs      Codex: generated-memory originals, replica store, AGENTS.md, rollouts
 │   │           ├── codex_sessions.rs   Codex rollout reader (originals, replica detection, automated markers)
 │   │           ├── codex_threads.rs    `threads` row writer for replica rollouts, database backup and retention
+│   │           ├── codex_history.rs    visible continuation writer for paginated and legacy threads
+│   │           ├── codex_memory.rs     Codex ad-hoc note inputs and identity catalog
 │   │           ├── sqlite_guard.rs     shared by the Codex and OpenCode row writers: busy timeout, busy-or-failed, online backup once per run, 5 kept
 │   │           ├── opencode_sessions.rs  OpenCode session reader and writer for `opencode.db` (rows, marker, verify)
 │   │           ├── opencode_project.rs   OpenCode project id and worktree for a directory (SHA-1, git rules)
@@ -73,22 +75,22 @@ nativemem-sync/
 │   │           ├── opencode_probes.rs  OpenCode probes: config directory, AGENTS.md, session tables, installed version
 │   │           ├── pi.rs         Pi: AGENTS.md through agents_file, session reader and writer
 │   │           ├── agents_file.rs      generic adapter for agents that only read a global AGENTS.md (OpenCode, Pi)
-│   │           ├── skills.rs     skill directories: manifest hash, staged tree copy, project path index, per-project backups, visible roots, layout probe
-│   │           ├── memory_store.rs     item-file store (originals and replicas) plus routing block, shared by Codex, OpenCode, Pi
-│   │           └── sections.rs   instruction-section parser, managed regions, byte-preserving edits, markers
+│   │           ├── skills.rs     skill directories: manifest hash, staged tree copy, project path index, per-project backups, native visible roots, layout probe
+│   │           ├── memory_store.rs     item-file store (originals and replicas), used by OpenCode and Pi
+│   │           └── sections.rs   instruction-section parser, state-only replica identity, byte-preserving edits
 │   │   └── tests/                probes.rs (probes, drift, blocked kinds), opencode_sessions.rs (OpenCode reader, writer, database safety, probes, engine flow), skills.rs (skill mirroring over four temp homes)
 │   ├── hub/                      library `nativemem-hub`: the MCP hub; not a sync kind, no engine or ledger
 │   │   ├── src/
 │   │   │   ├── lib.rs            module list
-│   │   │   ├── config.rs         `hub.toml`: ServerSpec, HubConfig, validation, load, backed-up atomic save
+│   │   │   ├── config.rs         `hub.toml`: ServerSpec, OAuthSpec, HubConfig, validation, load, backed-up atomic save
 │   │   │   ├── secrets.rs        SecretStore trait, KeychainStore, FileStore (tests), `secret:<id>` references
 │   │   │   ├── connect.rs        connect to one upstream (stdio child or streamable HTTP, bearer for OAuth servers), secret resolution, scrubbing, `mcp test`
-│   │   │   ├── serve.rs          HubServer: tool naming, forwarding, `nativemem_status`, subagent tools, stdio serving
+│   │   │   ├── serve.rs          HubServer: tool naming, forwarding, `nativemem_status`, disabled server-add tool, subagent tools, stdio serving
 │   │   │   ├── subagents.rs      `subagents.toml`: SubagentSpec, Harness, SubagentConfig, validation, load, backed-up atomic save
 │   │   │   ├── harness.rs        the headless command of each harness, executable lookup, answer parsing
 │   │   │   ├── runner.rs         Runner: one run with timeout and process-group kill, 4 at a time, depth guard, answer cut
 │   │   │   ├── import.rs         read the agents' MCP entries, plan and apply the import
-│   │   │   ├── oauth.rs          OAuth sign-in (PKCE, discovery, registration, loopback redirect), token store, refresh lock, logout
+│   │   │   ├── oauth.rs          OAuth sign-in (PKCE, discovery, dynamic or pre-registered client, fixed or reusable loopback redirect), token store, refresh lock, logout
 │   │   │   ├── register.rs       register the hub in each agent: the `nativemem` MCP entry (Claude, Codex, OpenCode, Pi), install, uninstall, status
 │   │   │   └── bin/fake_mcp.rs   `nativemem-fake-mcp`, a tiny stdio MCP server for tests
 │   │   └── tests/                hub.rs (proxy, failures, secrets, HTTP headers), import.rs (four fake agent homes), oauth.rs (sign-in, refresh, needs_login over a fake authorization server), register.rs (the entry in four fake agent homes), subagents.rs (every harness against fake scripts, timeout, depth, cut, concurrency, the hub tools), common/fake_oauth.rs (the fake server, also used by the CLI tests)
@@ -108,7 +110,7 @@ nativemem-sync/
 │   │   ├── SessionIndex.swift, SessionDetailView.swift  sessions per project folder, read-only transcript
 │   │   ├── NewEntry.swift, NewEntrySheet.swift  the New sheet: draft and validation, the form
 │   │   ├── McpContract.swift, McpCLI.swift  Codable types of the `mcp` documents, server state and badge count; the `mcp` commands
-│   │   ├── McpModel.swift, McpDraft.swift  the MCP & Integrations screen state and import flow; the Add server / Edit draft
+│   │   ├── McpModel.swift, McpDraft.swift  the MCP & Integrations screen state and import flow; the Add server / Edit draft, including OAuth client settings
 │   │   ├── McpView.swift, McpServerSheet.swift, McpImportSheet.swift  agents box, server list and detail; the Add / Edit sheet; the import sheet
 │   │   ├── SubagentContract.swift, SubagentCLI.swift  Codable types of the `subagent` documents and run results; the `subagent` commands
 │   │   ├── SubagentModel.swift, SubagentDraft.swift  the Subagents screen state and its Try it run; the New subagent / Edit draft
@@ -117,6 +119,10 @@ nativemem-sync/
 │   │   ├── Contract.swift        Codable types mirroring the CLI JSON contract
 │   │   ├── AppModel.swift        observable state, grouping, copy folding
 │   │   ├── MemoryIndex.swift     agent display names, project keys, grouping of items
+│   │   ├── MaintenanceReport.swift, IndexRepairSheet.swift  findings for existing lists and a preview of Claude Code index repairs
+│   │   ├── ContextReview.swift, ContextReviewSheet.swift  resumable full and updates-only card reviews
+│   │   ├── ReviewAdviceSheet.swift  opt-in subagent advice for memory, instructions, and skill text
+│   │   ├── SkillEditorSheet.swift  compare skill copies and edit one SKILL.md
 │   │   ├── ProjectTree.swift     folder tree built from project paths
 │   │   ├── SyncSession.swift     preview then apply flow
 │   │   ├── BodyText.swift, MarkdownBlocks.swift  body rendering
@@ -189,4 +195,4 @@ nativemem-sync/
 
 ## Last updated
 
-2026-11-11
+2026-11-25

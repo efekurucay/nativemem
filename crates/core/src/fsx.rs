@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,6 +8,19 @@ use crate::model::AgentId;
 
 /// Write via a temp file in the same directory, fsync, rename. Creates parent dirs.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic(path, bytes, None)
+}
+
+/// Replace a regular file while retaining its permissions.
+pub fn atomic_write_with_permissions(
+    path: &Path,
+    bytes: &[u8],
+    permissions: fs::Permissions,
+) -> Result<()> {
+    write_atomic(path, bytes, Some(permissions))
+}
+
+fn write_atomic(path: &Path, bytes: &[u8], permissions: Option<fs::Permissions>) -> Result<()> {
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -20,6 +33,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = dir.join(format!(".{file_name}.nativemem-tmp-{}", std::process::id()));
     let write = || -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
+        if let Some(permissions) = permissions {
+            f.set_permissions(permissions)?;
+        }
         f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path)
@@ -28,6 +44,42 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         Error::io(path, e)
     })
+}
+
+/// Append one buffer using the native append flag. A concurrent writer keeps its bytes.
+/// Returns false if the file differs before or after the append.
+pub(crate) fn append_checked(path: &Path, expected: &[u8], tail: &[u8]) -> Result<bool> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| Error::io(path, e))?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(expected.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::io(path, e))?;
+    if bytes != expected {
+        return Ok(false);
+    }
+    let count = file.write(tail).map_err(|e| Error::io(path, e))?;
+    if count != tail.len() {
+        return Err(Error::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "the session append was incomplete",
+            ),
+        ));
+    }
+    file.sync_data().map_err(|e| Error::io(path, e))?;
+    bytes.clear();
+    fs::File::open(path)
+        .map_err(|e| Error::io(path, e))?
+        .take(expected.len() as u64 + tail.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::io(path, e))?;
+    Ok(bytes.get(..expected.len()) == Some(expected) && bytes.get(expected.len()..) == Some(tail))
 }
 
 /// One UTC timestamp shared by every backup made in a process run.
@@ -217,6 +269,20 @@ mod tests {
         assert_eq!(fs::read(&p).unwrap(), b"two");
         let leftovers: Vec<_> = fs::read_dir(p.parent().unwrap()).unwrap().collect();
         assert_eq!(leftovers.len(), 1);
+    }
+
+    #[test]
+    fn append_checked_preserves_the_file_when_the_expected_prefix_has_changed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        fs::write(&path, b"original\nnew turn\n").unwrap();
+        assert!(!append_checked(&path, b"original\n", b"another turn\n").unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"original\nnew turn\n");
+        assert!(append_checked(&path, b"original\nnew turn\n", b"another turn\n").unwrap());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"original\nnew turn\nanother turn\n"
+        );
     }
 
     #[test]

@@ -1,11 +1,12 @@
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, InitializeRequestParams,
     InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
-    Tool,
+    Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::auth::{AuthClient, AuthError};
@@ -14,12 +15,14 @@ use serde_json::json;
 use tokio::sync::OnceCell;
 use tokio::task::JoinSet;
 
-use crate::config::HubConfig;
+use nativemem_core::fsx::BackupSession;
+
+use crate::config::{validate_name, HubConfig, ServerSpec};
 use crate::connect::{connect, Client, ConnectError, Connected};
 use crate::error::{HubError, Result};
 use crate::oauth;
 use crate::runner::Runner;
-use crate::secrets::SecretStore;
+use crate::secrets::{secret_ref, SecretStore};
 use crate::subagents::{SubagentConfig, SubagentSpec};
 
 /// The tool that reports the state of every configured server.
@@ -27,6 +30,9 @@ pub const STATUS_TOOL: &str = "nativemem_status";
 
 /// The tool that lists the subagent definitions.
 pub const SUBAGENTS_LIST_TOOL: &str = "subagents_list";
+
+/// Add one disabled upstream definition to the hub for human review.
+pub const MCP_ADD_TOOL: &str = "mcp_server_add";
 
 /// `subagent_<name>`. A subagent name holds no underscore and an upstream tool name always holds
 /// `__`, so the two can never collide.
@@ -259,6 +265,63 @@ fn subagents_list_tool() -> Tool {
     )
 }
 
+fn mcp_add_tool() -> Tool {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string", "description": "Server name: 1-32 characters of A-Z a-z 0-9 - _" },
+            "transport": { "type": "string", "enum": ["stdio", "http"] },
+            "command": { "type": "string" },
+            "args": { "type": "array", "items": { "type": "string" } },
+            "env": {
+                "type": "object",
+                "additionalProperties": { "type": "string", "pattern": "^secret:" },
+                "description": "secret:<id> references only. Add literal values later in the nativemem app."
+            },
+            "cwd": { "type": "string" },
+            "url": { "type": "string" },
+            "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string", "pattern": "^secret:" },
+                "description": "secret:<id> references only. Add literal values later in the nativemem app."
+            },
+            "auth": { "type": "string", "enum": ["none", "oauth"] },
+            "oauth": {
+                "type": "object",
+                "properties": {
+                    "client_id": { "type": "string" },
+                    "client_secret": {
+                        "type": "string",
+                        "description": "A secret:<id> reference only; enter the value later in the nativemem app"
+                    },
+                    "callback_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                    "scopes": { "type": "array", "items": { "type": "string" } },
+                    "resource_metadata_url": { "type": "string" },
+                    "authorization_params": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" }
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "required": ["name", "transport"],
+        "additionalProperties": false
+    });
+    Tool::new(
+        MCP_ADD_TOOL,
+        "Add an MCP server definition to the nativemem hub. It is always saved disabled for review; never put secret values in the call, only secret:<id> references.",
+        schema.as_object().cloned().unwrap_or_default(),
+    )
+    .with_annotations(
+        ToolAnnotations::new()
+            .read_only(false)
+            .destructive(false)
+            .idempotent(false)
+            .open_world(false),
+    )
+}
+
 fn subagent_tool(name: &str, spec: &SubagentSpec) -> Tool {
     let schema = json!({
         "type": "object",
@@ -332,6 +395,58 @@ impl HubServer {
         json!({ "subagents": agents })
     }
 
+    fn add_mcp_server(
+        &self,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> std::result::Result<CallToolResponse, McpError> {
+        let mut document = arguments.unwrap_or_default();
+        let name = document
+            .remove("name")
+            .and_then(|value| value.as_str().map(str::to_string))
+            .ok_or_else(|| {
+                McpError::invalid_params("mcp_server_add needs a string \"name\"", None)
+            })?;
+        validate_name(&name).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        document.insert("enabled".into(), serde_json::Value::Bool(false));
+        let spec: ServerSpec = serde_json::from_value(serde_json::Value::Object(document))
+            .map_err(|e| McpError::invalid_params(format!("invalid server spec: {e}"), None))?;
+        spec.validate()
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        for (kind, values) in [("environment", &spec.env), ("header", &spec.headers)] {
+            if let Some((key, _)) = values.iter().find(|(_, value)| secret_ref(value).is_none()) {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "agent-added {kind} value {key:?} must be a secret:<id> reference; add literal values in the nativemem app"
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        let result = (|| -> Result<()> {
+            let _lock = lock_state(&self.state)?;
+            let mut config = HubConfig::load(&self.state)?;
+            if config.servers.contains_key(&name) {
+                return Err(HubError::Exists(name.clone()));
+            }
+            config.servers.insert(name.clone(), spec.clone());
+            config.save(&self.state, &BackupSession::new())
+        })();
+        if let Err(error) = result {
+            return Ok(text_result(error.to_string(), true));
+        }
+        Ok(text_result(
+            json!({
+                "added": name,
+                "enabled": false,
+                "secrets": spec.secret_ids(),
+                "next": "Review the server, enter any secret values, enable it in the nativemem app, then reconnect the hub."
+            })
+            .to_string(),
+            false,
+        ))
+    }
+
     async fn call_subagent(
         &self,
         name: &str,
@@ -378,6 +493,22 @@ impl HubServer {
     }
 }
 
+fn lock_state(state: &Path) -> Result<File> {
+    std::fs::create_dir_all(state).map_err(|e| nativemem_core::error::Error::io(state, e))?;
+    let file = File::options()
+        .create(true)
+        .append(true)
+        .open(state.join("sync.lock"))
+        .map_err(|e| nativemem_core::error::Error::io(state, e))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(HubError::Busy(
+            "another nativemem run is in progress".into(),
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(nativemem_core::error::Error::from(e).into()),
+    }
+}
+
 fn text_result(text: String, is_error: bool) -> CallToolResponse {
     let content = vec![ContentBlock::text(text)];
     CallToolResponse::Complete(if is_error {
@@ -410,7 +541,7 @@ impl ServerHandler for HubServer {
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListToolsResult, McpError> {
         let live = self.live().await;
-        let mut tools = vec![status_tool(), subagents_list_tool()];
+        let mut tools = vec![status_tool(), mcp_add_tool(), subagents_list_tool()];
         tools.extend(
             self.subagents
                 .agents
@@ -426,6 +557,9 @@ impl ServerHandler for HubServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<CallToolResponse, McpError> {
+        if request.name == MCP_ADD_TOOL {
+            return self.add_mcp_server(request.arguments);
+        }
         if request.name == SUBAGENTS_LIST_TOOL {
             return Ok(text_result(self.subagents_list().to_string(), false));
         }

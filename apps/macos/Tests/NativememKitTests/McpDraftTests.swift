@@ -69,14 +69,26 @@ import Testing
         draft.name = "docs"
         draft.url = "https://mcp.example.com/mcp"
         draft.usesOAuth = true
+        draft.oauthClientID = "client-id"
+        draft.oauthClientSecret = "client-secret"
+        draft.oauthCallbackPort = "53682"
+        draft.oauthScopeLines = "calendar.readonly\ncalendar.write"
+        draft.oauthResourceMetadataURL = "https://mcp.example.com/.well-known/oauth-protected-resource/tool"
+        draft.oauthAuthorizationParameterLines = "access_type=offline\nprompt=consent"
         draft.rows = [row("X-Api-Key", "abc", secret: true)]
         let document = try json(draft)
         #expect(document["transport"] as? String == "http")
         #expect(document["url"] as? String == "https://mcp.example.com/mcp")
         #expect(document["headers"] as? [String: String] == ["X-Api-Key": "secret:docs-X-Api-Key"])
         #expect(document["auth"] as? String == "oauth")
+        let oauth = try #require(document["oauth"] as? [String: Any])
+        #expect(oauth["client_id"] as? String == "client-id")
+        #expect(oauth["client_secret"] as? String == "secret:docs-oauth-client-secret")
+        #expect(oauth["callback_port"] as? Int == 53682)
+        #expect(oauth["scopes"] as? [String] == ["calendar.readonly", "calendar.write"])
+        #expect((oauth["authorization_params"] as? [String: String])?["access_type"] == "offline")
         #expect(document["command"] == nil && document["args"] == nil && document["env"] == nil)
-        #expect(draft.secretValues.map(\.id) == ["docs-X-Api-Key"])
+        #expect(draft.secretValues.map(\.id) == ["docs-X-Api-Key", "docs-oauth-client-secret"])
     }
 
     @Test func rowsAreCheckedForNamesDuplicatesAndValues() {
@@ -92,6 +104,21 @@ import Testing
         draft.rows = [row("A", "", secret: true)]
         #expect(draft.problem == "Enter a value for A.")
         draft.rows = [row("", "")]
+        #expect(draft.isValid)
+    }
+
+    @Test func preregisteredOAuthNeedsAPortAndValidParameters() {
+        var draft = McpServerDraft()
+        draft.kind = .remote
+        draft.name = "calendar"
+        draft.url = "https://calendarmcp.googleapis.com/mcp/v1"
+        draft.usesOAuth = true
+        draft.oauthClientID = "client-id"
+        #expect(draft.problem == "Enter the registered OAuth callback port.")
+        draft.oauthCallbackPort = "53682"
+        draft.oauthAuthorizationParameterLines = "broken"
+        #expect(draft.problem == "OAuth parameters use name=value, one per line.")
+        draft.oauthAuthorizationParameterLines = "access_type=offline"
         #expect(draft.isValid)
     }
 
@@ -141,10 +168,14 @@ import Testing
         let server = try decodeMcp(McpListDocument.self, from: fixture("mcp_list")).servers[1]
         let draft = McpServerDraft(editing: server)
         #expect(draft.kind == .remote && draft.usesOAuth && draft.url == "https://mcp.example.com/mcp")
+        #expect(draft.oauthClientID == "client-id" && draft.oauthCallbackPort == "53682")
+        #expect(draft.oauthScopeLines == "calendar.readonly")
+        #expect(draft.oauthAuthorizationParameterLines == "access_type=offline\nprompt=consent")
         #expect(draft.rows.map(\.key) == ["X-Api-Key"] && draft.rows[0].isSecret)
         #expect(draft.isValid)
         let document = try json(draft)
         #expect(document["enabled"] as? Bool == false)
         #expect(document["headers"] as? [String: String] == ["X-Api-Key": "secret:docs-X-Api-Key"])
+        #expect((document["oauth"] as? [String: Any])?["client_secret"] as? String == "secret:docs-oauth-client-secret")
     }
 }

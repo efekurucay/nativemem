@@ -5,7 +5,7 @@
 <h1 align="center">Change the agent. Keep the context.</h1>
 
 <p align="center">
-  Native memory sync for <strong>Claude Code, Codex, OpenCode and Pi.</strong><br>
+  Session, instruction and skill sync for <strong>Claude Code, Codex, OpenCode and Pi.</strong><br>
   A local Rust CLI, a native Mac app, and an optional MCP hub.
 </p>
 
@@ -30,18 +30,21 @@
 
 You switch coding agents. Your project's context shouldn't disappear at the handoff.
 
-**nativemem** translates between the files the agents already read. Each agent keeps its own native
-memory, instructions, skills and session copies. There is no shared memory service to adopt, and no
-LLM in the sync loop. The ledger records IDs, hashes and paths—not a second copy of your memory.
+**nativemem** translates between the files agents use for instructions, skills and sessions.
+Claude Code uses native project notes and Codex can import those notes. The sync engine runs
+locally without model calls. The ledger records IDs, hashes and paths.
 
-- **Project memory & global instructions.** Create an entry in any supported agent. Preview how it
-  reaches the others. One-sided edits propagate; simultaneous edits become conflicts to review.
+- **Project notes and global instructions.** Create and edit entries in the manager and preview
+  which copies sync. One-sided edits propagate, and simultaneous edits become conflicts to review.
 - **Skills, with their files.** Mirror whole skill directories, not just `SKILL.md`. Global skills
   have their own list; project skills appear in the project tree with exact locations for each copy.
-- **Conversation handoffs.** Copy session snapshots into another agent's native format. Readable
-  text and tool activity travel; provider-bound thinking, signatures and images do not.
+- **Conversation handoffs.** Resume a copy in another agent's native format. New turns from that
+  agent reach eligible copies and compatible existing sessions at the next sync.
+  Readable text and tool activity travel; provider-bound thinking, signatures and images do not.
+  Existing Codex sessions receive both the model context and the visible terminal history.
 - **One optional MCP hub.** Connect your integrations once, keep their secrets in the OS keychain,
-  and register the hub in each agent. OAuth sign-in belongs to the hub, not a copied token cache.
+  and register the hub in each agent. OAuth sign-in belongs to the hub, including providers that need
+  a pre-registered client and fixed callback. Ask any connected agent to add a server for review.
 - **Subagents you define.** Choose a harness, a model and instructions. Agents connected to the hub
   can call that subagent as a tool. Model calls use the harness's provider and billing.
 
@@ -83,8 +86,8 @@ nativemem sync            # preview; no content writes
 nativemem sync --apply    # apply the plan, with backups
 ```
 
-These commands use your actual agent homes. **Read the preview before applying.** Memory,
-instruction and skill deletions propagate. Session sync can write Codex and OpenCode database
+These commands use your actual agent homes. **Read the preview before applying.** Instruction and skill deletions propagate.
+Memory removal is explicit and applies to the copies you select. Session sync can write Codex and OpenCode database
 rows while their compatibility checks pass. Use `--no-sessions` to leave sessions out.
 
 Prefer a sandbox first? Generate synthetic agent homes without touching your own:
@@ -121,15 +124,20 @@ The desktop app does not run on Windows or Linux.
 | Agent | Project memory | Global instructions | Global skills | Project skills | Session snapshots |
 |---|---|---|---|---|---|
 | Claude Code | Read / write | `CLAUDE.md` | Read / write | `.claude/skills/` | Read / write |
-| Codex | Read generated memory; create / receive entries in its nativemem store | `AGENTS.md` | Read / write | Not implemented | Read / write¹ |
-| OpenCode | Create / receive entries in its nativemem store | `AGENTS.md` | Read / write | `.opencode/skills/` | Read / write¹ |
-| Pi | Create / receive entries in its nativemem store | `AGENTS.md` | Read / write | `.pi/skills/` | Read / write |
+| Codex | Read generated memory; write project notes to the native ad-hoc input | `AGENTS.md` | Read / write | `.agents/skills/` | Read / write¹ |
+| OpenCode | Manager store only | `AGENTS.md` | Read / write | `.opencode/skills/` | Read / write¹ |
+| Pi | Manager store only | `AGENTS.md` | Read / write | `.pi/skills/` | Read / write |
 
-¹ Database writers are gated by schema checks and back up the database before writing their own
-rows. Native session listing and resume still need agent-by-agent verification; see the
+¹ Database writers are gated by schema checks and back up the database before writing.
+Native session listing and resume results are in the
 [verification checklist](wiki/guides/verify-with-real-agents.md). Session conversion is not lossless.
 
+Claude Code loads its indexed project notes. Codex learns from eligible synced conversations and
+consolidates standalone notes from its native ad-hoc inputs. It generates its own memory summary
+when memories are enabled. OpenCode and Pi notes are available through the manager and stored outside the agent homes.
+
 Project skills are discovered in known projects, not by crawling every repository on disk.
+OpenCode and Pi can load skills from `.agents/skills/`, so a compatible copy there can serve all three agents.
 Git tracking and `.gitignore` policy are yours; nativemem does not edit them.
 Hermes has [research notes](wiki/agents/hermes.md), not an adapter.
 
@@ -146,6 +154,10 @@ nativemem items --kind session --json
 
 # Read the desktop's items, status and compatibility together, without loading transcripts
 nativemem --no-sessions snapshot --json
+
+# Preview and sync chat sessions for one working directory
+nativemem sync --session-project /absolute/project
+nativemem sync --session-project /absolute/project --apply
 
 # Read exactly one skill, including a project skill, by the ID from items
 nativemem skill show --agent claude --id 'skill:<project-key>/<name>'
@@ -183,6 +195,11 @@ nativemem mcp status
 nativemem subagent list
 ```
 
+Every connected agent also sees `mcp_server_add`. Ask it to add a local command or remote URL to the
+hub; the definition is saved disabled. Review it in **MCP & Integrations**, enter secret values there,
+enable it, then reconnect the hub. OAuth forms support a client ID, keychain-backed client secret,
+fixed callback port, scopes, protected-resource metadata and authorization parameters.
+
 Import leaves each agent's direct server entries in place, so review duplicate tool exposure before
 using both. Environment expansions and unsupported config fields are reported as warnings.
 The app has dedicated **MCP & Integrations** and **Subagents** screens.
@@ -197,8 +214,9 @@ The app has dedicated **MCP & Integrations** and **Subagents** screens.
   skill directories inside that project; other project files and `.gitignore` are not edited.
 - **Check formats.** `doctor` pauses affected kinds when an agent's format changes. It is not a
   guarantee of native resume behavior or of compatibility with every agent version.
-- **Treat sessions differently.** Copies refresh only while untouched. Continue a copy and it is
-  left alone. Session deletions never propagate and edits never flow back.
+- **Treat sessions differently.** A continuation can refresh untouched copies or append in place
+  to a compatible existing session. If two histories diverge, sync reports the
+  conflict and preserves both. Session deletions never propagate.
 - **Keep sync local.** File sync uses no network or model calls. The optional hub and its subagents
   use the connections, permissions and credentials you configure.
 

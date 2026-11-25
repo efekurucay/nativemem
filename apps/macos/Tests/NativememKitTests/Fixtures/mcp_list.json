@@ -7,7 +7,11 @@
       "auth_state": "needs_login",
       "url": "https://mcp.example.com/mcp", "args": [], "env": {},
       "headers": { "X-Api-Key": "secret:docs-X-Api-Key" },
-      "secrets": ["docs-X-Api-Key"] },
+      "oauth": { "client_id": "client-id", "client_secret": "secret:docs-oauth-client-secret",
+        "callback_port": 53682, "scopes": ["calendar.readonly"],
+        "resource_metadata_url": "https://mcp.example.com/.well-known/oauth-protected-resource/tool",
+        "authorization_params": { "access_type": "offline", "prompt": "consent" } },
+      "secrets": ["docs-X-Api-Key", "docs-oauth-client-secret"] },
     { "name": "wiki", "transport": "http", "enabled": true, "auth": "oauth",
       "auth_state": "signed_in",
       "url": "https://wiki.example.com/mcp", "args": [], "env": {}, "headers": {}, "secrets": [] } ] }

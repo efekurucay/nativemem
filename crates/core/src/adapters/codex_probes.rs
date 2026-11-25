@@ -141,6 +141,23 @@ pub fn version(home: &Path) -> Option<String> {
     })
 }
 
+pub(super) fn has_native_append(home: &Path) -> bool {
+    let supported = |version: &str| {
+        let mut parts = version.split('.');
+        let major = parts.next().and_then(|part| part.parse::<u32>().ok());
+        let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
+        matches!(
+            (major, minor),
+            (Some(0), Some(171..)) | (Some(1..), Some(_))
+        )
+    };
+    version(home).is_some_and(|version| supported(&version))
+        || rollouts(home, 12)
+            .iter()
+            .filter_map(|path| first_line(path))
+            .any(|v| v["payload"]["cli_version"].as_str().is_some_and(supported))
+}
+
 /// `state_<n>.sqlite` files of `home` as `(n, path)`, highest first.
 pub(super) fn state_databases(home: &Path) -> Vec<(u32, PathBuf)> {
     let mut found: Vec<(u32, PathBuf)> = std::fs::read_dir(home)

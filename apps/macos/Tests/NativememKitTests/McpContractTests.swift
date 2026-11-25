@@ -19,6 +19,12 @@ import Testing
         #expect(docs.transport == .http && !docs.enabled && docs.auth == .oauth)
         #expect(docs.authState == .needsLogin)
         #expect(docs.url == "https://mcp.example.com/mcp" && docs.command == nil)
+        #expect(docs.oauth?.clientID == "client-id")
+        #expect(docs.oauth?.clientSecret == "secret:docs-oauth-client-secret")
+        #expect(docs.oauth?.callbackPort == 53682)
+        #expect(docs.oauth?.scopes == ["calendar.readonly"])
+        #expect(docs.oauth?.authorizationParams["access_type"] == "offline")
+        #expect(docs.secrets == ["docs-X-Api-Key", "docs-oauth-client-secret"])
         #expect(servers[2].authState == .signedIn)
     }
 
@@ -120,7 +126,8 @@ import Testing
 
     @Test func aServerWithoutAnswerIsChecking() throws {
         let github = try servers()[0]
-        #expect(McpServerState.derive(github, test: nil) == .checking)
+        #expect(McpServerState.derive(github, test: nil) == .notTested)
+        #expect(McpServerState.derive(github, test: nil, isTesting: true) == .checking)
     }
 
     @Test func aPassingTestMeansConnected() throws {

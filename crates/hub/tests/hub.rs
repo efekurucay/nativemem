@@ -79,6 +79,7 @@ async fn tools_are_prefixed_and_calls_are_forwarded_unchanged() {
         names,
         [
             "nativemem_status",
+            "mcp_server_add",
             "subagents_list",
             "fake__echo",
             "fake__env_matches"
@@ -96,6 +97,62 @@ async fn tools_are_prefixed_and_calls_are_forwarded_unchanged() {
         .call_tool(CallToolRequestParams::new("fake__nope".to_string()))
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn an_agent_can_add_a_disabled_server_for_review() {
+    let t = tempfile::tempdir().unwrap();
+    let client = hub(HubConfig::default(), store(t.path()), t.path()).await;
+    let tools = client.peer().list_all_tools().await.unwrap();
+    let add = tools
+        .iter()
+        .find(|tool| tool.name == "mcp_server_add")
+        .unwrap();
+    let annotations = add.annotations.as_ref().unwrap();
+    assert_eq!(annotations.read_only_hint, Some(false));
+    assert_eq!(annotations.destructive_hint, Some(false));
+    let rejected = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("mcp_server_add".to_string()).with_arguments(args(json!({
+                "name": "unsafe",
+                "transport": "stdio",
+                "command": "tool",
+                "env": { "TOKEN": "literal-secret" }
+            }))),
+        )
+        .await;
+    assert!(rejected.is_err(), "literal agent env values are refused");
+
+    let answer = call_text(
+        &client,
+        "mcp_server_add",
+        json!({
+            "name": "calendar",
+            "transport": "http",
+            "url": "https://calendarmcp.googleapis.com/mcp/v1",
+            "auth": "oauth",
+            "oauth": {
+                "client_id": "client-id",
+                "client_secret": "secret:calendar-oauth-client-secret",
+                "callback_port": 53682,
+                "scopes": ["https://www.googleapis.com/auth/calendar"],
+                "resource_metadata_url": "https://calendarmcp.googleapis.com/.well-known/oauth-protected-resource/list_calendars",
+                "authorization_params": { "access_type": "offline", "prompt": "consent" }
+            }
+        }),
+    )
+    .await;
+    let answer: Value = serde_json::from_str(&answer).unwrap();
+    assert_eq!(answer["added"], "calendar");
+    assert_eq!(answer["enabled"], false);
+    assert_eq!(answer["secrets"], json!(["calendar-oauth-client-secret"]));
+
+    let saved = HubConfig::load(t.path()).unwrap();
+    let calendar = saved.server("calendar").unwrap();
+    assert!(!calendar.enabled);
+    assert_eq!(calendar.oauth.as_ref().unwrap().callback_port, Some(53682));
+    assert!(t.path().join("sync.lock").is_file());
 }
 
 #[tokio::test]
@@ -118,7 +175,10 @@ async fn failing_and_disabled_upstreams_are_reported_and_left_out() {
     let tools = client.peer().list_all_tools().await.unwrap();
     assert!(tools.iter().all(|t| {
         let n = t.name.as_ref();
-        n == "nativemem_status" || n == "subagents_list" || n.starts_with("good__")
+        n == "nativemem_status"
+            || n == "mcp_server_add"
+            || n == "subagents_list"
+            || n.starts_with("good__")
     }));
 
     let status: Value =

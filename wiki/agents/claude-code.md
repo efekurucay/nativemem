@@ -17,7 +17,7 @@ by versions 2.1.247 to 2.1.322; 376 top-level session files across 63 project di
 |---|---|---|
 | Project memory | Read (originals) and write (new originals through `add`, replicas, edits, deletes) | `crates/core/src/adapters/claude.rs` |
 | Instruction sections | Read and write in `CLAUDE.md`, including a new section through `add` | `claude.rs` through `sections.rs` |
-| Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/claude_sessions.rs` |
+| Sessions | Read originals and replicas, write replicas, append compatible message turns to an existing native UUID | `crates/core/src/adapters/claude_sessions.rs` |
 | Global-scope memory | Not supported (`supports` is false) | |
 | Skills (global and project) | Read (originals) and write (replicas, edits, deletes) | `crates/core/src/adapters/skills.rs`, `claude.rs` |
 | MCP servers | Read by `mcp import` (global `mcpServers` only); `mcp install` and `uninstall` write the one entry `mcpServers.nativemem` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
@@ -54,13 +54,14 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
 
 - Global skills live in `<claude home>/skills/`; project skills live in `<project>/.claude/skills/`.
   Known Claude project folders are scanned even with no memory entries. Project paths of written
-  skills are retained in `<claude home>/nativemem/skill-projects.json` (paths only); copies can be
+  skills are retained in `<state dir>/skill-projects/claude/<profile key>.json` (paths only); copies can be
   read with `skill show --id` and appear under their project in the app (`wiki/kinds/skills.md`).
 
 - Reads `projects/<dir>/memory/*.md` (not `MEMORY.md`), `CLAUDE.md` sections and
   `projects/<dir>/*.jsonl` sessions.
-- Writes replicas of memory (marker `metadata.nativemem_origin`), an instruction region at the end of
-  `CLAUDE.md`, and session replicas (marker key `nativemem_origin` on every line).
+- Writes memory in Claude's native note and index layout, with replica identity in the
+  synchronization state directory. Also writes ordinary instruction sections to `CLAUDE.md`
+  and session replicas (marker key `nativemem_origin` on every line).
 - `mcp import` reads the global `mcpServers` of `.claude.json`: `<claude home>/../.claude.json` when the home
   is named `.claude`, else `<claude home>/.claude.json` (`claude_config_path` in
   `crates/hub/src/import.rs`). The import only reads the file. `mcp install` adds `mcpServers.nativemem` =
@@ -81,7 +82,7 @@ The Claude home is `--claude-home`, else `NATIVEMEM_CLAUDE_HOME`, else `CLAUDE_C
 - There is no session index file. `~/.claude/history.jsonl` is the prompt history for the up-arrow,
   not the resume list. `~/.claude/sessions/<pid>.json` files are a registry of live processes.
 - The resume list is built by scanning `projects/<encoded cwd>/*.jsonl` of the current project
-  (INFERRED from the data; `claude --resume` was not run). Title priority: last `custom-title`, then
+  (INFERRED from the data). Title priority: last `custom-title`, then
   last `ai-title`, then the last human prompt (`last-prompt`), then the first user message. The sort
   key is most likely the file mtime, which is independent of the last line's timestamp (the two are
   within 5 s on only 132 of 376 files), so the writer sets the mtime explicitly.
@@ -156,9 +157,10 @@ carries an extra key under `metadata`, which is why those keys are not checked.
 | One API message is split into one line per content block | OBSERVED | transcript corpus |
 | Physical order is parents first in 371 of 376 files | OBSERVED | transcript corpus |
 | Replica key `nativemem_origin` is ignored by Claude and kept when the session is continued | INFERRED (Claude reads known keys and appends) | `wiki/kinds/sessions.md` |
-| The resume list scans the project directory and sorts by mtime | INFERRED | no index file exists; `claude --resume` not run |
+| The resume list scans the project directory and sorts by mtime | INFERRED | no index file exists |
 | Minimum fields for a resumable file | INFERRED | `claude_sessions.rs` writer; tests `rendered_replica_parses_back_with_marker` |
-| Claude lists a replica in the real resume list | `[UNVERIFIED]` until the staged check in `wiki/guides/verify-with-real-agents.md` is recorded | |
+| Claude lists and opens a synced Codex session with `claude --resume` | VERIFIED on 2.1.330 | Isolated profile and synthetic Codex session in the same working directory |
+| The first resumed model request receives a synced Pi checkpoint and retained turn | VERIFIED on 2.1.330 | A loopback provider captured the first `claude --resume` request without the summarized prefix in its messages |
 | The five probes pass on the fixtures and fail on an unknown line type, a missing key, an unknown frontmatter key, a changed index line and a renamed project directory | VERIFIED | `crates/core/tests/probes.rs` (`claude_*`) |
 | Claude deletes transcripts by mtime after `cleanupPeriodDays` (default 30) | OBSERVED (the tombstones the engine recorded for replicas of old sessions); the meaning of `0` is `[UNVERIFIED]` | real-data report; tests `a_configured_retention_is_respected_and_needs_no_notice` |
 | MCP server schema, `~/.claude.json` layout | OBSERVED | read-only file and binary-string inspection |
@@ -205,4 +207,4 @@ carries an extra key under `metadata`, which is why those keys are not checked.
 
 ## Last updated
 
-2026-11-11
+2026-11-22

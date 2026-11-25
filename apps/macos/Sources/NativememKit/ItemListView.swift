@@ -20,19 +20,79 @@ struct InstructionTag: View {
 
 struct ItemListView: View {
     @Bindable var model: AppModel
+    @State private var repairingIndex: MaintenanceReport.IndexIssue?
+    @State private var reviewSession: ContextReview?
 
     var body: some View {
         VStack(spacing: 0) {
             if model.selectedFolderPath != nil {
                 modePicker
             }
+            if !model.showsSessions {
+                reviewBar
+            }
             list
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .searchable(text: $model.itemSearch, prompt: searchPrompt)
+        .sheet(item: $repairingIndex) { issue in
+            IndexRepairSheet(model: model, issue: issue)
+        }
+        .sheet(item: $reviewSession) { session in
+            ContextReviewSheet(model: model, session: session)
+        }
         .task(id: model.showsSessions ? model.dataRevision : nil) {
             if model.showsSessions { await model.loadSessions() }
         }
+    }
+
+    private var reviewBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button("Review", systemImage: "wrench.and.screwdriver") {
+                    Task { await model.reviewContext() }
+                }
+                Menu {
+                    Button("Review Updates…") {
+                        Task { reviewSession = await model.makeContextReview(updatesOnly: true) }
+                    }
+                } label: {
+                    Label("Review Cards…", systemImage: "rectangle.on.rectangle")
+                } primaryAction: {
+                    Task { reviewSession = await model.makeContextReview() }
+                }
+                Spacer(minLength: 0)
+            }
+            .disabled(model.cli == nil || model.isLoading || model.isReviewingContext || model.isEditing)
+            Group {
+                if model.isReviewingContext {
+                    ProgressView("Reviewing…").controlSize(.small)
+                } else if let report = model.contextReport {
+                    let count = report.findings.count
+                    Text(count == 0 ? "No flagged items" : "\(count) flagged")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let report = model.contextReport {
+                ForEach(report.indexIssues) { issue in
+                    Button("Review memory index…", systemImage: "exclamationmark.triangle") {
+                        repairingIndex = issue
+                    }
+                    .help(issue.index.path)
+                    .disabled(model.isEditing || model.isLoading)
+                }
+                if (model.doctor?.agents ?? []).contains(where: { $0.paused.contains(Item.memoryKind) || $0.paused.contains(Item.skillKind) }) {
+                    Button("Some items paused · Overview", systemImage: "exclamationmark.triangle") {
+                        model.requestSidebar(.overview)
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     private var modePicker: some View {
@@ -147,6 +207,13 @@ struct ItemListView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+            }
+            if let findings = model.contextReport?.findings[item.id] {
+                ForEach(findings, id: \.self) { finding in
+                    Label(finding.rawValue, systemImage: "exclamationmark.circle")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                }
             }
             if item.primary.isSkill {
                 HStack(spacing: 8) {

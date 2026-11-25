@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,58 +6,43 @@ use crate::compat::Check;
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
+use crate::probe::{process_path, resolve_executable};
 use crate::session::{
-    is_session_id, set_mtime, Session, SessionOptions, SessionReport, SessionScan,
+    is_session_id, set_mtime, Session, SessionOptions, SessionReport, SessionScan, MAX_SOURCE_BYTES,
 };
 use crate::slug::slugify;
 
+use super::codex_app_server::{self, AppServer};
+use super::codex_history;
 use super::codex_imports;
+use super::codex_memory::Notes;
 use super::codex_probes;
 use super::codex_rollout;
-use super::codex_sessions::CodexSessions;
+use super::codex_sessions::{self, CodexSessions};
 use super::codex_threads;
+use super::memory_store::read_opt;
 #[cfg(test)]
 use super::memory_store::{parse_entry, render};
-use super::memory_store::{read_opt, MemoryStore};
 use super::sections::InstructionFile;
 #[cfg(test)]
 use super::sections::{BLOCK_BEGIN, BLOCK_END};
-use super::skills::{skill_name, SkillReport, SkillStore};
+use super::skills::{skill_name, skill_project_key, SkillReport, SkillStore};
 
 const AGENT: &str = "codex";
 const INSTRUCTION_FILE: &str = "AGENTS.md";
 const TASK_GROUP: &str = "# Task Group:";
-
-/// Paths inside the Codex home. The replica store layout follows Codex's memory-extension
-/// convention and is confined here so it can change in one place.
-mod layout {
-    use super::*;
-
-    pub fn resources(home: &Path) -> PathBuf {
-        home.join("memories/extensions/nativemem/resources")
-    }
-
-    pub fn originals(home: &Path) -> PathBuf {
-        home.join("memories").join("MEMORY.md")
-    }
-
-    #[cfg(test)]
-    pub use super::super::memory_store::project_key;
-
-    #[cfg(test)]
-    pub fn project_dir(home: &Path, key: &str) -> PathBuf {
-        resources(home).join(key)
-    }
-}
 
 pub struct CodexAdapter {
     home: PathBuf,
     state_dir: PathBuf,
     backups: BackupSession,
     instructions: InstructionFile,
-    memory: MemoryStore,
+    memory: Notes,
     skills: SkillStore,
+    skill_projects: RefCell<Vec<PathBuf>>,
     sessions: Option<CodexSessions>,
+    app_server: OnceCell<Option<PathBuf>>,
+    session_project: Option<PathBuf>,
     claude_home: Option<PathBuf>,
     /// Rollouts written in this run whose `threads` row `finish` refreshes.
     written: RefCell<Vec<PathBuf>>,
@@ -65,7 +50,7 @@ pub struct CodexAdapter {
 }
 
 /// Bump when the written rollout format changes; unmodified replicas are then rewritten.
-const SESSION_WRITER_REVISION: u32 = 1;
+const SESSION_WRITER_REVISION: u32 = 3;
 
 struct OriginalBlock {
     title: String,
@@ -93,7 +78,7 @@ fn parse_originals(text: &str) -> Originals {
     let preamble = chunks.remove(0).concat();
     if !preamble.trim().is_empty() {
         out.skipped.push((
-            "memories/MEMORY.md (preamble)".into(),
+            "MEMORY.md (preamble)".into(),
             "content before the first task group".into(),
         ));
     }
@@ -132,25 +117,21 @@ impl CodexAdapter {
                 backups.clone(),
                 INSTRUCTION_FILE,
             ),
-            memory: MemoryStore::new(
-                Self::agent(),
-                codex_home.clone(),
-                state_dir.clone(),
-                backups.clone(),
-                layout::resources(&codex_home),
-                layout::resources(&codex_home),
-                codex_home.join(INSTRUCTION_FILE),
-            ),
+            memory: Notes::new(&codex_home, &state_dir, backups.clone()),
             skills: SkillStore::new(
                 Self::agent(),
                 codex_home.clone(),
                 state_dir.clone(),
                 backups.clone(),
-            ),
+            )
+            .with_project_skills(".agents/skills".into(), vec![]),
+            skill_projects: RefCell::new(Vec::new()),
             home: codex_home,
             state_dir,
             backups,
             sessions: None,
+            app_server: OnceCell::new(),
+            session_project: None,
             claude_home: None,
             written: RefCell::new(Vec::new()),
             blocked: Vec::new(),
@@ -196,6 +177,13 @@ impl CodexAdapter {
         };
         let path = existing.unwrap_or(path);
         if path.exists() {
+            let current = fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+            if codex_sessions::has_local_turn(&current) {
+                return Err(Error::unsupported(
+                    AGENT,
+                    "rewrite a session with native turns",
+                ));
+            }
             fsx::backup(
                 &self.backups,
                 &self.state_dir,
@@ -238,6 +226,11 @@ impl CodexAdapter {
         self
     }
 
+    pub fn with_session_project(mut self, project: PathBuf) -> Self {
+        self.session_project = Some(project);
+        self
+    }
+
     fn scan_sessions(&self) -> Result<SessionScan> {
         if self.blocked.contains(&Kind::Session) {
             return Ok(SessionScan::default());
@@ -248,6 +241,35 @@ impl CodexAdapter {
         }
     }
 
+    fn app_server_executable(&self) -> Option<&Path> {
+        self.app_server
+            .get_or_init(|| {
+                if !codex_probes::has_native_append(&self.home) {
+                    return None;
+                }
+                resolve_executable("codex", process_path().as_deref()).or_else(|| {
+                    std::env::home_dir()
+                        .map(|home| home.join(".local/bin"))
+                        .into_iter()
+                        .chain([
+                            PathBuf::from("/opt/homebrew/bin"),
+                            PathBuf::from("/usr/local/bin"),
+                        ])
+                        .map(|dir| dir.join("codex"))
+                        .find(|path| path.is_file())
+                        .and_then(|path| path.canonicalize().ok())
+                })
+            })
+            .as_deref()
+    }
+
+    pub fn adopt_manager_notes(&self) -> Result<()> {
+        if !self.blocked.contains(&Kind::Memory) {
+            self.memory.adopt_manager_notes()?;
+        }
+        Ok(())
+    }
+
     /// Rollouts that cannot be synced and how many are automated.
     pub fn session_report(&self) -> Result<SessionReport> {
         Ok(self.scan_sessions()?.report())
@@ -255,16 +277,24 @@ impl CodexAdapter {
 
     /// Codex-generated content that cannot be mirrored: `(label, reason)`.
     pub fn skipped(&self) -> Result<Vec<(String, String)>> {
-        Ok(self.originals()?.skipped)
+        Ok(self.originals()?.1.skipped)
     }
 
     fn agent() -> AgentId {
         AgentId::new(AGENT)
     }
 
-    fn originals(&self) -> Result<Originals> {
-        let text = read_opt(&layout::originals(&self.home))?.unwrap_or_default();
-        Ok(parse_originals(&text))
+    fn write_skill(&self, item: &Item) -> Result<(String, PathBuf)> {
+        match &item.scope {
+            Scope::Project(cwd) => self.skills.write_project(cwd, item),
+            Scope::Global => self.skills.write(item),
+        }
+    }
+
+    fn originals(&self) -> Result<(PathBuf, Originals)> {
+        let path = self.memory.generated_path()?;
+        let text = read_opt(&path)?.unwrap_or_default();
+        Ok((path, parse_originals(&text)))
     }
 }
 
@@ -289,6 +319,7 @@ impl Adapter for CodexAdapter {
         }
         match (kind, scope) {
             (Kind::Session, Scope::Project(_)) => self.sessions.is_some(),
+            (Kind::Skill, Scope::Project(cwd)) => self.skills.project_directory(cwd).is_some(),
             (Kind::Memory, Scope::Project(_))
             | (Kind::Instruction | Kind::Skill, Scope::Global) => true,
             _ => false,
@@ -312,23 +343,171 @@ impl Adapter for CodexAdapter {
                 .is_some_and(|first| !first.contains(codex_rollout::ORIGIN_KEY))
     }
 
+    fn can_append_session(&self, _target: &Observed, turns: &[crate::session::Turn]) -> bool {
+        !turns
+            .iter()
+            .any(|turn| turn.role == crate::session::Role::Summary)
+            && self.sessions.is_some()
+            && self.app_server_executable().is_some()
+    }
+
+    fn append_session(&self, target: &Observed, item: &Item) -> Result<()> {
+        let unavailable = |operation: &str| Error::unsupported(AGENT, operation);
+        let current = Session::from_body(&target.item.body)
+            .ok_or_else(|| unavailable("invalid target session"))?;
+        let head =
+            Session::from_body(&item.body).ok_or_else(|| unavailable("invalid continuation"))?;
+        let items = codex_app_server::items(&current, &head)?;
+        let exe = self
+            .app_server_executable()
+            .ok_or_else(|| unavailable("native app-server is unavailable"))?;
+        let path = target
+            .path
+            .canonicalize()
+            .map_err(|_| unavailable("target rollout is missing"))?;
+        let home = self
+            .home
+            .canonicalize()
+            .map_err(|_| unavailable("Codex home is missing"))?;
+        let root = home
+            .join("sessions")
+            .canonicalize()
+            .map_err(|_| unavailable("session directory is missing"))?;
+        if !path.starts_with(&root) {
+            return Err(unavailable(
+                "target rollout is outside the session directory",
+            ));
+        }
+        let read = || -> Result<(String, Session)> {
+            let info = fs::metadata(&path).map_err(|_| unavailable("target rollout is missing"))?;
+            if info.len() > MAX_SOURCE_BYTES {
+                return Err(unavailable("target rollout exceeds the size limit"));
+            }
+            let text =
+                fs::read_to_string(&path).map_err(|_| unavailable("read the target rollout"))?;
+            let parsed = codex_sessions::parse(&text, &current.id, 0)
+                .ok_or_else(|| unavailable("read the native conversation"))?;
+            if parsed.session.id != current.id || !codex_sessions::is_idle(&text) {
+                return Err(unavailable("the native thread changed or is active"));
+            }
+            Ok((text, parsed.session))
+        };
+        let (before, observed) = read()?;
+        if observed.hash() != current.hash() {
+            return Err(unavailable("the native thread changed after planning"));
+        }
+        fsx::backup(
+            &self.backups,
+            &self.state_dir,
+            &self.id(),
+            &self.home,
+            &target.path,
+        )?;
+        let mut server = AppServer::start(exe, &home, &current.cwd)?;
+        server.resume(&current.id, &path)?;
+        if read()?.1.hash() != current.hash() {
+            return Err(unavailable("the native thread changed while opening it"));
+        }
+        server.append(&current.id, items)?;
+        let (after, observed) = read()?;
+        if !after.starts_with(&before)
+            || observed.title != current.title
+            || !observed.includes(&head)
+            || !head.includes(&observed)
+        {
+            return Err(unavailable("the native thread changed during the append"));
+        }
+        codex_history::sync(
+            &home,
+            &self.state_dir,
+            &self.backups,
+            &path,
+            &current.id,
+            &after,
+        )?;
+        Ok(())
+    }
+
     /// Writes the `threads` rows of the replica rollouts; a busy database is left for the next run.
     fn finish(&self) -> Result<Vec<(String, String)>> {
+        if !self.blocked.contains(&Kind::Instruction) {
+            self.instructions.reconcile()?;
+        }
+        if !self.blocked.contains(&Kind::Skill) {
+            self.skills.adopt_project_index()?;
+        }
         let written = self.written.take();
         if self.sessions.is_none() || self.blocked.contains(&Kind::Session) {
             return Ok(Vec::new());
         }
-        let busy = codex_threads::sync_rows(
+        let busy = codex_threads::sync_project_rows(
             &self.home,
             &self.state_dir,
             &self.backups,
             &written,
             codex_threads::BUSY_TIMEOUT,
+            self.session_project.as_deref(),
         )?;
-        Ok(busy
+        let mut notes: Vec<_> = busy
             .map(|reason| ("state database".to_string(), reason))
             .into_iter()
-            .collect())
+            .collect();
+        let candidates = self
+            .sessions
+            .as_ref()
+            .map(CodexSessions::projection_paths)
+            .unwrap_or_default();
+        if !candidates.is_empty() {
+            let home = self
+                .home
+                .canonicalize()
+                .map_err(|e| Error::io(&self.home, e))?;
+            let root = home.join("sessions");
+            for candidate in candidates {
+                let Ok(path) = candidate.canonicalize() else {
+                    continue;
+                };
+                if !path.starts_with(&root)
+                    || !fs::metadata(&path).is_ok_and(|meta| meta.len() <= MAX_SOURCE_BYTES)
+                {
+                    continue;
+                }
+                let Ok(raw) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                let Some(parsed) =
+                    codex_sessions::parse(&raw, codex_sessions::thread_id_of(stem), 0)
+                else {
+                    continue;
+                };
+                let session = parsed.session;
+                if self
+                    .session_project
+                    .as_ref()
+                    .is_some_and(|project| project != &session.cwd)
+                {
+                    continue;
+                }
+                match codex_history::sync(
+                    &home,
+                    &self.state_dir,
+                    &self.backups,
+                    &path,
+                    &session.id,
+                    &raw,
+                ) {
+                    Ok(()) => {}
+                    Err(Error::Unsupported { operation, .. }) => {
+                        notes.push((session.title, operation))
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(notes)
     }
 
     fn scan(&self) -> Result<Vec<Observed>> {
@@ -339,43 +518,35 @@ impl Adapter for CodexAdapter {
         let mut out = crate::model::ScanReport::default();
         if !self.blocked.contains(&Kind::Memory) {
             out.observed.extend(self.memory.scan()?);
-        }
-        let originals = if self.blocked.contains(&Kind::Memory) {
-            Originals {
-                blocks: Vec::new(),
-                skipped: Vec::new(),
+            let (path, originals) = self.originals()?;
+            out.skip("", originals.skipped);
+            let mut seen: Vec<String> = Vec::new();
+            for b in originals.blocks {
+                let slug = slugify(&b.title);
+                let base = format!("{}#{slug}", b.cwd);
+                let mut native_id = base.clone();
+                let mut n = 2;
+                while seen.contains(&native_id) {
+                    native_id = format!("{base}-{n}");
+                    n += 1;
+                }
+                seen.push(native_id.clone());
+                out.observed.push(Observed {
+                    agent: Self::agent(),
+                    native_id,
+                    path: path.clone(),
+                    item: Item {
+                        kind: Kind::Memory,
+                        scope: Scope::Project(PathBuf::from(&b.cwd)),
+                        name: slug,
+                        description: b.title,
+                        category: None,
+                        body: b.text,
+                        source_dir: None,
+                    },
+                    replica_of: None,
+                });
             }
-        } else {
-            self.originals()?
-        };
-        out.skip("", originals.skipped);
-        let path = layout::originals(&self.home);
-        let mut seen: Vec<String> = Vec::new();
-        for b in originals.blocks {
-            let slug = slugify(&b.title);
-            let base = format!("{}#{slug}", b.cwd);
-            let mut native_id = base.clone();
-            let mut n = 2;
-            while seen.contains(&native_id) {
-                native_id = format!("{base}-{n}");
-                n += 1;
-            }
-            seen.push(native_id.clone());
-            out.observed.push(Observed {
-                agent: Self::agent(),
-                native_id,
-                path: path.clone(),
-                item: Item {
-                    kind: Kind::Memory,
-                    scope: Scope::Project(PathBuf::from(&b.cwd)),
-                    name: slug,
-                    description: b.title,
-                    category: None,
-                    body: b.text,
-                    source_dir: None,
-                },
-                replica_of: None,
-            });
         }
         if !self.blocked.contains(&Kind::Instruction) {
             out.observed.extend(self.instructions.scan()?);
@@ -384,6 +555,13 @@ impl Adapter for CodexAdapter {
         if !self.blocked.contains(&Kind::Skill) {
             let (observed, report) = self.skills.scan_with_report()?;
             out.skills(observed, report);
+            let mut projects = codex_sessions::project_dirs(&self.home)?;
+            projects.extend(out.observed.iter().filter_map(|o| match &o.item.scope {
+                Scope::Project(cwd) if cwd.is_absolute() => Some(cwd.clone()),
+                _ => None,
+            }));
+            out.observed.extend(self.skills.scan_projects(&projects)?);
+            self.skill_projects.replace(projects);
         }
         Ok(out)
     }
@@ -392,13 +570,35 @@ impl Adapter for CodexAdapter {
         self.skills.visible_copy(native_id)
     }
 
+    fn project_skill_dirs(&self) -> Option<(&Path, &[PathBuf])> {
+        self.skills.project_skill_dirs()
+    }
+
+    fn discover_shared_project_skills(&self, projects: &[PathBuf]) -> Result<Vec<Observed>> {
+        if self.blocked.contains(&Kind::Skill) {
+            return Ok(Vec::new());
+        }
+        let mut known = self.skill_projects.borrow_mut();
+        let external: Vec<_> = projects
+            .iter()
+            .filter(|cwd| !known.contains(cwd))
+            .cloned()
+            .collect();
+        if external.is_empty() {
+            return Ok(Vec::new());
+        }
+        let skills = self.skills.scan_projects(&external)?;
+        known.extend(external);
+        Ok(skills)
+    }
+
     fn skill_report(&self) -> Result<SkillReport> {
         self.skills.report()
     }
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
         if item.kind == Kind::Skill {
-            return self.skills.write(item);
+            return self.write_skill(item);
         }
         if item.kind == Kind::Instruction {
             return self.instructions.write_replica(key, item);
@@ -418,8 +618,8 @@ impl Adapter for CodexAdapter {
     }
 
     fn write_original(&self, native_id: &str, item: &Item) -> Result<()> {
-        if skill_name(native_id).is_some() {
-            return self.skills.write(item).map(|_| ());
+        if item.kind == Kind::Skill && skill_name(native_id).is_some() {
+            return self.write_skill(item).map(|_| ());
         }
         if is_session_id(native_id) {
             return Err(Error::unsupported(AGENT, "write_original session"));
@@ -432,6 +632,11 @@ impl Adapter for CodexAdapter {
 
     fn remove(&self, native_id: &str) -> Result<()> {
         if let Some(name) = skill_name(native_id) {
+            if skill_project_key(native_id).is_some() {
+                let mut projects = codex_sessions::project_dirs(&self.home)?;
+                projects.extend(self.skill_projects.borrow().iter().cloned());
+                return self.skills.remove_project(native_id, &projects);
+            }
             return self.skills.remove(name);
         }
         if is_session_id(native_id) {
@@ -591,64 +796,51 @@ mod tests {
     }
 
     #[test]
-    fn filename_collision_gets_suffix() {
+    fn same_name_notes_keep_distinct_native_files() {
         let f = fx();
-        let (a, _) =
+        let (a, p1) =
             f.a.write_replica(&key("k1"), &item("/w/a", "Same Name", None, "1"))
                 .unwrap();
-        let (b, _) =
-            f.a.write_replica(&key("k2"), &item("/w/a", "same name", None, "2"))
+        let (b, p2) =
+            f.a.write_replica(&key("k2"), &item("/w/a", "Same Name", None, "2"))
                 .unwrap();
-        let (c, _) =
-            f.a.write_replica(&key("k3"), &item("/w/a", "SAME-name", None, "3"))
-                .unwrap();
-        assert!(a.ends_with("/same-name.md"));
-        assert!(b.ends_with("/same-name-2.md"));
-        assert!(c.ends_with("/same-name-3.md"));
-    }
-
-    #[test]
-    fn memory_slug_does_not_clobber_index() {
-        let f = fx();
-        let (id, _) =
-            f.a.write_replica(&key("k"), &item("/w/a", "memory", None, "x"))
-                .unwrap();
-        assert!(id.ends_with("/memory-2.md"));
-        assert_eq!(f.a.scan().unwrap().len(), 1);
+        assert_ne!(a, b);
+        assert_ne!(p1, p2);
+        assert_eq!(f.a.scan().unwrap().len(), 2);
     }
 
     #[test]
     fn project_key_is_stable_and_distinct() {
-        let k = layout::project_key(Path::new("/work/My App"));
-        assert_eq!(k, layout::project_key(Path::new("/work/My App")));
+        let k = crate::adapters::memory_store::project_key(Path::new("/work/My App"));
+        assert_eq!(
+            k,
+            crate::adapters::memory_store::project_key(Path::new("/work/My App"))
+        );
         assert!(k.starts_with("my-app-"));
         assert_eq!(k.len(), "my-app-".len() + 8);
-        assert_ne!(k, layout::project_key(Path::new("/other/My App")));
+        assert_ne!(
+            k,
+            crate::adapters::memory_store::project_key(Path::new("/other/My App"))
+        );
     }
 
     #[test]
-    fn replica_layout_scope_and_index() {
+    fn replica_is_a_native_note_in_the_selected_memory_store() {
         let f = fx();
-        f.a.write_replica(&key("b"), &item("/w/app", "Beta", None, "b"))
-            .unwrap();
-        let (id, path) =
+        fs::write(f.home.join("config.toml"), "[memories]\nversion = \"v2\"\n").unwrap();
+        let (_, path) =
             f.a.write_replica(&key("a"), &item("/w/app", "Alpha", Some("user"), "a"))
                 .unwrap();
-        let (project, file) = id.split_once('/').unwrap();
-        assert_eq!(file, "alpha.md");
-        let dir = layout::project_dir(&f.home, project);
-        assert_eq!(path, dir.join("alpha.md"));
-        let scope: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(dir.join("scope.json")).unwrap()).unwrap();
-        assert_eq!(scope["cwd"], "/w/app");
         assert_eq!(
-            fs::read_to_string(dir.join("MEMORY.md")).unwrap(),
-            "# Memory Index\n\n- [Alpha](alpha.md) — about Alpha\n- [Beta](beta.md) — about Beta\n"
+            path.parent().unwrap(),
+            f.home.join("memories_v2/extensions/ad_hoc/notes")
         );
-        assert_eq!(
-            fs::read_to_string(path).unwrap(),
-            "<!-- nativemem origin=claude id=a -->\n# Alpha\n\nabout Alpha\n\nCategory: user\n\na"
-        );
+        assert!(path.file_name().unwrap().to_str().unwrap().ends_with(".md"));
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("/w/app"));
+        assert!(text.contains("Alpha"));
+        assert!(!text.contains("nativemem origin"));
+        assert!(!f.home.join("memories/extensions/nativemem").exists());
     }
 
     #[test]
@@ -663,116 +855,48 @@ mod tests {
     }
 
     #[test]
-    fn routing_block_insert_update_remove_preserves_surroundings() {
+    fn memory_writes_do_not_create_an_instruction_file() {
         let f = fx();
-        let agents_path = f.home.join("AGENTS.md");
-        let user = "# My rules\n\nbe nice\n";
-        fs::write(&agents_path, user).unwrap();
-
-        let (id_a, _) =
+        let (id, path) =
             f.a.write_replica(&key("a"), &item("/w/a", "A", None, "a"))
                 .unwrap();
-        let first = agents(&f);
-        assert!(first.starts_with(&format!("{user}\n{BLOCK_BEGIN}\n")));
-        assert!(first.contains("## Project memory (managed by nativemem)"));
-        assert!(first.contains("- /w/a → "));
-        assert!(first.ends_with(&format!("{BLOCK_END}\n")));
-        assert!(f
-            .state
-            .join("backups/20260101T000000Z/codex/AGENTS.md")
-            .exists());
-
-        let (id_b, _) =
-            f.a.write_replica(&key("b"), &item("/w/b", "B", None, "b"))
-                .unwrap();
-        let second = agents(&f);
-        assert!(second.starts_with(user));
-        assert!(second.contains("- /w/a → ") && second.contains("- /w/b → "));
-        assert!(second.find("- /w/a").unwrap() < second.find("- /w/b").unwrap());
-        assert_eq!(second.matches(BLOCK_BEGIN).count(), 1);
-
-        f.a.remove(&id_a).unwrap();
-        let third = agents(&f);
-        assert!(!third.contains("/w/a") && third.contains("/w/b"));
-        f.a.remove(&id_b).unwrap();
-        assert_eq!(agents(&f), user);
-    }
-
-    #[test]
-    fn routing_block_keeps_text_without_trailing_newline_and_after_block() {
-        let f = fx();
-        let agents_path = f.home.join("AGENTS.md");
-        fs::write(&agents_path, "top").unwrap();
-        f.a.write_replica(&key("a"), &item("/w/a", "A", None, "a"))
+        let first = fs::read(&path).unwrap();
+        f.a.write_replica(&key("a"), &item("/w/a", "A", None, "updated"))
             .unwrap();
-        assert!(agents(&f).starts_with("top\n\n"));
-
-        let text = agents(&f);
-        let tail = format!("{text}tail without newline");
-        fs::write(&agents_path, &tail).unwrap();
-        f.a.write_replica(&key("b"), &item("/w/b", "B", None, "b"))
-            .unwrap();
-        let updated = agents(&f);
-        assert!(updated.starts_with("top\n\n"));
-        assert!(updated.ends_with(&format!("{BLOCK_END}\ntail without newline")));
-        assert!(updated.contains("/w/b"));
-    }
-
-    #[test]
-    fn routing_block_created_when_agents_md_absent() {
-        let f = fx();
-        assert!(!f.home.join("AGENTS.md").exists());
-        let (id, _) =
-            f.a.write_replica(&key("a"), &item("/w/a", "A", None, "a"))
-                .unwrap();
-        let text = agents(&f);
-        assert!(text.starts_with(BLOCK_BEGIN) && text.ends_with(&format!("{BLOCK_END}\n")));
-        assert!(!f.state.join("backups").exists());
+        f.a.finish().unwrap();
         f.a.remove(&id).unwrap();
-        assert_eq!(agents(&f), "");
+        assert!(!f.home.join("AGENTS.md").exists());
+        let backup = f.state.join("backups/20260101T000000Z/codex");
+        assert_eq!(
+            fs::read(backup.join(path.strip_prefix(&f.home).unwrap())).unwrap(),
+            first
+        );
     }
 
     #[test]
-    fn unchanged_routing_is_not_rewritten() {
+    fn explicit_remove_backs_up_and_requests_native_forget() {
         let f = fx();
-        let it = item("/w/a", "A", None, "a");
-        f.a.write_replica(&key("a"), &it).unwrap();
-        let p = f.home.join("AGENTS.md");
-        let before = fs::metadata(&p).unwrap().modified().unwrap();
-        fs::remove_dir_all(f.state.join("backups")).ok();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        f.a.write_replica(&key("a"), &it).unwrap();
-        assert_eq!(fs::metadata(&p).unwrap().modified().unwrap(), before);
-        assert!(!f.state.join("backups").exists());
-    }
-
-    #[test]
-    fn remove_backs_up_and_cleans_empty_project() {
-        let f = fx();
-        let (id1, p1) =
+        let (id, path) =
             f.a.write_replica(&key("a"), &item("/w/a", "One", None, "1"))
                 .unwrap();
-        let (id2, p2) =
-            f.a.write_replica(&key("b"), &item("/w/a", "Two", None, "2"))
-                .unwrap();
-        let dir = p1.parent().unwrap().to_path_buf();
-
-        f.a.remove(&id1).unwrap();
-        assert!(!p1.exists());
-        assert!(f.state.join("backups/20260101T000000Z/codex").exists());
-        let index = fs::read_to_string(dir.join("MEMORY.md")).unwrap();
-        assert!(!index.contains("One") && index.contains("Two"));
-
-        f.a.remove(&id2).unwrap();
-        assert!(!p2.exists() && !dir.exists());
+        let content = fs::read(&path).unwrap();
+        f.a.remove(&id).unwrap();
+        let backup = f
+            .state
+            .join("backups/20260101T000000Z/codex")
+            .join(path.strip_prefix(&f.home).unwrap());
+        assert_eq!(fs::read(backup).unwrap(), content);
+        assert!(fs::read_to_string(path)
+            .unwrap()
+            .contains("Forget the note"));
         assert!(f.a.scan().unwrap().is_empty());
     }
 
     #[test]
     fn remove_rejects_traversal() {
         let f = fx();
-        assert!(matches!(f.a.remove("../x/y.md"), Err(Error::Parse(_))));
-        assert!(matches!(f.a.remove("nodir"), Err(Error::Parse(_))));
+        assert!(f.a.remove("../x/y.md").is_err());
+        assert!(f.a.remove("nodir").is_err());
     }
 
     fn write_originals(f: &Fx, text: &str) {
@@ -844,9 +968,11 @@ mod tests {
         let (id, path) =
             f.a.create_original(&item("/w/app", "Alpha", Some("user"), "b"))
                 .unwrap();
-        let dir = layout::project_dir(&f.home, id.split_once('/').unwrap().0);
-        assert_eq!(path, dir.join("alpha.md"));
-        assert!(agents(&f).contains("- /w/app → "));
+        assert_eq!(
+            path.parent().unwrap(),
+            f.home.join("memories_v2/extensions/ad_hoc/notes")
+        );
+        assert!(!f.home.join("AGENTS.md").exists());
         let found = f.a.scan().unwrap();
         assert_eq!(found.len(), 1);
         assert!(found[0].replica_of.is_none());
@@ -899,26 +1025,6 @@ mod tests {
         assert_eq!(ids, ["AGENTS.md#style", "AGENTS.md#claude:CLAUDE.md#a"]);
         assert!(items[0].replica_of.is_none());
         assert!(items[1].replica_of.is_some());
-    }
-
-    #[test]
-    fn routing_block_goes_before_an_existing_region_and_leaves_it_alone() {
-        let f = fx();
-        f.a.write_replica(&key("CLAUDE.md#a"), &instruction("A", "a body"))
-            .unwrap();
-        let region_only = agents(&f);
-        f.a.write_replica(&key("m"), &item("/w/a", "M", None, "m"))
-            .unwrap();
-        let both = agents(&f);
-        let block = both.find(BLOCK_BEGIN).unwrap();
-        let region = both.find("<!-- nativemem:instructions:begin -->").unwrap();
-        assert!(block < region);
-        assert!(both.ends_with(&region_only));
-        let (id, _) =
-            f.a.write_replica(&key("m"), &item("/w/a", "M", None, "m2"))
-                .unwrap();
-        f.a.remove(&id).unwrap();
-        assert_eq!(agents(&f), region_only);
     }
 
     #[test]

@@ -1,12 +1,16 @@
 //! Instruction sections of a global instruction file (`CLAUDE.md`, `AGENTS.md`): the section
 //! parser, the managed regions and the byte-preserving edits shared by both adapters.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::fsx::{self, BackupSession};
 use crate::model::{AgentId, Item, ItemKey, Kind, Observed, Scope};
+use crate::session::sha_hex;
 use crate::slug::slugify;
 
 pub const BLOCK_BEGIN: &str = "<!-- nativemem:begin -->";
@@ -83,6 +87,7 @@ pub fn region_span(text: &str) -> Result<Option<(usize, usize)>> {
     span_between(text, REGION_BEGIN, REGION_END)
 }
 
+#[derive(Clone)]
 struct Raw {
     heading: String,
     start: usize,
@@ -90,7 +95,7 @@ struct Raw {
     end: usize,
 }
 
-fn fence_run(line: &str) -> Option<(char, usize, &str)> {
+pub(super) fn fence_run(line: &str) -> Option<(char, usize, &str)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
         return None;
@@ -167,10 +172,18 @@ fn managed_spans(text: &str) -> Result<Vec<(usize, usize)>> {
 
 /// Sections outside managed regions with their native ids, in file order. Duplicate headings
 /// get `-2`, `-3`, ... after the slug.
+#[cfg(test)]
 fn located(text: &str, file: &str) -> Result<Vec<(String, Raw)>> {
-    let mut seen: Vec<String> = Vec::new();
+    Ok(original_ids(
+        file,
+        raw_sections(text, &managed_spans(text)?),
+    ))
+}
+
+fn original_ids(file: &str, sections: impl IntoIterator<Item = Raw>) -> Vec<(String, Raw)> {
+    let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for raw in raw_sections(text, &managed_spans(text)?) {
+    for raw in sections {
         let base = format!("{file}#{}", slugify(&raw.heading));
         let mut id = base.clone();
         let mut n = 2;
@@ -178,10 +191,10 @@ fn located(text: &str, file: &str) -> Result<Vec<(String, Raw)>> {
             id = format!("{base}-{n}");
             n += 1;
         }
-        seen.push(id.clone());
+        seen.insert(id.clone());
         out.push((id, raw));
     }
-    Ok(out)
+    out
 }
 
 /// Text without leading blank lines and trailing whitespace.
@@ -228,29 +241,6 @@ pub struct Replica {
     pub body: String,
 }
 
-fn oneline(s: &str) -> String {
-    s.replace(['\n', '\r'], " ")
-}
-
-fn render_region(replicas: &[Replica]) -> String {
-    let mut s = format!("{REGION_BEGIN}\n");
-    for (i, r) in replicas.iter().enumerate() {
-        if i > 0 {
-            s.push('\n');
-        }
-        s.push_str(&format!(
-            "{}\n{HEADING_PREFIX}{}\n",
-            marker(&r.origin, &r.id),
-            oneline(&r.heading)
-        ));
-        if !r.body.is_empty() {
-            s.push_str(&format!("\n{}\n", r.body));
-        }
-    }
-    s.push_str(REGION_END);
-    s
-}
-
 fn parse_region(text: &str) -> Result<Vec<Replica>> {
     let Some((s, e)) = region_span(text)? else {
         return Ok(Vec::new());
@@ -284,68 +274,20 @@ fn parse_region(text: &str) -> Result<Vec<Replica>> {
     Ok(out)
 }
 
-/// Replaces the instruction region with one holding `replicas` (sorted by origin, id), or
-/// removes it when there are none. Bytes outside the region stay as they are.
-fn set_region(text: &str, mut replicas: Vec<Replica>) -> Result<String> {
-    replicas.sort_by(|a, b| (&a.origin, &a.id).cmp(&(&b.origin, &b.id)));
-    Ok(match (region_span(text)?, replicas.is_empty()) {
-        (Some((s, e)), false) => {
-            format!("{}{}{}", &text[..s], render_region(&replicas), &text[e..])
-        }
-        (Some((s, e)), true) => {
-            let mut before = &text[..s];
-            if before.ends_with("\n\n") {
-                before = &before[..before.len() - 1];
-            }
-            let after = text[e..].strip_prefix('\n').unwrap_or(&text[e..]);
-            format!("{before}{after}")
-        }
-        (None, false) => {
-            let sep = if text.is_empty() {
-                ""
-            } else if text.ends_with('\n') {
-                "\n"
-            } else {
-                "\n\n"
-            };
-            format!("{text}{sep}{}\n", render_region(&replicas))
-        }
-        (None, true) => text.to_string(),
-    })
-}
-
-pub fn upsert_replica(text: &str, replica: Replica) -> Result<String> {
-    let mut replicas = parse_region(text)?;
-    match replicas
-        .iter_mut()
-        .find(|r| r.origin == replica.origin && r.id == replica.id)
-    {
-        Some(r) => *r = replica,
-        None => replicas.push(replica),
-    }
-    set_region(text, replicas)
-}
-
-/// `None` when the region holds no such replica.
-pub fn remove_replica(text: &str, origin: &str, id: &str) -> Result<Option<String>> {
-    let mut replicas = parse_region(text)?;
-    let before = replicas.len();
-    replicas.retain(|r| !(r.origin == origin && r.id == id));
-    if replicas.len() == before {
-        return Ok(None);
-    }
-    set_region(text, replicas).map(Some)
-}
-
 /// Replaces the body of an original section in place; the heading line and every other byte
 /// stay. `None` when the section does not exist.
+#[cfg(test)]
 pub fn rewrite_body(text: &str, file: &str, native_id: &str, body: &str) -> Result<Option<String>> {
     let sections = located(text, file)?;
     let Some((_, raw)) = sections.iter().find(|(id, _)| id == native_id) else {
         return Ok(None);
     };
+    Ok(Some(rewrite_section_body(text, raw, body)))
+}
+
+fn rewrite_section_body(text: &str, raw: &Raw, body: &str) -> String {
     let body = trim_body(body);
-    Ok(Some(match body_range(text, raw) {
+    match body_range(text, raw) {
         Some((s, e)) => format!("{}{body}{}", &text[..s], &text[e..]),
         None if body.is_empty() => text.to_string(),
         None => {
@@ -353,7 +295,7 @@ pub fn rewrite_body(text: &str, file: &str, native_id: &str, body: &str) -> Resu
             let nl = if head.ends_with('\n') { "" } else { "\n" };
             format!("{head}{nl}\n{body}\n{}", &text[raw.heading_end..])
         }
-    }))
+    }
 }
 
 /// Why `heading` and `body` cannot be stored as exactly one new section, or `None`. A heading is
@@ -386,6 +328,7 @@ fn render_section(heading: &str, body: &str) -> String {
 /// Adds a new original section before the first managed region (at the end of the file when
 /// there is none), separated by one blank line from what precedes and follows it. Every other
 /// byte stays. `None` when a section with `native_id` exists.
+#[cfg(test)]
 pub fn insert_section(
     text: &str,
     file: &str,
@@ -396,8 +339,12 @@ pub fn insert_section(
     if located(text, file)?.iter().any(|(id, _)| id == native_id) {
         return Ok(None);
     }
-    let section = render_section(heading.trim(), body);
     let at = managed_spans(text)?.first().map(|&(s, _)| s);
+    Ok(Some(insert_at(text, at, heading, body)))
+}
+
+fn insert_at(text: &str, at: Option<usize>, heading: &str, body: &str) -> String {
+    let section = render_section(heading.trim(), body);
     let before = &text[..at.unwrap_or(text.len())];
     let sep = if before.is_empty() || before.ends_with("\n\n") {
         ""
@@ -406,27 +353,35 @@ pub fn insert_section(
     } else {
         "\n\n"
     };
-    Ok(Some(match at {
+    match at {
         Some(s) => format!("{before}{sep}{section}\n{}", &text[s..]),
         None => format!("{before}{sep}{section}"),
-    }))
+    }
 }
 
 /// Deletes an original section including the blank lines after it. `None` when the section
 /// does not exist.
+#[cfg(test)]
 pub fn remove_section(text: &str, file: &str, native_id: &str) -> Result<Option<String>> {
     let sections = located(text, file)?;
     let Some((_, raw)) = sections.iter().find(|(id, _)| id == native_id) else {
         return Ok(None);
     };
+    Ok(Some(remove_at(text, raw)))
+}
+
+fn remove_at(text: &str, raw: &Raw) -> String {
     let (head, tail) = (&text[..raw.start], &text[raw.end..]);
-    Ok(Some(if tail.is_empty() && !head.trim().is_empty() {
-        format!("{}\n", head.trim_end())
-    } else if tail.is_empty() {
-        String::new()
-    } else {
-        format!("{head}{tail}")
-    }))
+    if tail.is_empty() && !head.trim().is_empty() {
+        for ending in ["\r\n", "\n"] {
+            if let Some(before) = head.strip_suffix(ending) {
+                if before.ends_with(ending) {
+                    return before.to_string();
+                }
+            }
+        }
+    }
+    format!("{head}{tail}")
 }
 
 /// How a native id relates to the instruction file `file`.
@@ -461,6 +416,174 @@ fn read_text(path: &Path) -> Result<Option<String>> {
 }
 
 /// One agent's global instruction file: scans it and applies item operations to it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Origin {
+    agent: String,
+    id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Anchor {
+    heading: String,
+    body: String,
+    origin: Option<Origin>,
+}
+
+impl Anchor {
+    fn new(heading: &str, body: &str, origin: Option<Origin>) -> Self {
+        Self {
+            heading: sha_hex(heading.as_bytes()),
+            body: sha_hex(body.replace("\r\n", "\n").as_bytes()),
+            origin,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Snapshot {
+    hash: String,
+    anchors: Vec<Anchor>,
+}
+
+impl Snapshot {
+    fn new(text: &str, anchors: Vec<Anchor>) -> Self {
+        Self {
+            hash: sha_hex(text.as_bytes()),
+            anchors,
+        }
+    }
+
+    fn has_replicas(&self) -> bool {
+        self.anchors.iter().any(|anchor| anchor.origin.is_some())
+    }
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct InstructionState {
+    saved: Snapshot,
+    pending: Option<Snapshot>,
+}
+
+struct Document {
+    current: Option<String>,
+    text: String,
+    sections: Vec<Raw>,
+    anchors: Vec<Anchor>,
+    state: Option<InstructionState>,
+}
+
+impl Document {
+    fn ids(&self, file: &str) -> Vec<String> {
+        let originals = self
+            .sections
+            .iter()
+            .zip(&self.anchors)
+            .filter(|(_, a)| a.origin.is_none())
+            .map(|(raw, _)| raw.clone());
+        let mut originals = original_ids(file, originals).into_iter();
+        self.anchors
+            .iter()
+            .map(|a| match &a.origin {
+                Some(o) => replica_native_id(file, &o.agent, &o.id),
+                None => originals.next().expect("one id per original").0,
+            })
+            .collect()
+    }
+}
+
+fn anchors(text: &str, sections: &[Raw]) -> Vec<Anchor> {
+    sections
+        .iter()
+        .map(|raw| Anchor::new(&raw.heading, &section_body(text, raw), None))
+        .collect()
+}
+
+/// A duplicate can use its relative order when the exact matching group has the same size.
+fn match_anchors(saved: &[Anchor], current: &mut [Anchor]) -> Result<()> {
+    let mut saved_used = vec![false; saved.len()];
+    let mut current_used = vec![false; current.len()];
+    let checks: [fn(&Anchor, &Anchor) -> bool; 3] = [
+        |a, b| a.heading == b.heading && a.body == b.body,
+        |a, b| a.heading == b.heading,
+        |a, b| a.body == b.body,
+    ];
+    for (pass, same) in checks.into_iter().enumerate() {
+        for (index, anchor) in saved.iter().enumerate() {
+            if saved_used[index] {
+                continue;
+            }
+            let source: Vec<_> = saved
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| !saved_used[*i] && same(anchor, a))
+                .map(|(i, _)| i)
+                .collect();
+            let target: Vec<_> = current
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| !current_used[*i] && same(anchor, a))
+                .map(|(i, _)| i)
+                .collect();
+            if source.len() == target.len() && (pass == 0 || source.len() == 1) {
+                for (from, to) in source.into_iter().zip(target) {
+                    current[to].origin = saved[from].origin.clone();
+                    saved_used[from] = true;
+                    current_used[to] = true;
+                }
+            }
+        }
+    }
+    if current_used.contains(&false)
+        && saved
+            .iter()
+            .zip(saved_used)
+            .any(|(a, used)| !used && a.origin.is_some())
+    {
+        return Err(Error::Parse(
+            "cannot identify edited instruction replicas".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Remove only the managed lines and associate each replica with its heading offset.
+fn unmark(text: &str) -> Result<(String, Vec<(usize, Origin)>)> {
+    let Some((start, end)) = region_span(text)? else {
+        return Ok((text.to_string(), Vec::new()));
+    };
+    let after = &text[end..];
+    if (start != 0 && !text[..start].ends_with('\n'))
+        || !(after.is_empty() || after.starts_with('\n') || after.starts_with("\r\n"))
+    {
+        return Err(Error::Parse(
+            "instruction region markers must occupy complete lines".into(),
+        ));
+    }
+    let after = after
+        .strip_prefix("\r\n")
+        .or_else(|| after.strip_prefix('\n'))
+        .unwrap_or(after);
+    let mut plain = text[..start].to_string();
+    let mut origins = Vec::new();
+    let mut lines = text[start..end].split_inclusive('\n');
+    if lines.next().map(|line| line.trim_end_matches(['\r', '\n'])) != Some(REGION_BEGIN) {
+        return Err(Error::Parse("invalid instruction region beginning".into()));
+    }
+    for line in lines {
+        let content = line.trim_end_matches(['\r', '\n']);
+        if content == REGION_END {
+            continue;
+        }
+        if let Some((agent, id)) = parse_marker(content) {
+            origins.push((plain.len(), Origin { agent, id }));
+        } else {
+            plain.push_str(line);
+        }
+    }
+    plain.push_str(after);
+    Ok((plain, origins))
+}
+
 pub struct InstructionFile {
     agent: AgentId,
     root: PathBuf,
@@ -494,6 +617,123 @@ impl InstructionFile {
         self.root.join(self.file)
     }
 
+    fn state_path(&self) -> PathBuf {
+        let root = self
+            .root
+            .ancestors()
+            .find_map(|ancestor| {
+                let suffix = self.root.strip_prefix(ancestor).ok()?;
+                let parent = if ancestor.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    ancestor
+                };
+                Some(parent.canonicalize().ok()?.join(suffix))
+            })
+            .unwrap_or_else(|| self.root.clone());
+        let profile = sha_hex(root.as_os_str().as_encoded_bytes());
+        self.state_dir
+            .join("instruction-origins")
+            .join(self.agent.as_str())
+            .join(format!("{profile}.json"))
+    }
+
+    fn load(&self) -> Result<Document> {
+        let current = read_text(&self.path())?;
+        let native = current.as_deref().unwrap_or_default();
+        let state_path = self.state_path();
+        let state: Option<InstructionState> = read_text(&state_path)?
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|e| Error::Parse(format!("{}: {e}", state_path.display())))
+            })
+            .transpose()?;
+        let (text, inline) = unmark(native)?;
+        let sections = raw_sections(&text, &managed_spans(&text)?);
+        let mut slots = anchors(&text, &sections);
+        let hash = sha_hex(native.as_bytes());
+        let saved = if let Some(state) = &state {
+            if let Some(pending) = &state.pending {
+                if pending.hash == hash {
+                    Some(pending)
+                } else if state.saved.hash == hash {
+                    Some(&state.saved)
+                } else {
+                    return Err(Error::Parse(format!(
+                        "{} changed during an interrupted instruction write",
+                        self.path().display()
+                    )));
+                }
+            } else {
+                Some(&state.saved)
+            }
+        } else {
+            None
+        };
+        if text != native {
+            for (offset, origin) in inline {
+                let index = sections
+                    .iter()
+                    .position(|raw| raw.start == offset)
+                    .ok_or_else(|| self.invalid_layout())?;
+                slots[index].origin = Some(origin);
+            }
+            let plain: Vec<_> = slots
+                .iter()
+                .filter(|a| a.origin.is_none())
+                .cloned()
+                .collect();
+            let before = raw_sections(native, &managed_spans(native)?);
+            let replicas: Vec<_> = slots
+                .iter()
+                .filter(|a| a.origin.is_some())
+                .cloned()
+                .collect();
+            let expected: Vec<_> = parse_region(native)?
+                .into_iter()
+                .map(|r| {
+                    Anchor::new(
+                        &r.heading,
+                        &r.body,
+                        Some(Origin {
+                            agent: r.origin,
+                            id: r.id,
+                        }),
+                    )
+                })
+                .collect();
+            if plain != anchors(native, &before)
+                || replicas != expected
+                || saved.is_some_and(|s| s.has_replicas() && s.anchors != slots)
+            {
+                return Err(self.invalid_layout());
+            }
+        } else if let Some(saved) = saved.filter(|s| s.has_replicas()) {
+            if saved.hash == hash {
+                if saved.anchors.len() != slots.len() {
+                    return Err(self.invalid_layout());
+                }
+                slots = saved.anchors.clone();
+            } else {
+                match_anchors(&saved.anchors, &mut slots)?;
+            }
+        }
+        Ok(Document {
+            current,
+            text,
+            sections,
+            anchors: slots,
+            state,
+        })
+    }
+
+    fn invalid_layout(&self) -> Error {
+        Error::Parse(format!(
+            "cannot preserve instruction sections in {}",
+            self.path().display()
+        ))
+    }
+
     fn item(heading: String, body: String) -> Item {
         Item {
             kind: Kind::Instruction,
@@ -507,33 +747,23 @@ impl InstructionFile {
     }
 
     pub fn scan(&self) -> Result<Vec<Observed>> {
-        let Some(text) = read_text(&self.path())? else {
-            return Ok(Vec::new());
-        };
-        let mut out = Vec::new();
-        for (native_id, raw) in located(&text, self.file)? {
-            let body = section_body(&text, &raw);
-            out.push(Observed {
+        let document = self.load()?;
+        Ok(document
+            .ids(self.file)
+            .into_iter()
+            .zip(&document.sections)
+            .zip(&document.anchors)
+            .map(|((native_id, raw), anchor)| Observed {
                 agent: self.agent.clone(),
                 native_id,
                 path: self.path(),
-                item: Self::item(raw.heading, body),
-                replica_of: None,
-            });
-        }
-        for r in parse_region(&text)? {
-            out.push(Observed {
-                agent: self.agent.clone(),
-                native_id: replica_native_id(self.file, &r.origin, &r.id),
-                path: self.path(),
-                item: Self::item(r.heading, r.body),
-                replica_of: Some(ItemKey {
-                    origin: AgentId::new(r.origin),
-                    native_id: r.id,
+                item: Self::item(raw.heading.clone(), section_body(&document.text, raw)),
+                replica_of: anchor.origin.as_ref().map(|origin| ItemKey {
+                    origin: AgentId::new(&origin.agent),
+                    native_id: origin.id.clone(),
                 }),
-            });
-        }
-        Ok(out)
+            })
+            .collect())
     }
 
     fn require_global(&self, item: &Item, operation: &str) -> Result<()> {
@@ -547,13 +777,48 @@ impl InstructionFile {
         }
     }
 
-    /// Writes `updated` when it differs from `current`, backing up an existing file first.
-    fn store(&self, current: Option<&str>, updated: &str) -> Result<()> {
-        if current == Some(updated) {
-            return Ok(());
+    fn save_state(&self, state: &InstructionState) -> Result<()> {
+        let path = self.state_path();
+        if path.exists() {
+            fsx::backup(
+                &self.backups,
+                &self.state_dir,
+                &self.agent,
+                &self.state_dir,
+                &path,
+            )?;
+        }
+        let bytes = serde_json::to_vec(state).map_err(|e| Error::Parse(e.to_string()))?;
+        fsx::atomic_write(&path, &bytes)
+    }
+
+    fn store(&self, document: Document, updated: &str, expected: Vec<Anchor>) -> Result<()> {
+        let found = anchors(updated, &raw_sections(updated, &managed_spans(updated)?));
+        if found.len() != expected.len()
+            || found
+                .iter()
+                .zip(&expected)
+                .any(|(a, b)| a.heading != b.heading || a.body != b.body)
+        {
+            return Err(self.invalid_layout());
         }
         let path = self.path();
-        if current.is_some() {
+        let current = document.current.as_deref();
+        let changed = current.unwrap_or_default() != updated;
+        let old = Snapshot::new(current.unwrap_or_default(), document.anchors);
+        let next = Snapshot::new(updated, expected);
+        let track = next.has_replicas() || document.state.is_some();
+        let done = InstructionState {
+            saved: next,
+            pending: None,
+        };
+        if !changed && (!track || document.state.as_ref() == Some(&done)) {
+            return Ok(());
+        }
+        if changed && read_text(&path)? != document.current {
+            return Err(self.invalid_layout());
+        }
+        if changed && current.is_some() {
             fsx::backup(
                 &self.backups,
                 &self.state_dir,
@@ -562,26 +827,73 @@ impl InstructionFile {
                 &path,
             )?;
         }
-        fsx::atomic_write(&path, updated.as_bytes())
+        if changed {
+            if track {
+                self.save_state(&InstructionState {
+                    saved: old,
+                    pending: Some(done.saved.clone()),
+                })?;
+            }
+            fsx::atomic_write(&path, updated.as_bytes())?;
+        }
+        if track {
+            self.save_state(&done)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn reconcile(&self) -> Result<()> {
+        let document = self.load()?;
+        let mut updated = document.text.clone();
+        if let Some((start, end)) = block_span(&updated)? {
+            if updated[start..end].lines().nth(1)
+                == Some("## Project memory (managed by nativemem)")
+            {
+                let after = &updated[end..];
+                let len = if after.starts_with("\r\n") {
+                    2
+                } else {
+                    usize::from(after.starts_with('\n'))
+                };
+                updated.replace_range(start..end + len, "");
+            }
+        }
+        let expected = document.anchors.clone();
+        self.store(document, &updated, expected)
     }
 
     pub fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
         self.require_global(item, "write_replica")?;
-        let current = read_text(&self.path())?;
-        let updated = upsert_replica(
-            current.as_deref().unwrap_or_default(),
-            Replica {
-                origin: key.origin.as_str().to_string(),
-                id: key.native_id.clone(),
-                heading: item.description.clone(),
-                body: trim_body(&item.body),
-            },
-        )?;
-        self.store(current.as_deref(), &updated)?;
-        Ok((
-            replica_native_id(self.file, key.origin.as_str(), &key.native_id),
-            self.path(),
-        ))
+        let document = self.load()?;
+        let origin = Origin {
+            agent: key.origin.as_str().to_string(),
+            id: key.native_id.clone(),
+        };
+        let native_id = replica_native_id(self.file, &origin.agent, &origin.id);
+        let mut expected = document.anchors.clone();
+        let heading = item.description.trim();
+        let anchor = Anchor::new(heading, &trim_body(&item.body), Some(origin.clone()));
+        let updated = if let Some(index) = expected
+            .iter()
+            .position(|a| a.origin.as_ref() == Some(&origin))
+        {
+            let raw = &document.sections[index];
+            let mut updated = rewrite_section_body(&document.text, raw, &item.body);
+            let end = raw.start
+                + document.text[raw.start..raw.heading_end]
+                    .trim_end_matches(['\r', '\n'])
+                    .len();
+            if heading != raw.heading {
+                updated.replace_range(raw.start..end, &format!("{HEADING_PREFIX}{heading}"));
+            }
+            expected[index] = anchor;
+            updated
+        } else {
+            expected.push(anchor);
+            insert_at(&document.text, None, heading, &item.body)
+        };
+        self.store(document, &updated, expected)?;
+        Ok((native_id, self.path()))
     }
 
     /// Appends `item` as a new user section; see `insert_section`. Fails with `Error::Exists`
@@ -592,16 +904,32 @@ impl InstructionFile {
             return Err(Error::Parse(problem.to_string()));
         }
         let native_id = format!("{}#{}", self.file, slugify(item.description.trim()));
-        let current = read_text(&self.path())?;
-        let updated = insert_section(
-            current.as_deref().unwrap_or_default(),
-            self.file,
-            &native_id,
-            &item.description,
-            &item.body,
-        )?
-        .ok_or_else(|| Error::Exists(native_id.clone()))?;
-        self.store(current.as_deref(), &updated)?;
+        let document = self.load()?;
+        if document.ids(self.file).contains(&native_id) {
+            return Err(Error::Exists(native_id));
+        }
+        let at = managed_spans(&document.text)?
+            .first()
+            .map(|&(s, _)| s)
+            .into_iter()
+            .chain(
+                document
+                    .anchors
+                    .iter()
+                    .zip(&document.sections)
+                    .find_map(|(a, raw)| a.origin.as_ref().map(|_| raw.start)),
+            )
+            .min();
+        let index = at.map_or(document.sections.len(), |at| {
+            document.sections.partition_point(|raw| raw.start < at)
+        });
+        let mut expected = document.anchors.clone();
+        expected.insert(
+            index,
+            Anchor::new(item.description.trim(), &trim_body(&item.body), None),
+        );
+        let updated = insert_at(&document.text, at, &item.description, &item.body);
+        self.store(document, &updated, expected)?;
         Ok((native_id, self.path()))
     }
 
@@ -617,21 +945,30 @@ impl InstructionFile {
         if classify(self.file, native_id) != Some(IdKind::Original) {
             return Err(self.missing(native_id));
         }
-        let current = read_text(&self.path())?.ok_or_else(|| self.missing(native_id))?;
-        let updated = rewrite_body(&current, self.file, native_id, &item.body)?
+        let document = self.load()?;
+        let index = document
+            .ids(self.file)
+            .iter()
+            .position(|id| id == native_id)
             .ok_or_else(|| self.missing(native_id))?;
-        self.store(Some(&current), &updated)
+        let raw = &document.sections[index];
+        let updated = rewrite_section_body(&document.text, raw, &item.body);
+        let mut expected = document.anchors.clone();
+        expected[index] = Anchor::new(&raw.heading, &trim_body(&item.body), None);
+        self.store(document, &updated, expected)
     }
 
     pub fn remove(&self, native_id: &str) -> Result<()> {
-        let kind = classify(self.file, native_id).ok_or_else(|| self.missing(native_id))?;
-        let current = read_text(&self.path())?.ok_or_else(|| self.missing(native_id))?;
-        let updated = match kind {
-            IdKind::Original => remove_section(&current, self.file, native_id)?,
-            IdKind::Replica { origin, id } => remove_replica(&current, &origin, &id)?,
-        }
-        .ok_or_else(|| self.missing(native_id))?;
-        self.store(Some(&current), &updated)
+        let document = self.load()?;
+        let index = document
+            .ids(self.file)
+            .iter()
+            .position(|id| id == native_id)
+            .ok_or_else(|| self.missing(native_id))?;
+        let updated = remove_at(&document.text, &document.sections[index]);
+        let mut expected = document.anchors.clone();
+        expected.remove(index);
+        self.store(document, &updated, expected)
     }
 }
 
@@ -778,64 +1115,122 @@ mod tests {
         );
     }
 
-    fn rep(origin: &str, id: &str, heading: &str, body: &str) -> Replica {
-        Replica {
-            origin: origin.into(),
-            id: id.into(),
-            heading: heading.into(),
-            body: body.into(),
+    fn marked(origin: &str, id: &str, heading: &str, body: &str) -> String {
+        format!(
+            "{REGION_BEGIN}\n{}\n{}{REGION_END}\n",
+            marker(origin, id),
+            render_section(heading, body)
+        )
+    }
+
+    fn instruction_file(base: &Path) -> InstructionFile {
+        InstructionFile::new(
+            AgentId::new("claude"),
+            base.join("claude"),
+            base.join("state"),
+            BackupSession::with_stamp("T"),
+            FILE,
+        )
+    }
+
+    fn replica_key() -> ItemKey {
+        ItemKey {
+            origin: AgentId::new("pi"),
+            native_id: "AGENTS.md#same".into(),
         }
     }
 
     #[test]
-    fn region_is_created_sorted_updated_and_removed_with_its_blank_line() {
-        let base = "# Mine\n\nrules\n";
-        let one = upsert_replica(base, rep("codex", "AGENTS.md#z", "Z", "zed")).unwrap();
-        let two = upsert_replica(&one, rep("claude", "CLAUDE.md#a", "A", "")).unwrap();
-        assert!(two.starts_with(&format!("{base}\n{REGION_BEGIN}\n")));
-        assert!(two.ends_with(&format!("{REGION_END}\n")));
-        assert!(two.find("origin=claude").unwrap() < two.find("origin=codex").unwrap());
-        let parsed = parse_region(&two).unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].body, "");
-        assert_eq!(parsed[1], rep("codex", "AGENTS.md#z", "Z", "zed"));
-
-        let updated = upsert_replica(&two, rep("codex", "AGENTS.md#z", "Z", "zed 2")).unwrap();
-        assert_eq!(parse_region(&updated).unwrap().len(), 2);
-        assert!(updated.contains("zed 2"));
-
-        let one_left = remove_replica(&two, "claude", "CLAUDE.md#a")
-            .unwrap()
-            .unwrap();
-        let none_left = remove_replica(&one_left, "codex", "AGENTS.md#z")
-            .unwrap()
-            .unwrap();
-        assert_eq!(none_left, base);
-        assert!(remove_replica(&none_left, "codex", "x").unwrap().is_none());
+    fn equal_headings_can_be_reordered_and_the_replica_edited() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = instruction_file(dir.path());
+        let path = file.path();
+        let original = "# Preamble\n\n## Same\n\nAn original.\n";
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, original).unwrap();
+        let key = replica_key();
+        file.write_replica(
+            &key,
+            &InstructionFile::item("Same".into(), "A copy.".into()),
+        )
+        .unwrap();
+        fs::write(
+            &path,
+            "# Preamble\n\n## Same\n\nA changed copy.\n\n## Same\n\nAn original.\n",
+        )
+        .unwrap();
+        let found = file.scan().unwrap();
+        assert_eq!(found[0].replica_of, Some(key));
+        assert_eq!(found[0].item.body, "A changed copy.");
+        assert!(found[1].replica_of.is_none());
+        assert_eq!(found[1].native_id, "CLAUDE.md#same");
     }
 
     #[test]
-    fn region_alone_in_a_new_file() {
-        let text = upsert_replica("", rep("claude", "CLAUDE.md#a", "A", "a")).unwrap();
-        assert!(text.starts_with(REGION_BEGIN));
-        assert_eq!(
-            remove_replica(&text, "claude", "CLAUDE.md#a")
-                .unwrap()
-                .unwrap(),
-            ""
-        );
+    fn disappearing_indistinguishable_section_does_not_adopt_or_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = instruction_file(dir.path());
+        let path = file.path();
+        let original = "## Same\n\nIdentical.\n";
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, original).unwrap();
+        file.write_replica(
+            &replica_key(),
+            &InstructionFile::item("Same".into(), "Identical.".into()),
+        )
+        .unwrap();
+        fs::write(&path, original).unwrap();
+        assert!(matches!(file.scan(), Err(Error::Parse(_))));
+        assert!(file.reconcile().is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn interrupted_write_recovers_replica_identity_at_either_document_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = instruction_file(dir.path());
+        let path = file.path();
+        let before = "## Same\n\nFirst.\n";
+        let after = "## Same\n\nSecond.\n";
+        let key = replica_key();
+        let origin = Origin {
+            agent: key.origin.to_string(),
+            id: key.native_id.clone(),
+        };
+        let state = InstructionState {
+            saved: Snapshot::new(
+                before,
+                vec![Anchor::new("Same", "First.", Some(origin.clone()))],
+            ),
+            pending: Some(Snapshot::new(
+                after,
+                vec![Anchor::new("Same", "Second.", Some(origin))],
+            )),
+        };
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for (text, body) in [(before, "First."), (after, "Second.")] {
+            file.save_state(&state).unwrap();
+            fs::write(&path, text).unwrap();
+            let found = file.scan().unwrap();
+            assert_eq!(found[0].replica_of, Some(key.clone()));
+            assert_eq!(found[0].item.body, body);
+            file.reconcile().unwrap();
+            let saved = file.load().unwrap().state.unwrap();
+            assert_eq!(saved.saved.hash, sha_hex(text.as_bytes()));
+            assert!(saved.pending.is_none());
+        }
     }
 
     #[test]
     fn replica_ids_with_odd_characters_round_trip() {
-        let text = upsert_replica("", rep("codex", "AGENTS.md#a b:c%", "H", "b")).unwrap();
+        let text = marked("codex", "AGENTS.md#a b:c%", "H", "b");
         assert_eq!(parse_region(&text).unwrap()[0].id, "AGENTS.md#a b:c%");
     }
 
     #[test]
     fn insert_section_goes_before_the_first_managed_region_and_keeps_every_other_byte() {
         let user = "# Mine\n\n## Style\nbe terse\n";
-        let region = upsert_replica(user, rep("codex", "AGENTS.md#z", "Z", "zed")).unwrap();
+        let region = format!("{user}\n{}", marked("codex", "AGENTS.md#z", "Z", "zed"));
         let out = insert_section(&region, FILE, "CLAUDE.md#new", "New", "fresh body\n")
             .unwrap()
             .unwrap();

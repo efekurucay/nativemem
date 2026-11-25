@@ -440,6 +440,42 @@ fn a_written_replica_has_the_rows_opencode_lists_by() {
 }
 
 #[test]
+fn a_checkpoint_round_trips_as_an_opencode_compaction_row() {
+    let f = fx();
+    let a = adapter(&f, "T");
+    let mut s = session("With checkpoint", CHAT);
+    s.turns
+        .insert(1, Turn::new(Role::Summary, "Project checkpoint", BASE));
+    a.write_replica(&key("checkpoint"), &item(&s)).unwrap();
+    let conn = f.data.connect();
+    let state: String = conn
+        .query_row(
+            "SELECT json_extract(data, '$.status') FROM session_message WHERE type = 'compaction'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "completed");
+    assert_eq!(
+        Session::from_body(&replicas(&a)[0].item.body)
+            .unwrap()
+            .hash(),
+        s.hash()
+    );
+
+    conn.execute(
+        "UPDATE session_message SET data = json_set(data, '$.metadata.keepID',
+         (SELECT id FROM session_message WHERE type = 'user' ORDER BY seq LIMIT 1))
+         WHERE type = 'compaction'",
+        [],
+    )
+    .unwrap();
+    let imported = Session::from_body(&replicas(&a)[0].item.body).unwrap();
+    assert_eq!(imported.turns[0].role, Role::Summary);
+    assert_eq!(imported.turns[1].text, s.turns[0].text);
+}
+
+#[test]
 fn the_picker_and_continue_queries_list_the_replica_newest_first() {
     let f = fx();
     native(&f, "ses_a", Some("older"), &[("user", "q")]);
@@ -1002,6 +1038,7 @@ impl World {
             .iter()
             .filter_map(|a| match a {
                 Action::Write { target, .. } => Some(target.to_string()),
+                Action::AppendSession { target, .. } => Some(target.agent.to_string()),
                 _ => None,
             })
             .collect();
@@ -1027,7 +1064,11 @@ impl World {
 fn writes_to(plan: &engine::Plan, agent: &str) -> usize {
     plan.actions
         .iter()
-        .filter(|a| matches!(a, Action::Write { target, .. } if target.as_str() == agent))
+        .filter(|a| match a {
+            Action::Write { target, .. } => target.as_str() == agent,
+            Action::AppendSession { target, .. } => target.agent.as_str() == agent,
+            _ => false,
+        })
         .count()
 }
 
@@ -1217,6 +1258,80 @@ fn a_grown_original_refreshes_an_untouched_replica_but_not_a_continued_one() {
         ],
     );
     assert_eq!(writes_to(&w.plan(), "opencode"), 0);
+}
+
+#[test]
+fn a_continuation_appends_to_the_same_native_open_code_session() {
+    let w = world();
+    native(&w.f, "ses_native", Some("Original"), &[("user", "first")]);
+    w.plan_and_apply();
+    let (claude, pi, open) = w.adapters();
+    let all: [&dyn Adapter; 3] = [&claude, &pi, &open];
+    let copy = claude
+        .scan()
+        .unwrap()
+        .into_iter()
+        .find(|o| o.replica_of.is_some())
+        .unwrap();
+    let raw = fs::read_to_string(&copy.path).unwrap();
+    let last_prompt: Value = serde_json::from_str(raw.lines().last().unwrap()).unwrap();
+    let line = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "continued in Claude" },
+        "uuid": "claude-continuation",
+        "parentUuid": last_prompt["leafUuid"],
+        "cwd": CWD,
+        "timestamp": "2026-11-10T11:00:00.000Z"
+    });
+    fs::write(copy.path, format!("{raw}{line}\n")).unwrap();
+
+    let db = w.f.data.connect();
+    let before = dump(&db)
+        .into_iter()
+        .filter(|row| row.starts_with("session_message|"))
+        .collect::<BTreeSet<_>>();
+    let plan = engine::plan(&all, &w.ledger).unwrap();
+    assert!(plan.actions.iter().any(|act| matches!(act, Action::AppendSession { target, .. } if target.native_id == "ses_native.jsonl")));
+    let target = open.scan().unwrap().remove(0);
+    db.execute(
+        "UPDATE session_v2 SET time_busy = ?1 WHERE id = 'ses_native'",
+        [i64::MAX],
+    )
+    .unwrap();
+    let report = engine::apply(
+        plan,
+        &all,
+        &w.ledger,
+        &ApplyOptions {
+            allow_mass_delete: false,
+        },
+    )
+    .unwrap();
+    assert!(report.needs_attention());
+    assert!(report.done.is_empty(), "{report}");
+    assert_eq!(open.scan().unwrap().remove(0), target);
+
+    db.execute(
+        "UPDATE session_v2 SET time_busy = NULL WHERE id = 'ses_native'",
+        [],
+    )
+    .unwrap();
+    w.plan_and_apply();
+    let original = open.scan().unwrap().remove(0);
+    assert_eq!(original.native_id, "ses_native.jsonl");
+    assert!(original.replica_of.is_none());
+    assert_eq!(count(&db, "SELECT count(*) FROM session_v2"), 1);
+    assert!(before.is_subset(&dump(&db)));
+    assert_eq!(
+        Session::from_body(&original.item.body)
+            .unwrap()
+            .turns
+            .last()
+            .unwrap()
+            .text,
+        "continued in Claude"
+    );
+    assert!(w.plan().is_empty());
 }
 
 #[test]

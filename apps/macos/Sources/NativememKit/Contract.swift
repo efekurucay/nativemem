@@ -196,6 +196,13 @@ public struct SkillText: Codable, Hashable, Sendable {
     public var name: String
     public var path: String
     public var text: String
+    public var textHash: String?
+    public var manifest: String?
+}
+
+struct SkillEditResult: Decodable, Sendable {
+    let path: String
+    let textHash: String
 }
 
 public struct SessionTurn: Codable, Hashable, Sendable {
@@ -203,8 +210,13 @@ public struct SessionTurn: Codable, Hashable, Sendable {
     public var text: String
     public var tsMs: Int64
 
-    /// "You" or "Assistant".
-    public var speaker: String { role == "user" ? "You" : "Assistant" }
+    public var speaker: String {
+        switch role {
+        case "user": "You"
+        case "summary": "Conversation summary"
+        default: "Assistant"
+        }
+    }
 }
 
 /// One session with its turns, as `session show --json` prints it.

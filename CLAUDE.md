@@ -21,6 +21,8 @@ Code, Codex, OpenCode, Pi. Hermes has research notes only and no adapter.
 - Never print secrets or session bodies. Inside repositories, write only project skill directories;
   nativemem does not manage git tracking or `.gitignore`.
 - Every delete or overwrite backs up first; writes are atomic (`crates/core/src/fsx.rs`).
+- A hub tool that adds an MCP server saves it disabled under the state lock. Known secret-bearing
+  fields accept only `secret:<id>` references; fill their values through the app or CLI.
 - Code, comments and docs describe the current state only; history lives in git. One canonical name
   per symbol, and a replaced implementation is removed, not kept beside its replacement.
 - Update the wiki in the same task as the change (`wiki/WIKI-CREATOR.md` has the routing table).

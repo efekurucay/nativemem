@@ -28,7 +28,7 @@ backups in the state directory.
 
 - Each agent needs an adapter that reads and writes its native format.
 - Agents without a native memory (OpenCode, Pi) receive replicas in a store inside their own home,
-  announced by a routing block (`wiki/decisions/routing-block-for-agents-without-memory.md`).
+  accessible through the manager (`wiki/decisions/routing-block-for-agents-without-memory.md`).
 - The ledger can be lost without losing data: marked replicas are adopted on the next run (test
   `lost_ledger_is_rebuilt_by_adoption`).
 
@@ -56,4 +56,4 @@ backups in the state directory.
 
 ## Last updated
 
-2026-11-10
+2026-11-22

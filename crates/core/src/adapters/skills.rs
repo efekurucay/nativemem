@@ -361,6 +361,24 @@ impl SkillStore {
         self.project_subdir.is_some()
     }
 
+    pub(super) fn project_skill_dirs(&self) -> Option<(&Path, &[PathBuf])> {
+        Some((self.project_subdir.as_deref()?, &self.project_visible_roots))
+    }
+
+    pub(super) fn project_directory(&self, cwd: &Path) -> Option<PathBuf> {
+        let dir = cwd.join(self.project_subdir.as_ref()?);
+        let resolved = dir.canonicalize().ok();
+        let is_global = std::iter::once(&self.dir)
+            .chain(&self.visible_roots)
+            .any(|global| {
+                dir == *global
+                    || resolved
+                        .as_ref()
+                        .is_some_and(|dir| global.canonicalize().ok().as_ref() == Some(dir))
+            });
+        (!is_global).then_some(dir)
+    }
+
     fn names(&self) -> Vec<String> {
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return Vec::new();
@@ -445,11 +463,9 @@ impl SkillStore {
 
     /// Same as `write` but into a project skills directory.
     pub fn write_project(&self, cwd: &Path, item: &Item) -> Result<(String, PathBuf)> {
-        let subdir = self
-            .project_subdir
-            .as_ref()
+        let dir = self
+            .project_directory(cwd)
             .ok_or_else(|| Error::unsupported(self.agent.as_str(), "project skills"))?;
-        let dir = cwd.join(subdir);
         let (_, path) = self.write_into(&dir, cwd, item)?;
         self.remember_project(cwd)?;
         let pk = project_key(cwd);
@@ -563,42 +579,80 @@ impl SkillStore {
         }
     }
 
-    /// Paths only, not skill contents. Copies in projects with no memory entries must remain
-    /// discoverable on subsequent runs, even when this agent has never had a session there.
+    fn project_index(&self) -> PathBuf {
+        let home = self
+            .home
+            .canonicalize()
+            .unwrap_or_else(|_| self.home.clone());
+        let profile = crate::session::sha_hex(home.as_os_str().as_encoded_bytes());
+        self.state_dir
+            .join("skill-projects")
+            .join(self.agent.as_str())
+            .join(format!("{profile}.json"))
+    }
+
+    /// Paths only, not skill contents.
     fn known_projects(&self, cwds: &[PathBuf]) -> Result<Vec<PathBuf>> {
-        let path = self.home.join("nativemem/skill-projects.json");
-        let mut projects: std::collections::BTreeSet<PathBuf> = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| Error::Parse(format!("invalid skill project index: {e}")))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
-            Err(e) => return Err(Error::io(&path, e)),
+        let index = self.project_index();
+        let mut projects = match fs::read(&index) {
+            Ok(bytes) => Self::parse_project_index(&bytes)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let source = self.home.join("nativemem/skill-projects.json");
+                match fs::read(&source) {
+                    Ok(bytes) => Self::parse_project_index(&bytes)?,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+                    Err(e) => return Err(Error::io(source, e)),
+                }
+            }
+            Err(e) => return Err(Error::io(index, e)),
         };
         projects.extend(cwds.iter().cloned());
-        if projects.iter().any(|cwd| !cwd.is_absolute()) {
-            return Err(Error::Parse("skill project paths must be absolute".into()));
-        }
         Ok(projects.into_iter().collect())
     }
 
-    fn remember_project(&self, cwd: &Path) -> Result<()> {
-        let known = self.known_projects(&[])?;
-        if known.iter().any(|p| p == cwd) {
-            return Ok(());
+    fn parse_project_index(bytes: &[u8]) -> Result<std::collections::BTreeSet<PathBuf>> {
+        let projects: std::collections::BTreeSet<PathBuf> = serde_json::from_slice(bytes)
+            .map_err(|e| Error::Parse(format!("invalid skill project index: {e}")))?;
+        if projects.iter().any(|cwd| !cwd.is_absolute()) {
+            return Err(Error::Parse("skill project paths must be absolute".into()));
         }
-        let projects = self.known_projects(&[cwd.to_path_buf()])?;
-        let path = self.home.join("nativemem/skill-projects.json");
+        Ok(projects)
+    }
+
+    pub(super) fn adopt_project_index(&self) -> Result<()> {
+        let path = self.project_index();
+        if !path.exists() && self.home.join("nativemem/skill-projects.json").exists() {
+            self.write_project_index(&path, &self.known_projects(&[])?)?;
+        }
+        Ok(())
+    }
+
+    fn remember_project(&self, cwd: &Path) -> Result<()> {
+        if !cwd.is_absolute() {
+            return Err(Error::Parse("skill project paths must be absolute".into()));
+        }
+        let path = self.project_index();
+        let mut projects = self.known_projects(&[])?;
+        match projects.binary_search_by(|p| p.as_path().cmp(cwd)) {
+            Ok(_) if path.exists() => return Ok(()),
+            Ok(_) => {}
+            Err(index) => projects.insert(index, cwd.to_path_buf()),
+        }
+        self.write_project_index(&path, &projects)
+    }
+
+    fn write_project_index(&self, path: &Path, projects: &[PathBuf]) -> Result<()> {
         if path.exists() {
             fsx::backup(
                 &self.backups,
                 &self.state_dir,
                 &self.agent,
-                &self.home,
-                &path,
+                &self.state_dir,
+                path,
             )?;
         }
-        let bytes =
-            serde_json::to_vec_pretty(&projects).map_err(|e| Error::Parse(e.to_string()))?;
-        fsx::atomic_write(&path, &bytes)
+        let bytes = serde_json::to_vec_pretty(projects).map_err(|e| Error::Parse(e.to_string()))?;
+        fsx::atomic_write(path, &bytes)
     }
 
     fn backup_agent(&self, base: &Path) -> AgentId {
@@ -614,10 +668,6 @@ impl SkillStore {
 
     /// Remove a project skill by its native id. Scans `cwds` for the matching project key.
     pub fn remove_project(&self, native_id: &str, cwds: &[PathBuf]) -> Result<()> {
-        let subdir = self
-            .project_subdir
-            .as_ref()
-            .ok_or_else(|| Error::unsupported(self.agent.as_str(), "project skills"))?;
         let pk = skill_project_key(native_id)
             .ok_or_else(|| Error::unsupported(self.agent.as_str(), "not a project skill id"))?;
         let name = skill_name(native_id)
@@ -627,25 +677,23 @@ impl SkillStore {
             .iter()
             .find(|c| project_key(c) == pk)
             .ok_or_else(|| Error::Parse(format!("project skill not found: {native_id:?}")))?;
-        self.remove_from(&cwd.join(subdir), cwd, name)
+        let dir = self
+            .project_directory(cwd)
+            .ok_or_else(|| Error::unsupported(self.agent.as_str(), "project skills"))?;
+        self.remove_from(&dir, cwd, name)
     }
 
     /// Scan project skill directories for the given project paths.
     pub fn scan_projects(&self, cwds: &[PathBuf]) -> Result<Vec<Observed>> {
-        let Some(ref subdir) = self.project_subdir else {
+        if self.project_subdir.is_none() {
             return Ok(Vec::new());
-        };
+        }
         let projects = self.known_projects(cwds)?;
-        let global_dir = self.dir.canonicalize().ok();
         let mut out = Vec::new();
         for cwd in &projects {
-            // Skip the agent home: its skills directory is the global one, already scanned.
-            if let Some(g) = &global_dir {
-                if cwd.join(subdir).canonicalize().ok().as_ref() == Some(g) {
-                    continue;
-                }
-            }
-            let dir = cwd.join(subdir);
+            let Some(dir) = self.project_directory(cwd) else {
+                continue;
+            };
             let Ok(entries) = fs::read_dir(&dir) else {
                 continue;
             };
@@ -789,6 +837,30 @@ mod tests {
     }
 
     #[test]
+    fn project_index_is_adopted_into_state_without_editing_the_source() {
+        let t = tempfile::tempdir().unwrap();
+        let s = store(t.path()).with_project_skills(".claude/skills".into(), vec![]);
+        let project = t.path().join("project");
+        let bytes = serde_json::to_string(&[&project]).unwrap();
+        put(&s.home, "nativemem/skill-projects.json", &bytes);
+        skill(&project.join(".claude/skills"), "demo");
+
+        assert_eq!(s.scan_projects(&[]).unwrap().len(), 1);
+        assert!(!s.project_index().exists());
+        s.adopt_project_index().unwrap();
+        s.adopt_project_index().unwrap();
+        assert!(s.project_index().starts_with(&s.state_dir));
+        assert_eq!(
+            fs::read_to_string(s.home.join("nativemem/skill-projects.json")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            s.scan_projects(&[]).unwrap()[0].item.scope,
+            Scope::Project(project)
+        );
+    }
+
+    #[test]
     fn project_skills_create_parents_deduplicate_scans_and_keep_backups_separate() {
         let t = tempfile::tempdir().unwrap();
         let s = store(t.path()).with_project_skills(".pi/skills".into(), vec![]);
@@ -817,6 +889,7 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_ne!(found[0].native_id, found[1].native_id);
         assert_eq!(found[0].item.scope, Scope::Project(a));
+        assert!(!s.home.join("nativemem").exists());
     }
 
     #[test]

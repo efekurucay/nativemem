@@ -234,11 +234,37 @@ fn manager_error(e: AuthError) -> String {
     e.to_string()
 }
 
+fn configured_challenge(spec: &ServerSpec) -> Option<String> {
+    spec.oauth
+        .as_ref()?
+        .resource_metadata_url
+        .as_ref()
+        .map(|url| format!("Bearer resource_metadata=\"{url}\""))
+}
+
+fn authorization_url(spec: &ServerSpec, base: &str) -> Result<String> {
+    let Some(oauth) = &spec.oauth else {
+        return Ok(base.to_string());
+    };
+    if oauth.authorization_params.is_empty() {
+        return Ok(base.to_string());
+    }
+    let mut url = reqwest::Url::parse(base)
+        .map_err(|e| invalid(format!("cannot build the authorization URL: {e}")))?;
+    {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in &oauth.authorization_params {
+            query.append_pair(key, value);
+        }
+    }
+    Ok(url.to_string())
+}
+
 /// A request client that attaches the stored bearer token and refreshes it under the lock.
 /// `Err(None)` means the server is not signed in; `Err(Some(message))` is any other failure.
 pub async fn authorized_client(
     name: &str,
-    url: &str,
+    spec: &ServerSpec,
     store: Arc<dyn SecretStore>,
     state: &Path,
 ) -> std::result::Result<AuthClient<reqwest::Client>, Option<String>> {
@@ -266,14 +292,20 @@ pub async fn authorized_client(
     let Some(client) = client else {
         return Err(None);
     };
+    let url = spec.url.as_deref().unwrap_or_default();
     let mut manager = AuthorizationManager::new(url)
         .await
         .map_err(|e| Some(manager_error(e)))?;
     manager.set_credential_store(credentials);
-    let resolution = manager
-        .resolve_metadata()
-        .await
-        .map_err(|e| Some(manager_error(e)))?;
+    let resolution = match configured_challenge(spec) {
+        Some(challenge) => {
+            manager
+                .resolve_metadata_from_challenge(Some(&challenge))
+                .await
+        }
+        None => manager.resolve_metadata().await,
+    }
+    .map_err(|e| Some(manager_error(e)))?;
     manager.set_metadata(resolution.metadata);
     let mut config = OAuthClientConfig::new(client.client_id, client.redirect_uri);
     if let Some(secret) = client.client_secret {
@@ -340,7 +372,10 @@ async fn login_async(
             .map_err(|e| invalid(e.to_string()))??
     };
     let url = resolved.spec.url.clone().unwrap_or_default();
-    let challenge = probe(&url, &resolved.spec).await?;
+    let challenge = match configured_challenge(&resolved.spec) {
+        Some(challenge) => Some(challenge),
+        None => probe(&url, &resolved.spec).await?,
+    };
 
     let mut manager = AuthorizationManager::new(url.as_str())
         .await
@@ -357,42 +392,59 @@ async fn login_async(
     manager.set_metadata(resolution.metadata);
 
     let known = load_client_blocking(&store, name).await?;
-    let (listener, reused) = bind_loopback(known.as_ref()).await?;
+    let oauth = resolved.spec.oauth.as_ref();
+    let configured_port = oauth.and_then(|oauth| oauth.callback_port);
+    let (listener, reused) = bind_loopback(known.as_ref(), configured_port).await?;
     let port = listener
         .local_addr()
         .map_err(|e| invalid(format!("cannot read the loopback address: {e}")))?
         .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
-    let client = match known.filter(|_| reused) {
-        Some(client) => client,
-        None => {
-            let registered = manager
-                .register_client(CLIENT_NAME, &redirect_uri, &[])
-                .await
-                .map_err(|e| auth_failure("cannot register the client", e))?;
+    let client = match oauth.and_then(|oauth| oauth.client_id.as_ref()) {
+        Some(client_id) => {
             let client = StoredClient {
-                client_id: registered.client_id,
-                client_secret: registered.client_secret,
+                client_id: client_id.clone(),
+                client_secret: oauth.and_then(|oauth| oauth.client_secret.clone()),
                 redirect_uri: redirect_uri.clone(),
             };
             save_client_blocking(&store, name, &client).await?;
             client
         }
+        None => match known.filter(|_| reused) {
+            Some(client) => client,
+            None => {
+                let registered = manager
+                    .register_client(CLIENT_NAME, &redirect_uri, &[])
+                    .await
+                    .map_err(|e| auth_failure("cannot register the client", e))?;
+                let client = StoredClient {
+                    client_id: registered.client_id,
+                    client_secret: registered.client_secret,
+                    redirect_uri: redirect_uri.clone(),
+                };
+                save_client_blocking(&store, name, &client).await?;
+                client
+            }
+        },
     };
 
     let mut request = AuthorizationRequest::new(&redirect_uri)
         .with_client_name(CLIENT_NAME)
-        .with_preregistered_client(&client.client_id)
-        .with_initial_scope_selection();
+        .with_preregistered_client(&client.client_id);
     if let Some(secret) = &client.client_secret {
         request = request.with_client_secret(secret);
+    }
+    match oauth.map(|oauth| oauth.scopes.as_slice()) {
+        Some(scopes) if !scopes.is_empty() => request = request.with_scopes(scopes.iter().cloned()),
+        _ => request = request.with_initial_scope_selection(),
     }
     let session = AuthorizationSession::new(manager, request)
         .await
         .map_err(|(_, e)| auth_failure("cannot start the authorization", e))?;
 
-    (options.open)(session.get_authorization_url());
+    let authorization_url = authorization_url(&resolved.spec, session.get_authorization_url())?;
+    (options.open)(&authorization_url);
     let callback_url = tokio::time::timeout(options.timeout, wait_for_callback(listener, port))
         .await
         .map_err(|_| {
@@ -447,7 +499,19 @@ async fn save_client_blocking(
 
 /// Bind the loopback port of the stored client when it is free, so its registration stays valid;
 /// otherwise a random port. The flag says whether the stored client's port was bound.
-async fn bind_loopback(known: Option<&StoredClient>) -> Result<(TcpListener, bool)> {
+async fn bind_loopback(
+    known: Option<&StoredClient>,
+    configured_port: Option<u16>,
+) -> Result<(TcpListener, bool)> {
+    if let Some(port) = configured_port {
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(|e| invalid(format!("cannot listen on OAuth callback port {port}: {e}")))?;
+        let reused = known.is_some_and(|client| {
+            client.redirect_uri == format!("http://127.0.0.1:{port}/callback")
+        });
+        return Ok((listener, reused));
+    }
     let remembered = known
         .and_then(|c| c.redirect_uri.strip_prefix("http://127.0.0.1:"))
         .and_then(|rest| rest.split('/').next())

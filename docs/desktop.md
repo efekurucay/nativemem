@@ -10,7 +10,8 @@ command and shows the result. The app holds no logic of its own about agents or 
 
 1. See every memory item, grouped by project, and read it.
 2. See where each item lives (Claude Code, Codex).
-3. Delete an item that is stale or wrong. The next sync removes it from the other agent too.
+3. Review stale or incorrect memory. Delete a selected copy from its detail, or choose all linked
+   copies explicitly from a Review Card. Each selected copy is backed up.
 4. Create a memory entry or a global instruction section in any agent. The next sync copies it to
    the other agents.
 5. Read the chat sessions of a project folder, in any agent, as a transcript.
@@ -103,11 +104,11 @@ hand-drawn borders, dividers or backgrounds.
   command's answer.
 - Server list (left): one row each with the name, "Local command" or "Remote URL" plus the tool count
   once the test passed ("3 tools"), and the state: "Connected", "Needs sign-in", "Error", "Disabled"
-  or "Checking…". The state comes from `mcp list` plus `mcp test` run in the background for every
-  enabled server on open and on Reload (a server with `auth_state` `needs_login` answers without a
-  test). It is "Disabled" when the server is not enabled; "Needs sign-in" when it is an `oauth`
-  server without tokens or its test fails with the sign-in message; "Error" with the test's message
-  when the test fails; "Connected" when it passes. The sidebar badge counts "Needs sign-in" and "Error".
+  or "Checking…", or "Not tested". Opening and reloading the screen uses
+  `mcp list --no-auth-check` for configuration, and `mcp status` for registrations.
+  Test checks one server when the user selects it. It shows "Needs sign-in" for a sign-in error,
+  "Error" for other failures, or "Connected" when successful. The sidebar badge counts
+  "Needs sign-in" and "Error".
   Without servers the list is replaced by "No servers yet".
 - Detail (right), read-only: type, command, arguments, folder, address, sign-in, and the environment
   variables or headers. A secret value is never shown, only its `secret:<id>` reference; a plain
@@ -120,15 +121,18 @@ hand-drawn borders, dividers or backgrounds.
   its tools to your agents. Its stored secrets stay in your keychain."
 - "Add server…" and "Edit…" open one sheet. A segmented "Local command" / "Remote URL"; the name
   (fixed when editing); for a local command the command and the arguments, one per line; for a
-  remote URL the address and a "None" / "OAuth" sign-in; then rows of name and value, which are
-  environment variables for a local command and headers for a remote URL. Each row has a "Secret"
-  checkbox: its value is a password field, is sent with `mcp set-secret <id>` over stdin and the
-  settings keep the reference `secret:<server>-<key>` (an existing reference is kept, and an empty
-  secret value keeps the stored one). Plain values the CLI does not show have to be typed again when
-  editing; the sheet says so. The secrets are stored first, then the server is added (`mcp add`) or
-  replaced (`mcp edit`), so a saved server never points at a missing secret. A CLI error is shown
-  inline and nothing is closed. A working folder and the enabled state of an edited server are
-  kept as they are.
+  remote URL the address and a "None" / "OAuth" sign-in. OAuth shows optional pre-registered client
+  fields: client ID, client secret, callback port, protected-resource metadata URL, scopes one per
+  line and authorization parameters as `name=value` lines. The provider registers
+  `http://127.0.0.1:<port>/callback`. The client secret is sent with `mcp set-secret <id>` and the
+  document keeps `secret:<server>-oauth-client-secret`. Rows of name and value are environment
+  variables for a local command and headers for a remote URL. Each row has a "Secret" checkbox: its
+  value is a password field, is sent with `mcp set-secret <id>` over stdin and the settings keep the
+  reference `secret:<server>-<key>` (an existing reference is kept, and an empty secret value keeps
+  the stored one). Plain values the CLI does not show have to be typed again when editing; the sheet
+  says so. The secrets are stored first, then the server is added (`mcp add`) or replaced (`mcp edit`),
+  so a saved server never points at a missing secret. A CLI error is shown inline and nothing is
+  closed. A working folder and the enabled state of an edited server are kept as they are.
 - "Import from agents…" opens a sheet with the `mcp import --json` plan: the headline ("2 to add, 1
   already in the hub, 1 conflict"), the new servers with the agents that hold them and how many
   secrets will be kept in the keychain, the servers already in the hub, the conflicts (not
@@ -177,9 +181,8 @@ hand-drawn borders, dividers or backgrounds.
   with unsaved changes asks before discarding. Edit is disabled, with a tooltip saying why,
   when the original cannot be edited (the CLI answers `unsupported`).
 - "Show in Finder" button for the original's file.
-- "Delete…" button (destructive). Confirmation dialog: "Delete this memory? It will be removed
-  from Claude Code now and from the other agents at the next sync. A backup is kept in
-  ~/.nativemem/backups." On confirm run the delete command, then reload.
+- "Delete…" backs up and removes the selected memory copy on confirmation, then reloads.
+  Review Cards also offer an explicit action to remove all linked memory copies.
 
 **Overview** (selected in sidebar)
 - Three figures: items, projects, agents in sync (an agent is in sync when it holds every item).
@@ -326,7 +329,8 @@ never listed), and an extra object, present on sessions only:
              { "role": "assistant", "text": "…", "ts_ms": 1794304860000 } ] }
 ```
 Reads one session from that agent's own store; it takes no lock and writes nothing. `role` is
-`user` or `assistant`; tool activity is already rendered into assistant text. Failures:
+`user`, `assistant` or `summary`. A summary marks a compaction checkpoint. Tool activity is
+already rendered into assistant text. Failures:
 `unknown_agent`, `invalid` when the id is not a session id (it does not end in `.jsonl`),
 `not_found` when the agent is not installed or holds no such session. Without `--json` it prints
 the title and a readable transcript.
@@ -421,12 +425,20 @@ never printed: `secret:<id>` references are shown, and a literal env or header v
       "auth_state": "needs_login",
       "url": "https://mcp.example.com/mcp", "args": [], "env": {},
       "headers": { "X-Api-Key": "secret:docs-X-Api-Key" },
-      "secrets": ["docs-X-Api-Key"] } ] }
+      "oauth": { "client_id": "client-id",
+        "client_secret": "secret:docs-oauth-client-secret", "callback_port": 53682,
+        "scopes": ["calendar.readonly"],
+        "resource_metadata_url": "https://mcp.example.com/.well-known/oauth-protected-resource/tool",
+        "authorization_params": { "access_type": "offline" } },
+      "secrets": ["docs-X-Api-Key", "docs-oauth-client-secret"] } ] }
 ```
 `command` and `cwd` appear for stdio servers, `url` for http servers. `transport` is `stdio` or `http`,
 `auth` is `none` or `oauth`. `auth_state` is `none` for a server without OAuth, `signed_in` when an
-`oauth` server has stored tokens and `needs_login` when it has none. An `oauth` server takes no
-`Authorization` header (`invalid`).
+`oauth` server has stored tokens and `needs_login` when it has none. With `--no-auth-check`, OAuth
+servers return `unchecked` and no secrets are read. An `oauth` server takes no
+`Authorization` header (`invalid`). `oauth`, when present, carries `client_id`, the client-secret
+reference, `callback_port`, `scopes`, `resource_metadata_url` and `authorization_params`. A literal
+client secret is invalid. The list never prints its value.
 
 `nativemem mcp add --json`, with one server as a JSON document on stdin:
 ```json
@@ -434,8 +446,10 @@ never printed: `secret:<id>` references are shown, and a literal env or header v
   "env": { "GITHUB_TOKEN": "secret:github-GITHUB_TOKEN" }, "cwd": "/Users/x/app",
   "auth": "none", "enabled": true }
 ```
-or `{"name", "transport": "http", "url", "headers", "auth", "enabled"}`. `auth` defaults to `none` and
-`enabled` to `true`. Output `{ "added": "github" }`. A duplicate name fails with code `exists`.
+or `{"name", "transport": "http", "url", "headers", "auth", "oauth", "enabled"}`. `oauth` has the
+same fields described for `mcp list`; a pre-registered `client_id` needs `callback_port`, and
+`client_secret` must be a `secret:<id>` reference. `auth` defaults to `none` and `enabled` to `true`.
+Output `{ "added": "github" }`. A duplicate name fails with code `exists`.
 
 `nativemem mcp edit <name> --json` replaces the server with the document on stdin (the same fields;
 `name`, when present, must equal `<name>`). Output `{ "edited": "github" }`.
@@ -458,9 +472,12 @@ usable sign-in fails with `error` `Sign in again: nativemem mcp login <name>`.
 
 `nativemem mcp login <name> --json` signs in to an `oauth` server: it opens the authorization page in the
 browser (the URL is also printed to stderr), waits up to 5 minutes for the redirect to
-`http://127.0.0.1:<port>/callback`, stores the registered client and the tokens in the secret store, and
-prints `{ "signed_in": "<name>" }`. A server without `auth` `oauth` fails with code `invalid`; so does a
-sign-in that is refused, times out or cannot reach the server. It does not take the state lock.
+`http://127.0.0.1:<port>/callback`, stores the selected client and the tokens in the secret store, and
+prints `{ "signed_in": "<name>" }`. A configured client uses its exact callback port, scopes,
+protected-resource metadata and authorization parameters. Without a configured client the hub uses
+dynamic registration and a reusable random port. A server without `auth` `oauth` fails with code
+`invalid`; so does a sign-in that is refused, times out or cannot reach the server. It does not take
+the state lock.
 `nativemem mcp logout <name> --json` deletes the tokens, keeps the registered client and prints
 `{ "signed_out": "<name>", "was_signed_in": true }`.
 
@@ -488,6 +505,13 @@ roots that were given explicitly. `command` and `args` are present for `install`
 when the file kept changing, `io`). `path` is the file holding or receiving the entry. An unknown
 `--agent` fails with code `unknown_agent`. The exit code is 2 when any agent has `error`. `install` and
 `uninstall` take the state lock and back up each file they replace.
+
+The hub itself exposes `mcp_server_add` to every connected agent. It accepts the same server fields
+without `enabled`; environment and header values in this tool must be `secret:<id>` references, while
+literal values are entered later in the app. It takes the state lock and saves the definition with
+`enabled = false`. The result names the required secret references and tells the user to review, fill
+secrets, enable and reconnect.
+The tool never starts the added command or connects the added URL in its current process.
 
 `nativemem mcp import --json` (preview) and `nativemem mcp import --apply --json`
 ```json
@@ -572,7 +596,7 @@ Swift package at `apps/macos` (SwiftUI app, macOS 14+, Swift 6, no third-party d
 - `McpModel` (the MCP & Integrations screen: servers, their tests, the registration in the agents,
   sign-in and the actions above), `McpServerState` (the state of a server from `mcp list` and
   `mcp test`, and the badge count), `McpServerDraft` (what the Add server and Edit sheet collects:
-  validation, the document for `mcp add` / `mcp edit`, the secrets for `mcp set-secret`),
+  validation, the document for `mcp add` / `mcp edit`, OAuth client settings and the secrets for `mcp set-secret`),
   `McpImportSession` (preview then apply). The `mcp` documents are decoded by `decodeMcp`
   (`McpContract.swift`), not `decodeContract`: environment variable and header names are dictionary
   keys, and the snake-case key strategy would rewrite them.

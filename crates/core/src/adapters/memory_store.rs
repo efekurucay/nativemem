@@ -1,8 +1,7 @@
 //! Project-memory store shared by the agents that have no native memory format of their own to
 //! write: item files plus a per-project `MEMORY.md` index and `scope.json` below a base
-//! directory, and a routing block in the agent's global `AGENTS.md` that points the agent at the
-//! index of the project it is working in. An item file with a marker line is a replica of another
-//! agent's entry; one without is an original of this agent.
+//! directory. The store is accessible through the manager. An item file with a marker line is a
+//! replica of another agent's entry; one without is an original of this agent.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +13,7 @@ use crate::fsx::{self, BackupSession};
 use crate::model::{AgentId, Item, ItemKey, Kind, Observed, Scope};
 use crate::slug::slugify;
 
-use super::sections::{self, block_span, region_span, BLOCK_BEGIN, BLOCK_END};
+use super::sections;
 
 pub const INDEX_FILE: &str = "MEMORY.md";
 const SCOPE_FILE: &str = "scope.json";
@@ -26,7 +25,7 @@ pub struct MemoryStore {
     backups: BackupSession,
     base: PathBuf,
     keep: PathBuf,
-    agents_file: PathBuf,
+    import_source: Option<PathBuf>,
 }
 
 /// One item file. `marker` is the `(origin, id)` of the original when the file is a replica.
@@ -123,13 +122,6 @@ pub fn read_opt(path: &Path) -> Result<Option<String>> {
     }
 }
 
-fn write_if_changed(path: &Path, content: &str) -> Result<()> {
-    if read_opt(path)?.as_deref() == Some(content) {
-        return Ok(());
-    }
-    fsx::atomic_write(path, content.as_bytes())
-}
-
 /// Directory name of a project: its last path component plus 8 hex digits of the path's hash.
 pub fn project_key(cwd: &Path) -> String {
     let path = cwd.to_string_lossy();
@@ -193,63 +185,10 @@ fn index_text(items: &[(String, Entry)]) -> String {
     s
 }
 
-fn routing_block(projects: &[(String, PathBuf)]) -> String {
-    let mut s = format!(
-        "{BLOCK_BEGIN}\n## Project memory (managed by nativemem)\n\
-         When your working directory is, or is inside, one of the directories below, read that \
-         project's memory index first and open the item files it lists when they are relevant \
-         to the task.\n"
-    );
-    for (cwd, index) in projects {
-        s.push_str(&format!("- {cwd} → {}\n", index.display()));
-    }
-    s.push_str(BLOCK_END);
-    s
-}
-
-fn splice_block(text: &str, block: Option<&str>) -> Result<String> {
-    Ok(match (block_span(text)?, block, region_span(text)?) {
-        (Some((s, e)), Some(b), _) => format!("{}{b}{}", &text[..s], &text[e..]),
-        // The instruction region stays the last managed region of the file.
-        (None, Some(b), Some((r, _))) => {
-            let (before, rest) = text.split_at(r);
-            let lead = if before.is_empty() || before.ends_with("\n\n") {
-                ""
-            } else if before.ends_with('\n') {
-                "\n"
-            } else {
-                "\n\n"
-            };
-            let gap = if before.is_empty() { "\n" } else { "\n\n" };
-            format!("{before}{lead}{b}{gap}{rest}")
-        }
-        (None, Some(b), None) => {
-            let sep = if text.is_empty() {
-                ""
-            } else if text.ends_with('\n') {
-                "\n"
-            } else {
-                "\n\n"
-            };
-            format!("{text}{sep}{b}\n")
-        }
-        (Some((s, e)), None, _) => {
-            let mut before = &text[..s];
-            if before.ends_with("\n\n") {
-                before = &before[..before.len() - 1];
-            }
-            let after = text[e..].strip_prefix('\n').unwrap_or(&text[e..]);
-            format!("{before}{after}")
-        }
-        (None, None, _) => text.to_string(),
-    })
-}
-
 impl MemoryStore {
     /// `home` is the agent's home directory (backups are stored relative to it), `base` holds the
     /// project directories, `keep` is the deepest directory that is never removed when the last
-    /// item of a project goes, and `agents_file` is the global file that receives the routing
-    /// block.
+    /// item of a project goes.
     pub fn new(
         agent: AgentId,
         home: PathBuf,
@@ -257,7 +196,6 @@ impl MemoryStore {
         backups: BackupSession,
         base: PathBuf,
         keep: PathBuf,
-        agents_file: PathBuf,
     ) -> Self {
         MemoryStore {
             agent,
@@ -266,8 +204,13 @@ impl MemoryStore {
             backups,
             base,
             keep,
-            agents_file,
+            import_source: None,
         }
+    }
+
+    pub(super) fn with_import_source(mut self, source: PathBuf) -> Self {
+        self.import_source = Some(source);
+        self
     }
 
     fn project_dir(&self, key: &str) -> PathBuf {
@@ -275,14 +218,31 @@ impl MemoryStore {
     }
 
     pub fn project_dirs(&self) -> Result<Vec<(String, PathBuf)>> {
-        let entries = match fs::read_dir(&self.base) {
+        if let Some(source) = self.pending_source() {
+            match fs::symlink_metadata(source) {
+                Ok(_) => return Self::dirs(source),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::io(source, e)),
+            }
+        }
+        Self::dirs(&self.base)
+    }
+
+    fn pending_source(&self) -> Option<&Path> {
+        self.import_source
+            .as_deref()
+            .filter(|_| !self.base.join(".imported").is_file())
+    }
+
+    fn dirs(base: &Path) -> Result<Vec<(String, PathBuf)>> {
+        let entries = match fs::read_dir(base) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(Error::io(&self.base, e)),
+            Err(e) => return Err(Error::io(base, e)),
         };
         let mut out = Vec::new();
         for entry in entries {
-            let path = entry.map_err(|e| Error::io(&self.base, e))?.path();
+            let path = entry.map_err(|e| Error::io(base, e))?.path();
             if path.is_dir() {
                 let key = path
                     .file_name()
@@ -294,6 +254,41 @@ impl MemoryStore {
         }
         out.sort();
         Ok(out)
+    }
+
+    /// Publish the state store after each recognized source note has been copied.
+    pub(super) fn import(&self) -> Result<()> {
+        let Some(source) = self.pending_source() else {
+            return Ok(());
+        };
+        for (key, dir) in Self::dirs(source)? {
+            let Some(cwd) = read_scope_cwd(&dir)? else {
+                continue;
+            };
+            let target = self.project_dir(&key);
+            let items = project_items(&dir)?;
+            if items.is_empty() {
+                continue;
+            }
+            if read_scope_cwd(&target)?.is_some_and(|existing| existing != cwd) {
+                return Err(Error::Exists(target.display().to_string()));
+            }
+            for (name, _) in items {
+                let origin = dir.join(&name);
+                let content = fs::read(&origin).map_err(|e| Error::io(&origin, e))?;
+                let path = target.join(name);
+                match fs::read(&path) {
+                    Ok(existing) if existing == content => {}
+                    Ok(_) => return Err(Error::Exists(path.display().to_string())),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        fsx::atomic_write(&path, &content)?;
+                    }
+                    Err(e) => return Err(Error::io(&path, e)),
+                }
+            }
+            self.register(&target, Path::new(&cwd))?;
+        }
+        fsx::atomic_write(&self.base.join(".imported"), b"")
     }
 
     /// Every item file in the store: replicas carry their original's key, the rest are originals.
@@ -334,6 +329,7 @@ impl MemoryStore {
                 "write_replica global scope",
             ));
         };
+        self.import()?;
         let project = project_key(cwd);
         let dir = self.project_dir(&project);
         let items = project_items(&dir)?;
@@ -360,7 +356,7 @@ impl MemoryStore {
             }
         };
         let path = dir.join(&file);
-        write_if_changed(&path, &render(Some(key), item))?;
+        self.write_if_changed(&path, &render(Some(key), item))?;
         self.register(&dir, cwd)?;
         Ok((format!("{project}/{file}"), path))
     }
@@ -373,6 +369,7 @@ impl MemoryStore {
                 "create global memory",
             ));
         };
+        self.import()?;
         let project = project_key(cwd);
         let dir = self.project_dir(&project);
         let file = format!("{}.md", slugify(&item.name));
@@ -393,6 +390,7 @@ impl MemoryStore {
             return Err(Error::unsupported(agent, "write_original"));
         }
         let (project, file) = self.split_id(native_id)?;
+        self.import()?;
         let dir = self.project_dir(project);
         let path = dir.join(file);
         let text = fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
@@ -410,12 +408,11 @@ impl MemoryStore {
         self.regenerate_index(&dir)
     }
 
-    /// Brings the index, `scope.json` and the routing block in line with the item files.
+    /// Brings the index and `scope.json` in line with the item files.
     fn register(&self, dir: &Path, cwd: &Path) -> Result<()> {
         self.regenerate_index(dir)?;
         let scope = serde_json::json!({ "cwd": cwd.to_string_lossy() });
-        write_if_changed(&scope_path(dir), &scope.to_string())?;
-        self.sync_routing()
+        self.write_if_changed(&scope_path(dir), &scope.to_string())
     }
 
     fn split_id<'a>(&self, native_id: &'a str) -> Result<(&'a str, &'a str)> {
@@ -442,6 +439,7 @@ impl MemoryStore {
             return Err(Error::unsupported(agent, "remove original"));
         }
         let (project, file) = self.split_id(native_id)?;
+        self.import()?;
         let dir = self.project_dir(project);
         fsx::remove_with_backup(
             &self.backups,
@@ -453,14 +451,20 @@ impl MemoryStore {
         if project_items(&dir)?.is_empty() {
             for f in [index_path(&dir), scope_path(&dir)] {
                 if f.exists() {
-                    fs::remove_file(&f).map_err(|e| Error::io(&f, e))?;
+                    fsx::remove_with_backup(
+                        &self.backups,
+                        &self.state_dir,
+                        &self.agent,
+                        &self.home,
+                        &f,
+                    )?;
                 }
             }
             self.prune_empty(&dir);
         } else {
             self.regenerate_index(&dir)?;
         }
-        self.sync_routing()
+        Ok(())
     }
 
     /// Removes `dir` and its empty parents below `keep`. A directory that still holds files
@@ -481,40 +485,12 @@ impl MemoryStore {
     fn regenerate_index(&self, dir: &Path) -> Result<()> {
         let path = index_path(dir);
         let text = index_text(&project_items(dir)?);
-        match read_opt(&path)? {
-            Some(current) if current == text => Ok(()),
-            Some(_) => {
-                fsx::backup(
-                    &self.backups,
-                    &self.state_dir,
-                    &self.agent,
-                    &self.home,
-                    &path,
-                )?;
-                fsx::atomic_write(&path, text.as_bytes())
-            }
-            None => fsx::atomic_write(&path, text.as_bytes()),
-        }
+        self.write_if_changed(&path, &text)
     }
 
-    fn sync_routing(&self) -> Result<()> {
-        let mut projects = Vec::new();
-        for (_, dir) in self.project_dirs()? {
-            let index = index_path(&dir);
-            if let (Some(cwd), true) = (read_scope_cwd(&dir)?, index.is_file()) {
-                projects.push((cwd, index));
-            }
-        }
-        projects.sort();
-        let block = (!projects.is_empty()).then(|| routing_block(&projects));
-        let path = &self.agents_file;
+    fn write_if_changed(&self, path: &Path, content: &str) -> Result<()> {
         let existing = read_opt(path)?;
-        let updated = match (&existing, &block) {
-            (None, None) => return Ok(()),
-            (None, Some(b)) => format!("{b}\n"),
-            (Some(text), b) => splice_block(text, b.as_deref())?,
-        };
-        if existing.as_deref() == Some(updated.as_str()) {
+        if existing.as_deref() == Some(content) {
             return Ok(());
         }
         if existing.is_some() {
@@ -526,6 +502,6 @@ impl MemoryStore {
                 path,
             )?;
         }
-        fsx::atomic_write(path, updated.as_bytes())
+        fsx::atomic_write(path, content.as_bytes())
     }
 }

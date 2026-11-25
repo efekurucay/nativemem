@@ -32,8 +32,8 @@ All work in this repo: Rust core and CLI, the macOS app, tests, docs and this wi
   stores; the engine never plans an item for an agent that cannot hold it.
 - **Every adapter ships read-only probes** (`Adapter::probes`) for the formats it depends on. A failing
   probe pauses the kinds it protects for that agent. Anchor: `wiki/architecture/compatibility.md`.
-- **Memory and instruction items replicate faithfully in both directions, deletes included, with
-  backups.** Sessions are snapshots: deletes and edits never propagate.
+- **Memory adds and edits replicate in both directions. Memory deletion requires an explicit
+  selection. Instruction deletions propagate with backups.** Sessions are snapshots: deletes and edits never propagate.
   See `wiki/decisions/session-snapshot-policy.md`.
 - **Repository writes are limited to project skill directories.** Other writes stay in agent homes
   and the state directory. Git tracking and `.gitignore` are user policy, not managed by nativemem.
@@ -43,7 +43,8 @@ All work in this repo: Rust core and CLI, the macOS app, tests, docs and this wi
   `mcp uninstall` removes, written only through `crates/hub/src/register.rs`
   (`wiki/decisions/mcp-hub.md`).
 - **Secrets are never printed or stored.** The ledger holds ids, hashes and paths, not entry text.
-  Do not paste file contents of agent homes into output, logs, tests or wiki pages.
+  Do not paste file contents of agent homes into output, logs, tests or wiki pages. Hub management
+  tools use `secret:<id>` in known secret-bearing fields; a server they add is forced disabled for review.
 - **Every delete or overwrite backs up first** to `<state dir>/backups/<UTC stamp>/<agent>/<relative path>`.
 - **Code and docs describe the current state only.** One canonical name per symbol. No history words
   in code, comments, docs or memory; history lives in git.
@@ -102,4 +103,4 @@ Commits are `type(scope): summary`, which feeds the release notes (`wiki/guides/
 
 ## Last updated
 
-2026-11-11
+2026-11-25

@@ -415,7 +415,12 @@ async fn serve_exposes_the_definitions_as_tools_and_runs_them() {
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert_eq!(
         names,
-        ["nativemem_status", "subagents_list", "subagent_helper"]
+        [
+            "nativemem_status",
+            "mcp_server_add",
+            "subagents_list",
+            "subagent_helper"
+        ]
     );
     let helper = tools.iter().find(|t| t.name == "subagent_helper").unwrap();
     assert_eq!(

@@ -110,9 +110,22 @@ public struct NativememCLI: Sendable {
         try await run(["skill", "show", "--agent", agent, "--id=\(nativeId)", "--json"])
     }
 
+    func editSkill(agent: String, nativeId: String, expected: String, text: String) async throws -> SkillEditResult {
+        try await run(
+            ["skill", "edit", "--agent", agent, "--id=\(nativeId)", "--expect", expected, "--json"],
+            stdin: Data(text.utf8)
+        )
+    }
+
     /// Native ids often begin with "-", so the value is attached with "=" to stay one option argument.
     public func delete(agent: String, nativeId: String) async throws -> DeleteResult {
         try await run(["delete", "--agent", agent, "--id=\(nativeId)", "--json"])
+    }
+
+    func repairMemoryIndex(projectDirectory: String, token: String? = nil) async throws -> MemoryIndexRepair {
+        var args = ["repair-memory-index", "--project-dir=\(projectDirectory)", "--json"]
+        if let token { args.append("--apply=\(token)") }
+        return try await run(args)
     }
 
     /// The new content goes to the process's stdin as one JSON document.

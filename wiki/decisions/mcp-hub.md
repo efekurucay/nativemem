@@ -35,7 +35,8 @@ The entry is the only agent configuration `nativemem` edits. It sits in:
 - Secrets stay in one place. Entries copied between agent files would put the same token into four
   files with four formats and four ways of resolving `${VAR}` or `!command`.
 - A server added to the hub reaches every agent that has the entry, with no write into an agent file.
-  After `mcp install`, MCP changes touch `hub.toml` only.
+  After `mcp install`, MCP changes touch `hub.toml` only. A connected agent can create a disabled
+  definition through `mcp_server_add`; the user reviews secrets and enables it before it can run.
 - The entry is small, owned and reversible: `mcp uninstall` removes exactly that entry, and every
   write keeps the rest of the file byte for byte (`crates/hub/tests/register.rs`).
 
@@ -88,4 +89,4 @@ connections.
 
 ## Last updated
 
-2026-11-11
+2026-11-13

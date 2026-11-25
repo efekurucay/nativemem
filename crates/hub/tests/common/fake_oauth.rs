@@ -23,7 +23,8 @@ struct State {
     fail_refresh: bool,
     /// Authorization codes and the PKCE challenge they were issued for.
     codes: HashMap<String, String>,
-    clients: Vec<(String, String)>,
+    clients: Vec<(String, String, Option<String>)>,
+    authorization_queries: Vec<String>,
     issued: usize,
     registrations: usize,
     refreshes: usize,
@@ -67,6 +68,18 @@ impl FakeOauth {
     /// The URL of the MCP endpoint.
     pub fn mcp_url(&self) -> String {
         format!("{}/mcp", self.base)
+    }
+
+    pub fn add_client(&self, id: &str, secret: Option<&str>, redirect_uri: &str) {
+        self.state.lock().unwrap().clients.push((
+            id.to_string(),
+            redirect_uri.to_string(),
+            secret.map(str::to_string),
+        ));
+    }
+
+    pub fn authorization_queries(&self) -> Vec<String> {
+        self.state.lock().unwrap().authorization_queries.clone()
     }
 
     /// The access tokens stop working; the refresh token stays valid.
@@ -134,7 +147,11 @@ impl FakeOauth {
         match (request.method.as_str(), path) {
             ("GET", p) if p.starts_with("/.well-known/oauth-protected-resource") => reply(
                 "200 OK",
-                json!({ "resource": format!("{base}/mcp"), "authorization_servers": [base] }),
+                json!({
+                    "resource": format!("{base}/mcp"),
+                    "authorization_servers": [base],
+                    "scopes_supported": ["calendar.readonly", "calendar.write"],
+                }),
             ),
             ("GET", p) if p.starts_with("/.well-known/oauth-authorization-server") => reply(
                 "200 OK",
@@ -146,7 +163,7 @@ impl FakeOauth {
                     "response_types_supported": ["code"],
                     "grant_types_supported": ["authorization_code", "refresh_token"],
                     "code_challenge_methods_supported": ["S256"],
-                    "token_endpoint_auth_methods_supported": ["none"],
+                    "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
                 }),
             ),
             ("POST", "/register") => {
@@ -158,6 +175,7 @@ impl FakeOauth {
                     state.clients.push((
                         client_id.clone(),
                         uri.as_str().unwrap_or_default().to_string(),
+                        None,
                     ));
                 }
                 reply(
@@ -176,10 +194,11 @@ impl FakeOauth {
         let params = form(query);
         let get = |k: &str| params.get(k).cloned().unwrap_or_default();
         let mut state = self.state.lock().unwrap();
+        state.authorization_queries.push(query.to_string());
         let known = state
             .clients
             .iter()
-            .any(|(id, uri)| *id == get("client_id") && *uri == get("redirect_uri"));
+            .any(|(id, uri, _)| *id == get("client_id") && *uri == get("redirect_uri"));
         if !known || get("code_challenge_method") != "S256" || get("code_challenge").is_empty() {
             return (
                 "400 Bad Request",
@@ -212,6 +231,15 @@ impl FakeOauth {
                 json!({ "error": error }).to_string(),
             )
         };
+        if let Some((_, _, Some(expected))) = state
+            .clients
+            .iter()
+            .find(|(id, _, _)| *id == get("client_id"))
+        {
+            if get("client_secret") != *expected {
+                return bad("invalid_client");
+            }
+        }
         match get("grant_type").as_str() {
             "authorization_code" => {
                 let Some(challenge) = state.codes.remove(&get("code")) else {

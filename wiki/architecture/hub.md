@@ -48,6 +48,22 @@ url = "https://mcp.example.com/mcp"
 
 [servers.docs.headers]
 Authorization = "secret:docs-Authorization"
+
+[servers.calendar]
+transport = "http"
+url = "https://calendarmcp.googleapis.com/mcp/v1"
+auth = "oauth"
+
+[servers.calendar.oauth]
+client_id = "public-client-id"
+client_secret = "secret:calendar-oauth-client-secret"
+callback_port = 53682
+scopes = ["https://www.googleapis.com/auth/calendar"]
+resource_metadata_url = "https://calendarmcp.googleapis.com/.well-known/oauth-protected-resource/list_calendars"
+
+[servers.calendar.oauth.authorization_params]
+access_type = "offline"
+prompt = "consent"
 ```
 
 - A stdio server takes `command`, `args`, `env`, `cwd`; an http server takes `url`, `headers`;
@@ -57,7 +73,15 @@ Authorization = "secret:docs-Authorization"
   `nativemem` is refused: it is the name the hub is registered under, so such a server would be
   the hub calling itself.
 - An `oauth` server takes no `Authorization` header: the hub sends the stored bearer token.
-- Every string value (command, args, env and header values, cwd, url) may be `secret:<id>`.
+- `oauth` is optional. Without it, sign-in uses dynamic client registration and a random loopback
+  port that is reused while available. A pre-registered `client_id` needs `callback_port`; the provider
+  must register `http://127.0.0.1:<port>/callback`. `client_secret` accepts only `secret:<id>`.
+- `oauth.scopes` overrides scope selection. `resource_metadata_url` seeds discovery for servers whose
+  MCP endpoint answers `initialize` without a 401 and challenges only tool calls. Reserved protocol
+  parameters cannot appear in `authorization_params`; provider parameters such as
+  `access_type = "offline"` can.
+- Connection string values (command, args, env and header values, cwd, url, OAuth client fields and
+  resource metadata URL) may be `secret:<id>`.
 
 ## Secrets
 
@@ -94,6 +118,7 @@ Values behind `secret:<id>` live in a `SecretStore` (`crates/hub/src/secrets.rs`
 | Failures | A server that fails to connect is left out of the tool list | test `failing_and_disabled_upstreams_are_reported_and_left_out` |
 | Sign-in missing | An `oauth` server without a usable sign-in is not connected; it exposes one tool, `<server>__sign_in_required`, that answers with the error result `Sign in again: nativemem mcp login <server>` | `SIGN_IN_TOOL`; test `a_server_that_starts_signed_out_exposes_the_sign_in_tool` |
 | Subagent tools | `subagents_list` and `subagent_<name>` are answered by the hub itself, before any upstream is involved (see "Subagents") | `HubServer::call_tool` |
+| `mcp_server_add` | Adds one server definition to `hub.toml` under the state lock. The server is always saved disabled, so an agent or untrusted MCP response cannot make a new local command run immediately. Environment and header values must be `secret:<id>` references; literal values and secret values are entered through the app or CLI. The user reviews and enables the definition. The current hub process does not reload the new server; reconnect after enabling | test `an_agent_can_add_a_disabled_server_for_review` |
 | `nativemem_status` | A tool with no arguments; its text result is `{"servers": [{"name", "status": "connected" \| "error" \| "needs_login" \| "disabled", "tools"?, "error"?}]}`; for `needs_login`, `error` is the sign-in message | `STATUS_TOOL` |
 | Scope | Tools only: no resources and no prompts | `HubServer::get_info` |
 
@@ -107,14 +132,15 @@ upstream is covered by `http_upstream_receives_resolved_headers`.
 
 A server with `auth = "oauth"` is signed in once by `nativemem mcp login <name>`; every agent's hub
 process then uses the stored tokens. The flow is the MCP authorization flow, on `rmcp`'s `auth`
-module (`crates/hub/src/oauth.rs`): OAuth 2.1 authorization code with PKCE.
+module (`crates/hub/src/oauth.rs`): OAuth 2.1 authorization code with PKCE. It supports dynamic client
+registration and pre-registered clients with a fixed loopback callback.
 
 | Step | Behaviour | Anchor |
 |---|---|---|
-| Probe | An `initialize` request without a token; the 401 `WWW-Authenticate` header names the protected resource metadata (RFC 9728). Without that header the well-known URLs are tried. A success answer is an error: the server needs no sign-in | `probe`, test `login_refuses_a_server_without_oauth` |
-| Discovery | Protected resource metadata, then authorization server metadata (RFC 8414) | test `login_discovers_registers_stores_and_the_bearer_reaches_the_upstream` |
-| Registration | Dynamic client registration (RFC 7591) once; the client (`client_id`, optional secret, redirect URI) is stored | `StoredClient` |
-| Redirect | A loopback listener on `http://127.0.0.1:<port>/callback`. The port of the stored client is bound again when it is free, so its registration stays valid; otherwise a random port and a new registration | `bind_loopback`, tests `a_second_login_reuses_the_registered_client`, `a_taken_loopback_port_registers_a_new_client` |
+| Probe | Without configured resource metadata, an `initialize` request without a token; the 401 `WWW-Authenticate` header names the protected resource metadata (RFC 9728). Without that header the well-known URLs are tried. A success answer means the server needs no sign-in | `probe`, test `login_refuses_a_server_without_oauth` |
+| Discovery | Protected resource metadata, then authorization server metadata (RFC 8414). A configured `resource_metadata_url` becomes the discovery challenge without probing the MCP endpoint | tests `login_discovers_registers_stores_and_the_bearer_reaches_the_upstream`, `a_preregistered_client_uses_fixed_callback_scopes_metadata_and_parameters` |
+| Client | A configured `client_id` and optional resolved client secret are used directly. Otherwise dynamic client registration (RFC 7591) creates the client. The selected client and redirect URI are stored in the secret store for refreshes and later connections | `StoredClient` |
+| Redirect | A loopback listener on `http://127.0.0.1:<port>/callback`. A configured callback port must bind exactly. A dynamically registered client reuses its stored port when available, otherwise it registers again on a random port | `bind_loopback`, tests `a_preregistered_client_uses_fixed_callback_scopes_metadata_and_parameters`, `a_second_login_reuses_the_registered_client`, `a_taken_loopback_port_registers_a_new_client` |
 | Browser | `open` on macOS, `xdg-open` elsewhere; the URL is printed to stderr too. The hidden flag `mcp login --browser <program>` replaces the opener (tests) | `open_browser` |
 | Wait | Up to 5 minutes (`LOGIN_TIMEOUT`) for `/callback`; an authorization error is reported by its short code, never its free text | tests `login_gives_up_when_the_browser_never_comes_back`, `a_refused_authorization_is_reported_without_free_text` |
 | Store | Access token, refresh token and expiry are stored in the secret store | `HubCredentials` |
@@ -125,9 +151,13 @@ Secret ids, derived from the server name: `oauth-<name>-client` (the registered 
 
 Using the tokens:
 
+- The authorization request uses configured scopes when present and appends the configured provider
+  parameters after the SDK creates the PKCE URL. This supports providers that require
+  `access_type=offline` for refresh tokens.
 - On connect, an `oauth` server needs stored tokens and a stored client, else it is `needs_login`
-  without a network call. The token is read, and refreshed when it expires within 30 seconds, before
-  the first request; every request carries `Authorization: Bearer <token>`.
+  without a network call. Metadata discovery uses `resource_metadata_url` when configured. The token
+  is read, and refreshed when it expires within 30 seconds, before the first request; every request
+  carries `Authorization: Bearer <token>`.
 - A 401 on a request triggers one refresh and one retry (`rmcp`'s `AuthClient`; test
   `a_token_the_server_rejects_is_refreshed_and_the_call_retried`).
 - Every agent runs its own hub process, so a refresh takes the file lock `<state dir>/hub-oauth.lock`
@@ -142,7 +172,8 @@ Using the tokens:
   failure leaves the tokens alone.
 - `mcp logout <name>` deletes the tokens and keeps the registered client. `mcp list` shows
   `auth_state`: `signed_in` (tokens are stored; the authorization server can still have revoked
-  them), `needs_login` (an `oauth` server without tokens) or `none`.
+  them), `needs_login` (an `oauth` server without tokens) or `none`. With `--no-auth-check`
+  it lists configuration without opening the secret store and returns `unchecked` for OAuth.
 - `mcp login` waits for the browser, so it takes only `hub-oauth.lock` (when it stores the tokens),
   not the state lock; `mcp logout` takes `hub-oauth.lock` likewise.
 - To make the next login register a new client, delete the secret `oauth-<name>-client`
@@ -296,7 +327,8 @@ The "MCP & Integrations" screen of the app runs these commands with `--json` and
 - State of a server: `disabled` when it is not enabled; `needs sign-in` when `auth_state` is `needs_login`
   or the test fails with the `Sign in again` message; `error` for any other failed test; `connected`
   when the test passes (`McpServerState.derive`). The sidebar badge counts `needs sign-in` and `error`.
-  `mcp test` runs in the background for each enabled server, except those with `needs_login`.
+  Opening and reloading the screen uses `mcp list --no-auth-check` and registration status.
+  The user starts a connection with Test. A server without a result shows Not tested.
 - `mcp list` never returns a secret value or a literal one, so the Edit sheet cannot show plain
   values: they are typed again, and a secret row with an empty value keeps its `secret:<id>`.
 - A server name or secret id can begin with `-`, so the app passes it after `--`.
@@ -351,6 +383,11 @@ resolved (`crates/hub/src/import.rs`):
 
 Tests: `crates/hub/tests/import.rs`, `import_previews_then_applies_from_the_four_agents`.
 
+The MCP server sheet shows pre-registered OAuth fields when OAuth is selected: client ID, client secret,
+callback port, scopes, protected resource metadata URL and authorization parameters. The client secret
+is stored first with `mcp set-secret` and only its `secret:<id>` reference enters the server document.
+The detail pane shows that reference and the callback URI, never the value.
+
 ## Source anchors
 
 - `crates/hub/src/config.rs`
@@ -388,6 +425,7 @@ Tests: `crates/hub/tests/import.rs`, `import_previews_then_applies_from_the_four
 - MUST: Keep stdout of `mcp serve` for the protocol; diagnostics go to stderr.
 - MUST: Run tests with `--secrets-dir` and temp roots; never the keychain, never a real agent home.
 - MUST: Write an agent's config file only to add, update or remove the `nativemem` entry, through `crates/hub/src/register.rs`; import reads those files only.
+- MUST: Save a server created through `mcp_server_add` disabled, under the state lock; known secret-bearing fields accept only `secret:<id>` references.
 - MUST: Hold `<state dir>/hub-oauth.lock` while tokens are refreshed, stored or deleted, and read the store again after taking it.
 - MUST: Never print a token; scrub it from connection errors.
 - MUST: Write `subagents.toml` only through `SubagentConfig::save` (backup, atomic write) under the state lock.
@@ -415,4 +453,4 @@ Tests: `crates/hub/tests/import.rs`, `import_previews_then_applies_from_the_four
 
 ## Last updated
 
-2026-11-11
+2026-11-13

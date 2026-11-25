@@ -9,7 +9,7 @@ extension NativememCLI {
     }
 
     func mcpList() async throws -> [McpServer] {
-        try await mcpRun(["list", "--json"], as: McpListDocument.self).servers
+        try await mcpRun(["list", "--no-auth-check", "--json"], as: McpListDocument.self).servers
     }
 
     func mcpTest(_ name: String) async throws -> McpTestResult {

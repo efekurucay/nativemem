@@ -288,10 +288,24 @@ pub fn sync_rows(
     written: &[PathBuf],
     busy: Duration,
 ) -> Result<Option<String>> {
+    sync_project_rows(home, state_dir, session, written, busy, None)
+}
+
+pub(super) fn sync_project_rows(
+    home: &Path,
+    state_dir: &Path,
+    session: &BackupSession,
+    written: &[PathBuf],
+    busy: Duration,
+    project: Option<&Path>,
+) -> Result<Option<String>> {
     let Some((_, db)) = state_databases(home).into_iter().next() else {
         return Ok(None);
     };
-    let candidates = candidates(home, written);
+    let mut candidates = candidates(home, written);
+    if let Some(project) = project {
+        candidates.retain(|candidate| Path::new(&candidate.row.cwd) == project);
+    }
     if candidates.is_empty() {
         return Ok(None);
     }

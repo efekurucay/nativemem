@@ -38,6 +38,200 @@ fn text(o: &Output) -> String {
 }
 
 #[test]
+fn a_full_apply_removes_memory_routing_without_removing_notes() {
+    let f = Fx::new();
+    let c = "## Style\nKeep this.\n\n";
+    let end = "## Tools\nKeep this too.\n";
+    let content = format!(
+        "{c}<!-- nativemem:begin -->\n## Project memory (managed by nativemem)\n- /w/app → /memory/index\n<!-- nativemem:end -->\n{end}"
+    );
+    for home in [
+        &f.codex,
+        &f.state.with_file_name("opencode"),
+        &f.state.with_file_name("pi"),
+    ] {
+        fs::create_dir_all(home).unwrap();
+        fs::write(home.join("AGENTS.md"), &content).unwrap();
+    }
+    let memory = f
+        .codex
+        .join("memories/extensions/nativemem/resources/manual/note.md");
+    fs::create_dir_all(memory.parent().unwrap()).unwrap();
+    fs::write(&memory, "a note").unwrap();
+
+    assert_eq!(
+        f.json(&["sync", "--session-project", "/w/app", "--apply", "--json"])
+            .0,
+        Some(0)
+    );
+    assert_eq!(
+        fs::read_to_string(f.codex.join("AGENTS.md")).unwrap(),
+        content
+    );
+    assert_eq!(f.json(&["sync", "--apply", "--json"]).0, Some(0));
+    let retained = format!("{c}{end}");
+    for home in [
+        &f.codex,
+        &f.state.with_file_name("opencode"),
+        &f.state.with_file_name("pi"),
+    ] {
+        let updated = fs::read_to_string(home.join("AGENTS.md")).unwrap();
+        assert!(updated.starts_with(&retained));
+        assert!(!updated.contains("nativemem:begin"));
+    }
+    assert_eq!(fs::read_to_string(&memory).unwrap(), "a note");
+    let stamp = fs::read_dir(f.state.join("backups"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    for agent in ["codex", "opencode", "pi"] {
+        assert_eq!(
+            fs::read_to_string(stamp.join(agent).join("AGENTS.md")).unwrap(),
+            content
+        );
+    }
+}
+
+#[test]
+fn memory_index_repair_previews_exact_changes_and_refuses_stale_tokens() {
+    let f = Fx::new();
+    let dir = f.claude_file.parent().unwrap();
+    let index = dir.join("MEMORY.md");
+    let old = "# Notes\r\n\r\nKeep this paragraph.\r\n- [Missing](missing.md) — gone\r\n\r\n```md\r\n- [Example](example.md)\r\n```\r\n";
+    fs::write(&index, old).unwrap();
+    let args = ["repair-memory-index", "--project-dir=-w-app", "--json"];
+    let (status, preview) = f.json(&args);
+    assert_eq!(status, Some(0));
+    assert_eq!(preview["removed"], json!(["missing.md"]));
+    assert_eq!(preview["added"], json!(["a.md"]));
+    assert_eq!(preview["applied"], false);
+    assert_eq!(fs::read_to_string(&index).unwrap(), old);
+    assert!(!f.state.join("backups").exists());
+
+    let external = format!("{old}Keep this update.\r\n");
+    fs::write(&index, &external).unwrap();
+    let stale = format!("--apply={}", preview["token"].as_str().unwrap());
+    let (status, error) = f.json(&[args.as_slice(), &[stale.as_str()]].concat());
+    assert_eq!(status, Some(1));
+    assert_eq!(error["code"], "parse");
+    assert_eq!(fs::read_to_string(&index).unwrap(), external);
+
+    let (_, preview) = f.json(&args);
+    let fresh = format!("--apply={}", preview["token"].as_str().unwrap());
+    let (status, result) = f.json(&[args.as_slice(), &[fresh.as_str()]].concat());
+    assert_eq!(status, Some(0));
+    assert_eq!(result["applied"], true);
+    let repaired = fs::read_to_string(&index).unwrap();
+    assert_eq!(
+        repaired,
+        format!(
+            "{}- [alpha](a.md) — about alpha\r\n",
+            external.replace("- [Missing](missing.md) — gone\r\n", "")
+        )
+    );
+    assert!(fs::read_dir(f.state.join("backups")).unwrap().any(|stamp| {
+        fs::read_to_string(
+            stamp
+                .unwrap()
+                .path()
+                .join("claude/projects/-w-app/memory/MEMORY.md"),
+        )
+        .is_ok_and(|backup| backup == external)
+    }));
+    let (_, clean) = f.json(&args);
+    assert_eq!(clean["removed"], json!([]));
+    assert_eq!(clean["added"], json!([]));
+}
+
+#[test]
+fn full_apply_cleans_instruction_markers_in_all_four_agents() {
+    let f = four_agents();
+    let profiles = [
+        ("claude", f.claude.clone(), "CLAUDE.md"),
+        ("codex", f.codex.clone(), "AGENTS.md"),
+        ("opencode", f.state.with_file_name("opencode"), "AGENTS.md"),
+        ("pi", f.state.with_file_name("pi"), "AGENTS.md"),
+    ];
+    let mut documents = Vec::new();
+    for (agent, home, file) in &profiles {
+        let own = format!("# Personal preamble\n\n## Rule {agent}\n\nManaged by user.\n\n");
+        let mut marked = format!("{own}<!-- nativemem:instructions:begin -->\n");
+        let mut native = own;
+        for (origin, _, source) in profiles.iter().filter(|(id, _, _)| id != agent) {
+            let section = format!("## Rule {origin}\n\nManaged by user.\n\n");
+            marked.push_str(&format!(
+                "<!-- nativemem origin={origin} id={source}%23rule-{origin} -->\n"
+            ));
+            marked.push_str(&section);
+            native.push_str(&section);
+        }
+        marked.push_str("<!-- nativemem:instructions:end -->\n");
+        let path = home.join(file);
+        fs::write(&path, &marked).unwrap();
+        documents.push((agent, file, path, marked, native));
+    }
+    assert_eq!(f.json(&["sync", "--json"]).0, Some(0));
+    assert_eq!(
+        f.json(&["sync", "--session-project", "/w/app", "--apply", "--json"])
+            .0,
+        Some(0)
+    );
+    for (_, _, path, marked, _) in &documents {
+        assert_eq!(fs::read_to_string(path).unwrap(), *marked);
+    }
+    assert_eq!(f.json(&["sync", "--apply", "--json"]).0, Some(0));
+    for (agent, file, path, marked, native) in &documents {
+        assert_eq!(fs::read_to_string(path).unwrap(), *native);
+        assert!(fs::read_dir(f.state.join("backups")).unwrap().any(|stamp| {
+            fs::read_to_string(stamp.unwrap().path().join(agent).join(file))
+                .is_ok_and(|text| text == *marked)
+        }));
+    }
+    let (_, items) = f.json(&["items", "--kind", "instruction", "--json"]);
+    let copies = items["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| !i["replica_of"].is_null())
+        .count();
+    assert_eq!(copies, 12);
+    assert_eq!(f.json(&["sync", "--json"]).1["actions"], json!([]));
+}
+
+#[test]
+fn full_apply_adopts_inline_claude_memory_replica_identity() {
+    let f = four_agents();
+    let added = add(&f, "pi", "memory", Some("/w/app"), NEW_MEMORY);
+    assert_eq!(added.0, Some(0));
+    assert_eq!(f.json(&["sync", "--apply", "--json"]).0, Some(0));
+    let replica = items_of(&f)
+        .into_iter()
+        .find(|i| i["agent"] == "claude" && i["replica_of"]["origin"] == "pi")
+        .unwrap();
+    let path = Path::new(replica["path"].as_str().unwrap());
+    let plain = fs::read_to_string(path).unwrap();
+    let origin = added.1["native_id"].as_str().unwrap();
+    let marked = plain.replace(
+        "metadata:\n",
+        &format!("metadata:\n  nativemem_origin: pi:{origin}\n"),
+    );
+    assert_ne!(marked, plain);
+    fs::write(path, &marked).unwrap();
+    assert_eq!(f.json(&["sync", "--json"]).0, Some(0));
+    assert_eq!(
+        f.json(&["sync", "--session-project", "/w/app", "--apply", "--json"])
+            .0,
+        Some(0)
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), marked);
+    assert_eq!(f.json(&["sync", "--apply", "--json"]).0, Some(0));
+    assert_eq!(fs::read_to_string(path).unwrap(), plain);
+    assert_eq!(f.json(&["sync", "--json"]).1["actions"], json!([]));
+}
+
+#[test]
 fn status_sync_apply_then_nothing_to_do() {
     let t = tempfile::tempdir().unwrap();
     let (claude, codex, state) = (
@@ -94,7 +288,7 @@ fn status_sync_apply_then_nothing_to_do() {
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
-    assert!(codex.join("AGENTS.md").exists());
+    assert!(!codex.join("AGENTS.md").exists());
     assert!(state.join("ledger.db").exists());
 
     let o = run(&claude, &codex, &state, &["sync"]);
@@ -227,9 +421,9 @@ fn instruction_sections_and_memory_reach_all_four_agents() {
         let home = f.state.with_file_name(name);
         let agents = fs::read_to_string(home.join("AGENTS.md")).unwrap();
         assert!(agents.contains("be terse"));
-        assert!(agents.contains("<!-- nativemem:begin -->\n## Project memory"));
-        assert!(agents.contains("- /w/app → "));
-        assert!(home.join("nativemem/memory").is_dir());
+        assert!(!agents.contains("<!-- nativemem:begin -->"));
+        assert!(!home.join("nativemem").exists());
+        assert!(f.state.join("memory").join(name).is_dir());
     }
     let (code, doc) = f.json(&["sync", "--json"]);
     assert_eq!(code, Some(0));
@@ -350,7 +544,7 @@ fn sync_json_preview_then_apply() {
 }
 
 #[test]
-fn delete_json_then_sync_removes_copy() {
+fn delete_json_then_sync_preserves_linked_memory() {
     let f = Fx::new();
     f.json(&["sync", "--apply", "--json"]);
     let (_, items) = f.json(&["items", "--json"]);
@@ -378,12 +572,113 @@ fn delete_json_then_sync_removes_copy() {
     assert!(!f.claude_file.exists());
 
     let (code, doc) = f.json(&["sync", "--apply", "--json"]);
-    assert_eq!(code, Some(0));
-    assert_eq!(doc["actions"][0]["op"], "remove");
-    assert_eq!(doc["actions"][0]["agent"], "codex");
-    assert_eq!(doc["summary"]["remove"], 1);
+    assert_eq!(code, Some(2));
+    assert_eq!(doc["actions"], json!([]));
+    assert_eq!(doc["summary"]["remove"], 0);
     let (_, items) = f.json(&["items", "--json"]);
-    assert_eq!(items["items"], json!([]), "{replica_id}");
+    assert_eq!(find(&items, "codex")["native_id"], replica_id);
+}
+
+#[test]
+fn pi_and_opencode_memory_moves_to_state_without_deleting_source_files() {
+    for agent in ["pi", "opencode"] {
+        let f = four_agents();
+        let home = f.state.with_file_name(agent);
+        let dir = home.join("nativemem/memory/project");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("scope.json"), r#"{"cwd":"/w/app"}"#).unwrap();
+        let input = dir.join("keep.md");
+        let body = "# keep\n\nabout keep\n\nretain this";
+        fs::write(&input, body).unwrap();
+        let note_path = |doc: &Value| {
+            doc["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["agent"] == agent && item["native_id"] == "project/keep.md")
+                .map(|item| std::path::PathBuf::from(item["path"].as_str().unwrap()))
+        };
+        let (_, before) = f.json(&["items", "--kind", "memory", "--json"]);
+        assert_eq!(note_path(&before), Some(input.clone()));
+        assert!(!f.state.join("memory").exists());
+
+        for _ in 0..2 {
+            let (code, result) = f.json(&["sync", "--apply", "--json"]);
+            assert_eq!(code, Some(0), "{result}");
+        }
+        let (_, after) = f.json(&["items", "--kind", "memory", "--json"]);
+        let path = note_path(&after).unwrap();
+        assert!(path.starts_with(f.state.join("memory").join(agent)));
+        assert_eq!(fs::read_to_string(path).unwrap(), body);
+        assert_eq!(fs::read_to_string(&input).unwrap(), body);
+
+        let (code, result) = f.json(&[
+            "delete",
+            "--agent",
+            agent,
+            "--id",
+            "project/keep.md",
+            "--json",
+        ]);
+        assert_eq!(code, Some(0), "{result}");
+        let (_, after_delete) = f.json(&["items", "--kind", "memory", "--json"]);
+        assert!(note_path(&after_delete).is_none());
+        assert_eq!(fs::read_to_string(input).unwrap(), body);
+    }
+}
+
+#[test]
+fn full_apply_adopts_existing_codex_note_once_without_deleting_it() {
+    let f = Fx::new();
+    fs::write(f.codex.join("config.toml"), "[memories]\nversion = 'v2'\n").unwrap();
+    let manager = f.codex.join("memories/extensions/nativemem/resources/app");
+    fs::create_dir_all(&manager).unwrap();
+    fs::write(manager.join("scope.json"), r#"{"cwd":"/w/app"}"#).unwrap();
+    let source = manager.join("alpha.md");
+    let content = "<!-- nativemem origin=claude id=-w-app/a.md -->\n# alpha\n\nabout alpha\n\nCategory: user\n\nalpha body";
+    fs::write(&source, content).unwrap();
+    let native = f.codex.join("memories_v2/extensions/ad_hoc/notes");
+
+    assert_eq!(f.json(&["sync", "--json"]).0, Some(0));
+    assert!(!native.exists());
+    for _ in 0..2 {
+        let (code, doc) = f.json(&["sync", "--apply", "--json"]);
+        assert_eq!(code, Some(0), "{doc}");
+        assert_eq!(fs::read_to_string(&source).unwrap(), content);
+        let files: Vec<_> = fs::read_dir(&native).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        let note = fs::read_to_string(files[0].as_ref().unwrap().path()).unwrap();
+        assert!(note.ends_with("alpha body"));
+        assert!(!note.contains("nativemem origin"));
+    }
+    let (_, doc) = f.json(&["items", "--kind", "memory", "--json"]);
+    assert_eq!(find(&doc, "codex")["native_id"], "app/alpha.md");
+    assert_eq!(
+        f.json(&[
+            "delete",
+            "--agent",
+            "codex",
+            "--id",
+            "app/alpha.md",
+            "--json",
+        ])
+        .0,
+        Some(0)
+    );
+    let (code, sync) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(2));
+    assert_eq!(sync["summary"]["remove"], 0);
+    assert!(f.claude_file.is_file());
+    assert_eq!(fs::read_to_string(&source).unwrap(), content);
+    let file = fs::read_dir(native)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(fs::read_to_string(file)
+        .unwrap()
+        .contains("Forget the note"));
 }
 
 #[test]
@@ -412,7 +707,7 @@ fn unknown_agent_reports_error_document() {
 }
 
 #[test]
-fn mass_delete_reports_error_code() {
+fn mass_delete_override_preserves_memory_copies() {
     let f = Fx::new();
     let ch = ClaudeHome::new(&f.claude);
     let dir = ch.add_project(Path::new("/w/app"));
@@ -432,12 +727,15 @@ fn mass_delete_reports_error_code() {
     for p in &files {
         fs::remove_file(p).unwrap();
     }
-    let (code, doc) = f.json(&["sync", "--apply", "--json"]);
-    assert_eq!(code, Some(1));
-    assert_eq!(doc["code"], "mass_delete");
-    let (code, doc) = f.json(&["sync", "--apply", "--allow-mass-delete", "--json"]);
-    assert_eq!(code, Some(0));
-    assert_eq!(doc["summary"]["remove"], 5);
+    for args in [
+        &["sync", "--apply", "--json"][..],
+        &["sync", "--apply", "--allow-mass-delete", "--json"][..],
+    ] {
+        let (code, doc) = f.json(args);
+        assert_eq!(code, Some(2));
+        assert_eq!(doc["summary"]["remove"], 0);
+        assert_eq!(doc["actions"], json!([]));
+    }
 }
 
 fn edit(f: &Fx, agent: &str, id: &str, stdin: &str) -> (Option<i32>, Value) {
@@ -1017,12 +1315,12 @@ fn add_refuses_a_taken_id_and_leaves_the_file_alone() {
     ] {
         let (code, _) = add(&f, "pi", kind, project, input);
         assert_eq!(code, Some(0));
-        let before = fs::read_to_string(f.state.with_file_name("pi").join("AGENTS.md")).unwrap();
+        let before = fs::read_to_string(f.state.with_file_name("pi").join("AGENTS.md")).ok();
         let (code, doc) = add(&f, "pi", kind, project, input);
         assert_eq!(code, Some(1), "{kind}");
         assert_eq!(doc["code"], "exists", "{kind}");
         assert_eq!(
-            fs::read_to_string(f.state.with_file_name("pi").join("AGENTS.md")).unwrap(),
+            fs::read_to_string(f.state.with_file_name("pi").join("AGENTS.md")).ok(),
             before
         );
     }
@@ -1411,6 +1709,63 @@ fn skills_of(f: &Fx, agent: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn skill_edit_backs_up_text_rejects_stale_edits_and_syncs() {
+    let f = four_agents();
+    let dir = skill_dir(&skills_of(&f, "claude"), "demo-skill", "before");
+    let file = dir.join("SKILL.md");
+    let source = fs::read_to_string(&file).unwrap();
+    let changed = source.replace("before", "after");
+    fs::write(dir.join("other.txt"), "keep").unwrap();
+    assert_eq!(f.json(&["sync", "--apply", "--json"]).0, Some(0));
+    let (code, shown) = f.json(&[
+        "skill",
+        "show",
+        "--agent",
+        "claude",
+        "--id",
+        "skill:demo-skill",
+        "--json",
+    ]);
+    assert_eq!(code, Some(0));
+    assert!(shown["manifest"].as_str().unwrap().contains(" other.txt"));
+    let hash = shown["text_hash"].as_str().unwrap();
+    let args = [
+        "skill",
+        "edit",
+        "--agent",
+        "claude",
+        "--id",
+        "skill:demo-skill",
+        "--expect",
+        hash,
+        "--json",
+    ];
+    fs::write(skills_of(&f, "codex").join("demo-skill/SKILL.md"), &changed).unwrap();
+    assert_eq!(run_stdin(&f, &changed, &args).0, Some(0));
+    assert_eq!(run_stdin(&f, &source, &args).0, Some(1));
+    assert_eq!(fs::read_to_string(&file).unwrap(), changed);
+    assert_eq!(fs::read_to_string(dir.join("other.txt")).unwrap(), "keep");
+    assert!(fs::read_dir(f.state.join("backups")).unwrap().any(|stamp| {
+        fs::read_to_string(
+            stamp
+                .unwrap()
+                .path()
+                .join("claude/skills/demo-skill/SKILL.md"),
+        )
+        .is_ok_and(|text| text == source)
+    }));
+    let (code, report) = f.json(&["sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["summary"]["update"], 2);
+    for agent in ["codex", "opencode", "pi"] {
+        assert_eq!(
+            fs::read_to_string(skills_of(&f, agent).join("demo-skill/SKILL.md")).unwrap(),
+            changed
+        );
+    }
+}
+
+#[test]
 fn skills_sync_through_the_cli_and_items_status_and_show_report_them() {
     let f = four_agents();
     let d = skill_dir(&skills_of(&f, "claude"), "demo-skill", "the text");
@@ -1525,20 +1880,79 @@ fn project_skill_sync_survives_reopening_without_project_memories() {
     );
     let (code, applied) = f.json(&["sync", "--apply", "--json"]);
     assert_eq!(code, Some(0), "{applied}");
-    assert!(cwd.join(".pi/skills/demo-skill/SKILL.md").is_file());
-    assert!(cwd.join(".opencode/skills/demo-skill/SKILL.md").is_file());
+    assert!(cwd.join(".agents/skills/demo-skill/SKILL.md").is_file());
+    assert!(!cwd.join(".pi/skills/demo-skill").exists());
+    assert!(!cwd.join(".opencode/skills/demo-skill").exists());
     let (code, unchanged) = f.json(&["sync", "--json"]);
     assert_eq!(code, Some(0), "{unchanged}");
     assert_eq!(unchanged["actions"], json!([]));
-    let (code, shown) = f.json(&["skill", "show", "--agent", "pi", "--id", &id, "--json"]);
+    let (code, shown) = f.json(&["skill", "show", "--agent", "codex", "--id", &id, "--json"]);
     assert_eq!(code, Some(0), "{shown}");
     assert!(shown["text"].as_str().unwrap().contains("project fixture"));
-    let (code, removed) = f.json(&["delete", "--agent", "pi", "--id", &id, "--json"]);
+    let (code, removed) = f.json(&["delete", "--agent", "codex", "--id", &id, "--json"]);
     assert_eq!(code, Some(0), "{removed}");
     let (code, deleted) = f.json(&["sync", "--apply", "--json"]);
     assert_eq!(code, Some(0), "{deleted}");
     assert!(!cwd.join(".claude/skills/demo-skill").exists());
+    assert!(!cwd.join(".agents/skills/demo-skill").exists());
+}
+
+#[test]
+fn codex_project_skills_are_discovered_without_loading_conversations() {
+    let f = four_agents();
+    let cwd = f.state.with_file_name("codex-project");
+    CodexHome::new(&f.codex).add_rollout(
+        "01900000-0000-7000-8000-000000000001",
+        &cwd,
+        &[("user", "fixture question")],
+        false,
+    );
+    let shared = cwd.join(".agents/skills");
+    skill_dir(&shared, "demo-skill", "created in Codex");
+    let (code, applied) = f.json(&["--no-sessions", "sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{applied}");
+    assert_eq!(
+        fs::read(cwd.join(".claude/skills/demo-skill/SKILL.md")).unwrap(),
+        fs::read(shared.join("demo-skill/SKILL.md")).unwrap()
+    );
+    assert!(!cwd.join(".pi/skills/demo-skill").exists());
     assert!(!cwd.join(".opencode/skills/demo-skill").exists());
+}
+
+#[test]
+fn an_existing_codex_project_skill_is_seen_from_a_claude_only_project() {
+    let f = four_agents();
+    let cwd = f.state.with_file_name("shared-project");
+    fs::create_dir_all(&cwd).unwrap();
+    ClaudeHome::new(&f.claude).add_project(&cwd);
+    skill_dir(&cwd.join(".claude/skills"), "demo-skill", "Claude version");
+    let shared = cwd.join(".agents/skills");
+    skill_dir(&shared, "demo-skill", "Codex version");
+    let (code, applied) = f.json(&["--no-sessions", "sync", "--apply", "--json"]);
+    assert_eq!(code, Some(2), "{applied}");
+    assert_eq!(applied["summary"]["conflicts"], 1, "{applied}");
+    assert!(fs::read_to_string(shared.join("demo-skill/SKILL.md"))
+        .unwrap()
+        .contains("Codex version"));
+}
+
+#[test]
+fn codex_skips_project_skills_that_would_alias_the_global_visible_root() {
+    let f = four_agents();
+    let home = f.state.with_file_name("home");
+    fs::create_dir_all(&home).unwrap();
+    ClaudeHome::new(&f.claude).add_project(&home);
+    skill_dir(
+        &home.join(".claude/skills"),
+        "project-only",
+        "project skill",
+    );
+    let shared = home.join(".agents/skills");
+    skill_dir(&shared, "global-only", "global skill");
+    let (code, applied) = f.json(&["--no-sessions", "sync", "--apply", "--json"]);
+    assert_eq!(code, Some(0), "{applied}");
+    assert!(!shared.join("project-only").exists());
+    assert!(!home.join(".claude/skills/global-only").exists());
 }
 
 #[test]

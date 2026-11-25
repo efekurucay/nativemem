@@ -15,9 +15,9 @@ Facts gathered read-only on a development machine running Pi 1.5.0 (session file
 
 | Kind | Status | Adapter |
 |---|---|---|
-| Project memory | Pi has no native memory: the store holds replicas and originals created through `add`, announced by a routing block | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
+| Project memory | Pi has no native memory: the auxiliary store holds replicas and originals created through `add` | `crates/core/src/adapters/agents_file.rs`, `memory_store.rs` |
 | Instruction sections | Read and write in `AGENTS.md`, including a new section through `add` | `agents_file.rs` through `sections.rs` |
-| Sessions | Read (originals) and write (replicas) | `crates/core/src/adapters/pi.rs` |
+| Sessions | Read originals and replicas, write replicas, append compatible turns to the current leaf in v3 session files | `crates/core/src/adapters/pi.rs` |
 | Skills | Read and write in `<pi home>/skills/`; symlinked skills are read through the link and replaced, never written through; a matching copy in `~/.agents/skills` counts as present | `crates/core/src/adapters/skills.rs`, `agents_file.rs` |
 | MCP servers | Read by `mcp import`; `mcp install` and `uninstall` write the one entry `mcpServers.nativemem` | `crates/hub/src/import.rs`, `crates/hub/src/register.rs` |
 
@@ -26,7 +26,7 @@ Facts gathered read-only on a development machine running Pi 1.5.0 (session file
 | What | Global | Project |
 |---|---|---|
 | Instructions | `<pi home>/AGENTS.md` (the loader tries `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD` in that order and takes the first) | The same candidate list in every directory from the cwd up to the filesystem root, loaded root first after the global file |
-| Memory | none native; replica store `<pi home>/nativemem/memory/<project key>/` | |
+| Memory | none native; replica store `<state dir>/memory/pi/<profile key>/<project key>/` | |
 | Sessions | `<pi home>/sessions/--<cwd>--/<ISO ts>_<session id>.jsonl` | |
 | MCP servers | `<pi home>/mcp.json` key `mcpServers` | `.pi/mcp.json` (only after project trust) |
 | Skills | `<pi home>/skills/` (global), `<repo>/.pi/skills/` (project) (entries may be symlinks into `~/.agents/skills`), `~/.agents/skills/` (read, never written), paths listed in `settings.json` `skills[]` | `.pi/skills/`, `.agents/skills/` (only after project trust) |
@@ -53,12 +53,11 @@ The Pi home is `--pi-home`, else `NATIVEMEM_PI_HOME`, else `PI_CODING_AGENT_DIR`
 
 - Global skills live in `<pi home>/skills/`; project skills live in `<project>/.pi/skills/`.
   Projects are discovered from memory, scanned sessions and the path-only
-  `<pi home>/nativemem/skill-projects.json` index retained when writing project copies.
+  `<state dir>/skill-projects/pi/<profile key>.json` index retained when writing project copies.
   `skill show --id` selects the exact global or project skill (`wiki/kinds/skills.md`).
 
 - Reads `AGENTS.md` sections and `sessions/**/*.jsonl`.
-- Writes instruction replicas in the region at the end of `AGENTS.md`, the replica memory store under
-  `nativemem/memory/`, the routing block in `AGENTS.md`, and session replicas.
+- Writes instruction replicas in `AGENTS.md` and session replicas in `sessions/`. The app stores memory in the state directory.
 - A session replica has the header, a `custom` marker entry (`customType` `nativemem-origin`,
   `data.origin`), a `session_info` entry and one linear `message` entry per turn. The file name is
   `<creation ISO ts>_<uuid derived from the origin>.jsonl`; a refresh rewrites the same file. The
@@ -104,10 +103,10 @@ enough here.
 - **Instruction candidates are ordered.** If `AGENTS.override.md` exists in the Pi home it is loaded
   instead of `AGENTS.md`, so synced sections would not reach the model (OBSERVED in the package
   source; the README states the same).
-- **No size cap on instruction files**: content is inlined whole, so the routing block costs tokens
+- **No size cap on instruction files**: content is inlined whole
   in every session.
 - **No approval layer for file reads.** The `read` tool resolves absolute paths and `~` without
-  asking, so the routing block works; output is capped at 2000 lines or 50 KB per read.
+  asking, and output is capped at 2000 lines or 50 KB per read.
 - **Provider replay blobs are opaque**: `thinkingSignature` and similar are bound to a provider;
   thinking blocks are dropped on conversion.
 - **Native MCP exists since 1.5.0** (stdio and streamable HTTP; SSE rejected). An installed extension
@@ -145,9 +144,12 @@ directory names equal the encoding of the header `cwd`.
 | Directory name equals the encoding of the header cwd | VERIFIED (380 of 380 files) | local corpus; test `encodes_cwd_like_pi` |
 | 377 of 380 files are strictly linear; 3 have branches; 1 has two roots | OBSERVED | local corpus |
 | The picker shows `session_info` name else first user message | OBSERVED | package source |
+| Pi reconstructs a resumed session from the active branch, its latest compaction checkpoint, and retained turns | VERIFIED from source | Installed Pi 1.6.0 `core/session-manager.js` and the reference TypeScript functions `buildContextEntries` and `buildSessionContext` |
+| Pi's built-in project context loader reads instruction files in the agent home and working directory ancestry | VERIFIED from source on 1.6.0 | [Resource loader](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/src/core/resource-loader.ts) |
+| A fresh turn loads project guidance from `AGENTS.md`. Standalone project notes require an explicit context mechanism | VERIFIED on 1.6.0 for the tested paths | An isolated real CLI sent the control rule to a local model endpoint. The model request contained none of the fixture notes from the project root, `.pi/memory/`, the agent home's `memory/`, or Claude Code's project notes |
 | `--continue` sorts by file mtime | OBSERVED | package source |
 | A replica opens without a model warning | INFERRED from Pi's model-restore code | `REPLICA_API` comment in `pi.rs`; the staged check confirms it |
-| Pi lists a nativemem-written session in its picker | `[UNVERIFIED]` until the staged check is recorded | `wiki/guides/verify-with-real-agents.md` |
+| Pi lists and opens a synced Claude session with `pi --resume` | VERIFIED on 1.6.0 | Synthetic Claude session in the same working directory |
 | The three probes pass on the fixtures; header version 4, an unknown entry type and a moved session directory each fail one check | VERIFIED | `crates/core/tests/probes.rs` (`pi_*`) |
 | An `AGENTS.override.md` shadows `AGENTS.md` | OBSERVED | package source |
 | Global context candidates and ancestor loading | OBSERVED | package source |
@@ -189,4 +191,4 @@ directory names equal the encoding of the header `cwd`.
 
 ## Last updated
 
-2026-11-11
+2026-11-22

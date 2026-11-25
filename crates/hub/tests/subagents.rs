@@ -478,6 +478,7 @@ async fn the_hub_lists_and_calls_subagent_tools() {
         names,
         [
             "nativemem_status",
+            "mcp_server_add",
             "subagents_list",
             "subagent_broken",
             "subagent_code-review"

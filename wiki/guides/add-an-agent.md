@@ -29,8 +29,7 @@ adapter) and Claude Code (full adapter with sessions) are the two reference impl
 
 ### 2. Decide capabilities
 
-- [ ] Memory: native originals, or replicas only (then use the routing block,
-  `wiki/decisions/routing-block-for-agents-without-memory.md`).
+- [ ] Identify the agent’s native memory inputs and document which of them the adapter can read or write.
 - [ ] Instruction sections: which global file, does the agent actually load it (and does something
   shadow it, as OpenCode's fallback or Pi's `AGENTS.override.md`).
 - [ ] Sessions: reader only, writer, or neither. A session writer needs a marker that survives a lost
@@ -155,4 +154,4 @@ adapter) and Claude Code (full adapter with sessions) are the two reference impl
 
 ## Last updated
 
-2026-11-11
+2026-11-22

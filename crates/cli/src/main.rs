@@ -11,16 +11,16 @@ use nativemem_core::adapters::codex::CodexAdapter;
 use nativemem_core::adapters::opencode_sessions::DATABASE;
 use nativemem_core::adapters::pi::PiAdapter;
 use nativemem_core::adapters::sections::section_problem;
-use nativemem_core::adapters::skills::skill_name;
+use nativemem_core::adapters::skills::{skill_name, skill_project_key};
 use nativemem_core::compat::{self, AgentReport, CompatState};
 use nativemem_core::engine::{self, Action, ApplyOptions, Note};
 use nativemem_core::error::{Error, Result};
-use nativemem_core::fsx::BackupSession;
+use nativemem_core::fsx::{self, BackupSession};
 use nativemem_core::ledger::Ledger;
 use nativemem_core::model::{
     content_hash, Adapter, Item, ItemKey, Kind, Observed, ScanReport, Scope,
 };
-use nativemem_core::session::{is_session_id, Role, Session, SessionOptions};
+use nativemem_core::session::{is_session_id, sha_hex, Role, Session, SessionOptions};
 use nativemem_core::slug::slugify;
 use serde_json::{json, Value};
 
@@ -85,6 +85,9 @@ enum Command {
     Sync {
         #[arg(long)]
         apply: bool,
+        /// Sync only chat sessions whose working directory is this project
+        #[arg(long, conflicts_with = "no_sessions")]
+        session_project: Option<PathBuf>,
         /// Lift the mass-delete guard
         #[arg(long)]
         allow_mass_delete: bool,
@@ -129,6 +132,17 @@ enum Command {
         id: String,
         /// Print one JSON document
         #[arg(long)]
+        json: bool,
+    },
+    /// Preview or repair one Claude Code memory index
+    RepairMemoryIndex {
+        /// The directory name under Claude Code's projects folder
+        #[arg(long, allow_hyphen_values = true)]
+        project_dir: String,
+        /// Apply only the repair identified by this preview token
+        #[arg(long)]
+        apply: Option<String>,
+        #[arg(long, required = true)]
         json: bool,
     },
     /// Create one new original entry from a JSON document on stdin; does not sync
@@ -196,6 +210,18 @@ enum SkillCommand {
         id: Option<String>,
         /// Print one JSON document
         #[arg(long)]
+        json: bool,
+    },
+    /// Edit one skill's SKILL.md from stdin, with backup
+    Edit {
+        #[arg(long)]
+        agent: String,
+        #[arg(long, allow_hyphen_values = true)]
+        id: String,
+        /// The text hash returned by skill show
+        #[arg(long)]
+        expect: String,
+        #[arg(long, required = true)]
         json: bool,
     },
 }
@@ -512,11 +538,23 @@ fn lock_state(state: &Path) -> Outcome<File> {
 }
 
 fn scan_agents(agents: &Agents) -> Result<BTreeMap<String, ScanReport>> {
-    agents
-        .all()
-        .into_iter()
+    let adapters = agents.all();
+    let mut scans: BTreeMap<String, ScanReport> = adapters
+        .iter()
         .map(|a| Ok((a.id().to_string(), a.inspect()?)))
-        .collect()
+        .collect::<Result<_>>()?;
+    let shared = engine::discover_shared_project_skills(
+        &adapters,
+        scans.values().flat_map(|scan| &scan.observed),
+    )?;
+    for skill in shared {
+        scans
+            .entry(skill.agent.to_string())
+            .or_default()
+            .observed
+            .push(skill);
+    }
+    Ok(scans)
 }
 
 fn status(
@@ -686,6 +724,9 @@ fn delete(
         id: id.to_string(),
     })?;
     refuse_session(id)?;
+    if skill_project_key(id).is_some() {
+        scan_agents(agents)?;
+    }
     adapter.remove(id)?;
     let backup_dir = roots.state.join("backups").join(backups.stamp());
     if json {
@@ -750,6 +791,7 @@ fn session_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<(
             let who = match t.role {
                 Role::User => "You",
                 Role::Assistant => "Assistant",
+                Role::Summary => "Conversation summary",
             };
             println!("\n{who}:\n{}", t.text);
         }
@@ -757,7 +799,7 @@ fn session_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<(
     Ok(())
 }
 
-fn skill_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<()> {
+fn find_skill(agents: &Agents, agent: &str, id: &str) -> Outcome<Observed> {
     if skill_name(id).is_none() {
         return Err(Failure::Coded {
             code: "invalid",
@@ -769,16 +811,30 @@ fn skill_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<()>
         id: id.to_string(),
     };
     let adapter = agents.named(agent)?.ok_or_else(not_found)?;
-    let skill = find_entry(adapter, id)?.ok_or_else(not_found)?;
+    let skill = if skill_project_key(id).is_some() {
+        scan_agents(agents)?
+            .remove(agent)
+            .and_then(|scan| scan.observed.into_iter().find(|o| o.native_id == id))
+    } else {
+        find_entry(adapter, id)?
+    }
+    .ok_or_else(not_found)?;
+    Ok(skill)
+}
+
+fn skill_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<()> {
+    let skill = find_skill(agents, agent, id)?;
     let file = skill.path.join("SKILL.md");
-    let text = String::from_utf8_lossy(&std::fs::read(&file).map_err(|e| Error::io(&file, e))?)
-        .into_owned();
+    let bytes = std::fs::read(&file).map_err(|e| Error::io(&file, e))?;
+    let text = String::from_utf8_lossy(&bytes);
     if json {
         print_json(&json!({
             "agent": agent,
             "name": skill.item.name,
             "path": file.display().to_string(),
             "text": text,
+            "text_hash": std::str::from_utf8(&bytes).ok().map(|_| sha_hex(&bytes)),
+            "manifest": skill.item.body,
         }));
     } else {
         print!("{text}");
@@ -786,6 +842,98 @@ fn skill_show(agents: &Agents, agent: &str, id: &str, json: bool) -> Outcome<()>
     Ok(())
 }
 
+fn edit_skill(
+    roots: &Roots,
+    backups: &BackupSession,
+    agents: &Agents,
+    agent: &str,
+    id: &str,
+    expected: &str,
+) -> Outcome<()> {
+    use nativemem_core::adapters::skills::MAX_SKILL_BYTES;
+    use std::fs;
+
+    let skill = find_skill(agents, agent, id)?;
+    let adapter = agents
+        .named(agent)?
+        .ok_or_else(|| Error::Parse("skill agent is missing".into()))?;
+    let (base, directory) = match &skill.item.scope {
+        Scope::Global => {
+            let home = match agent {
+                "claude" => &roots.claude,
+                "codex" => &roots.codex,
+                "opencode" => &roots.opencode,
+                "pi" => &roots.pi,
+                _ => return Err(Error::unsupported(agent, "skill editing").into()),
+            };
+            (home, home.join("skills"))
+        }
+        Scope::Project(project) => {
+            let (subdir, _) = adapter
+                .project_skill_dirs()
+                .ok_or_else(|| Error::unsupported(agent, "project skills"))?;
+            (project, project.join(subdir))
+        }
+    };
+    if skill.path != directory.join(&skill.item.name) {
+        return Err(Error::unsupported(
+            agent,
+            "editing a skill from a shared location; select its owning agent",
+        )
+        .into());
+    }
+    let relative = skill
+        .path
+        .strip_prefix(base)
+        .map_err(|_| Error::Parse("skill must be in its native directory".into()))?;
+    let mut directory = base.to_path_buf();
+    for part in relative.components() {
+        directory.push(part);
+        if !fs::symlink_metadata(&directory)
+            .map_err(|e| Error::io(&directory, e))?
+            .is_dir()
+        {
+            return Err(Error::unsupported(agent, "editing a linked skill directory").into());
+        }
+    }
+    let path = directory.join("SKILL.md");
+    let metadata = fs::symlink_metadata(&path).map_err(|e| Error::io(&path, e))?;
+    if !metadata.is_file() {
+        return Err(Error::unsupported(agent, "editing a linked SKILL.md").into());
+    }
+    let original = fs::read(&path).map_err(|e| Error::io(&path, e))?;
+    if sha_hex(&original) != expected || std::str::from_utf8(&original).is_err() {
+        return Err(Error::Parse("SKILL.md changed; open the editor again".into()).into());
+    }
+    let mut text = String::new();
+    std::io::stdin()
+        .take(MAX_SKILL_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(Error::from)?;
+    let total: u64 = skill
+        .item
+        .body
+        .lines()
+        .filter_map(|line| line.split(' ').nth(1)?.parse::<u64>().ok())
+        .sum();
+    if text.trim().is_empty()
+        || total.saturating_sub(metadata.len()) + text.len() as u64 > MAX_SKILL_BYTES
+    {
+        return Err(Error::Parse(
+            "SKILL.md must be nonempty and fit within the skill size limit".into(),
+        )
+        .into());
+    }
+    if text.as_bytes() != original {
+        fsx::backup(backups, &roots.state, &skill.agent, base, &path)?;
+        if fs::read(&path).map_err(|e| Error::io(&path, e))? != original {
+            return Err(Error::Parse("SKILL.md changed; open the editor again".into()).into());
+        }
+        fsx::atomic_write_with_permissions(&path, text.as_bytes(), metadata.permissions())?;
+    }
+    print_json(&json!({ "path": path, "text_hash": sha_hex(text.as_bytes()) }));
+    Ok(())
+}
 fn parse_edit(input: &str) -> Result<(String, String, Option<String>, String)> {
     let doc: Value = serde_json::from_str(input).map_err(|e| Error::Parse(e.to_string()))?;
     let text = |key: &str| -> Result<String> {
@@ -1006,6 +1154,13 @@ fn action_json(action: &Action) -> Option<(&'static str, Value)> {
         Action::WriteBack { key, item, .. } => {
             ("update", key.origin.as_str(), &item.name, &item.scope, key)
         }
+        Action::AppendSession { key, target, item } => (
+            "update",
+            target.agent.as_str(),
+            &item.name,
+            &item.scope,
+            key,
+        ),
         Action::Remove {
             key,
             agent,
@@ -1091,6 +1246,7 @@ fn sync(
     apply: bool,
     allow_mass_delete: bool,
     json: bool,
+    session_project: Option<&Path>,
 ) -> Result<bool> {
     let adapters = agents.all();
     if !json {
@@ -1098,15 +1254,35 @@ fn sync(
             println!("{line}");
         }
     }
+    let plan = |ledger: &Ledger| match session_project {
+        Some(project) => engine::plan_session_project(&adapters, ledger, project),
+        None => engine::plan(&adapters, ledger),
+    };
     if apply {
+        if session_project.is_none() {
+            if let Some(codex) = &agents.codex {
+                codex.adopt_manager_notes()?;
+            }
+            if let Some(opencode) = &agents.opencode {
+                opencode.adopt_memory_notes()?;
+            }
+            if let Some(pi) = &agents.pi {
+                pi.adopt_memory_notes()?;
+            }
+        }
         let ledger = Ledger::open(&roots.state)?;
-        let plan = engine::plan(&adapters, &ledger)?;
+        let plan = plan(&ledger)?;
         let report = engine::apply(
             plan,
             &adapters,
             &ledger,
             &ApplyOptions { allow_mass_delete },
         )?;
+        if session_project.is_none() {
+            if let Some(claude) = &agents.claude {
+                claude.reconcile_memory_origins()?;
+            }
+        }
         if json {
             print_json(&sync_json(true, &report.done, &report.notes));
         } else {
@@ -1120,7 +1296,7 @@ fn sync(
     } else {
         Ledger::in_memory()?
     };
-    let plan = engine::plan(&adapters, &ledger)?;
+    let plan = plan(&ledger)?;
     if json {
         print_json(&sync_json(false, &plan.actions, &plan.notes));
     } else {
@@ -1169,10 +1345,21 @@ const EXIT_ATTENTION: u8 = 2;
 fn run(cli: &Cli) -> Outcome<u8> {
     let roots = resolve(cli)?;
     let backups = BackupSession::new();
+    let session_project = match &cli.command {
+        Command::Sync {
+            session_project: Some(project),
+            ..
+        } => {
+            let project = std::path::absolute(project).map_err(Error::from)?;
+            Some(project.canonicalize().unwrap_or(project))
+        }
+        _ => None,
+    };
     let requested_kind = match &cli.command {
         Command::Items { kind, .. } => kind.as_deref().and_then(Kind::parse),
         Command::Skill(_) => Some(Kind::Skill),
         Command::Session(_) => Some(Kind::Session),
+        Command::Sync { .. } if session_project.is_some() => Some(Kind::Session),
         _ => None,
     };
     let lists_without_sessions = matches!(cli.command, Command::Items { .. } | Command::Skill(_))
@@ -1186,6 +1373,10 @@ fn run(cli: &Cli) -> Outcome<u8> {
         | Command::Delete { .. }
         | Command::Add { .. }
         | Command::Edit { .. }
+        | Command::RepairMemoryIndex { apply: Some(_), .. }
+        | Command::Skill(SkillArgs {
+            command: SkillCommand::Edit { .. },
+        })
         | Command::Doctor {
             accept: Some(_), ..
         } => Some(lock_state(&roots.state)?),
@@ -1222,7 +1413,12 @@ fn run(cli: &Cli) -> Outcome<u8> {
             );
         }
     }
-    let agents = Agents::open(&roots, &backups, sessions, &blocked);
+    let mut agents = Agents::open(&roots, &backups, sessions, &blocked);
+    if let Some(project) = &session_project {
+        agents.codex = agents
+            .codex
+            .map(|adapter| adapter.with_session_project(project.clone()));
+    }
     let attention = |needs: bool| if needs { EXIT_ATTENTION } else { 0 };
     match &cli.command {
         Command::Status { json } => {
@@ -1256,8 +1452,17 @@ fn run(cli: &Cli) -> Outcome<u8> {
             allow_mass_delete,
             notify,
             json,
+            ..
         } => {
-            let needs = sync(&roots, &agents, &reports, *apply, *allow_mass_delete, *json)?;
+            let needs = sync(
+                &roots,
+                &agents,
+                &reports,
+                *apply,
+                *allow_mass_delete,
+                *json,
+                session_project.as_deref(),
+            )?;
             if *apply {
                 let notes = if *notify {
                     compat::pending_notifications(&reports, &mut state)
@@ -1303,6 +1508,24 @@ fn run(cli: &Cli) -> Outcome<u8> {
         Command::Delete { agent, id, json } => {
             delete(&roots, &backups, &agents, agent, id, *json).map(|()| 0)
         }
+        Command::RepairMemoryIndex {
+            project_dir, apply, ..
+        } => {
+            let claude = agents.claude.as_ref().ok_or_else(|| Failure::NotFound {
+                agent: "claude".into(),
+                id: project_dir.clone(),
+            })?;
+            let repair = claude.repair_memory_index(project_dir, apply.as_deref())?;
+            print_json(&json!({
+                "path": repair.path,
+                "removed": repair.removed,
+                "added": repair.added,
+                "creates_index": repair.creates_index,
+                "token": repair.token,
+                "applied": repair.applied,
+            }));
+            Ok(0)
+        }
         Command::Add {
             agent,
             kind,
@@ -1333,6 +1556,11 @@ fn run(cli: &Cli) -> Outcome<u8> {
             });
             skill_show(&agents, agent, &id, *json).map(|()| 0)
         }
+        Command::Skill(SkillArgs {
+            command: SkillCommand::Edit {
+                agent, id, expect, ..
+            },
+        }) => edit_skill(&roots, &backups, &agents, agent, id, expect).map(|()| 0),
         Command::Mcp(args) => mcp::run(args, &roots, &explicit_roots(cli), &backups),
         Command::Subagent(args) => subagent::run(args, &roots, &backups),
         Command::Session(SessionArgs {
@@ -1350,10 +1578,11 @@ fn wants_json(command: &Command) -> bool {
         | Command::Doctor { json, .. }
         | Command::Items { json, .. }
         | Command::Delete { json, .. }
+        | Command::RepairMemoryIndex { json, .. }
         | Command::Add { json, .. }
         | Command::Edit { json, .. }
         | Command::Skill(SkillArgs {
-            command: SkillCommand::Show { json, .. },
+            command: SkillCommand::Show { json, .. } | SkillCommand::Edit { json, .. },
         })
         | Command::Session(SessionArgs {
             command: SessionCommand::Show { json, .. },

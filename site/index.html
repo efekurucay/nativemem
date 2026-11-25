@@ -7,7 +7,7 @@
     <title>nativemem — Change the agent. Keep the context.</title>
     <meta
       name="description"
-      content="Keep Claude Code, Codex, OpenCode and Pi in sync. Native memory, instructions, skills and session snapshots, plus one MCP hub. Open source, local-first, no LLM in the sync loop."
+      content="Sync sessions, instructions and skills across Claude Code, Codex, OpenCode and Pi. Import Claude project notes into Codex's native memory. Open source and local-first."
     />
     <link rel="canonical" href="https://efekurucay.com/nativemem/" />
     <meta property="og:url" content="https://efekurucay.com/nativemem/" />
@@ -18,7 +18,7 @@
     />
     <meta
       property="og:description"
-      content="Your agents have different tools. They shouldn't have different memories. A local Rust CLI and native Mac app, built in the open."
+      content="Switch coding agents and resume your work. A local Rust CLI and native Mac app, built in the open."
     />
     <meta
       property="og:image"
@@ -80,8 +80,8 @@
               >
             </p>
             <p class="muted">
-              Carry memory, instructions, skills and conversations between your
-              coding agents. In the files they already know.
+              Carry instructions, skills and conversations between your coding
+              agents in the files they already use.
             </p>
             <a
               class="button"
@@ -155,11 +155,11 @@
           </div>
           <div
             class="context-note"
-            aria-label="Example: project memory copied between agents"
+            aria-label="Example: a global instruction copied between agents"
           >
             <div class="note-top">
-              <span class="note-label">PROJECT MEMORY</span
-              ><span class="note-label">api / testing.md</span>
+              <span class="note-label">GLOBAL INSTRUCTIONS</span
+              ><span class="note-label">TESTING</span>
             </div>
             <p class="note-title">
               “Run the integration suite<br />before touching billing.”
@@ -194,8 +194,8 @@
             <span class="step-number">01</span>
             <h3>Read the room.</h3>
             <p>
-              Adapters read each agent's memory, global instructions, skill
-              directories and sessions. Project scope stays attached.
+              Adapters read global instructions, skill directories, sessions
+              and supported memory formats. Project scope stays attached.
             </p>
             <code>nativemem status</code>
           </li>
@@ -351,9 +351,8 @@
           <div class="eyebrow">04 / ONE HUB. LESS SETUP.</div>
           <h2 id="hub-title">Your tools<br />can travel, <em>too.</em></h2>
           <p>
-            Memory sync keeps native files in sync. The optional MCP hub does a
-            different job: one connection to your integrations and headless
-            agents.
+            The optional MCP hub gives your coding agents one connection to
+            integrations and headless agents.
           </p>
         </div>
         <div class="hub-features">
@@ -472,19 +471,19 @@ nativemem sync --apply</code></pre>
           <details>
             <summary>Does it replace my agents' own memory?</summary>
             <p>
-              No. Each agent reads its own files in its own format. nativemem
-              translates between those native stores. The ledger keeps IDs,
-              hashes and paths, not a second memory database.
+              Each agent reads its own files in its own format. nativemem
+              translates between the formats and tracks IDs, hashes and paths.
+              The manager also offers a store for project notes.
             </p>
           </details>
           <details>
             <summary>What actually syncs?</summary>
             <p>
-              Project memory, global instruction sections, global skills and
-              session snapshots between Claude Code, Codex, OpenCode and Pi.
-              Project skills are implemented for Claude Code, OpenCode and Pi;
-              Codex project-skill sync is not implemented. Agent-specific limits
-              and compatibility checks still apply.
+              Sessions, global instructions, and global and project skills sync
+              across Claude Code, Codex, OpenCode and Pi. Claude Code uses its
+              native project notes, and Codex can import them with its native
+              importer. OpenCode and Pi project notes are available in the
+              manager. Agent-specific compatibility checks still apply.
             </p>
           </details>
           <details>

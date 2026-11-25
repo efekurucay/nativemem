@@ -11,6 +11,7 @@ public struct McpServerDocument: Encodable, Equatable, Sendable {
     public var url: String?
     public var headers: [String: String]?
     public var auth: String
+    public var oauth: McpOAuthSettings?
     public var enabled: Bool
 
     func encoded() throws -> Data {
@@ -59,10 +60,18 @@ public struct McpServerDraft: Equatable, Sendable {
     public var argumentLines = ""
     public var url = ""
     public var usesOAuth = false
+    public var oauthClientID = ""
+    public var oauthClientSecret = ""
+    public var oauthCallbackPort = ""
+    public var oauthScopeLines = ""
+    public var oauthResourceMetadataURL = ""
+    /// One `name=value` authorization parameter per line.
+    public var oauthAuthorizationParameterLines = ""
     public var rows: [McpKeyValueRow] = []
     /// Not shown in the sheet; an edit keeps them.
     private var cwd: String?
     private var enabled = true
+    private var oauthClientSecretReference: String?
 
     public init() {
         isEditing = false
@@ -76,6 +85,17 @@ public struct McpServerDraft: Equatable, Sendable {
         argumentLines = server.args.joined(separator: "\n")
         url = server.url ?? ""
         usesOAuth = server.auth == .oauth
+        oauthClientID = server.oauth?.clientID ?? ""
+        oauthCallbackPort = server.oauth?.callbackPort.map(String.init) ?? ""
+        oauthScopeLines = server.oauth?.scopes.joined(separator: "\n") ?? ""
+        oauthResourceMetadataURL = server.oauth?.resourceMetadataURL ?? ""
+        oauthAuthorizationParameterLines = server.oauth?.authorizationParams
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "\n") ?? ""
+        if let secret = server.oauth?.clientSecret, McpServer.isSecretReference(secret) {
+            oauthClientSecretReference = secret
+        }
         cwd = server.cwd
         enabled = server.enabled
         let values = server.transport == .stdio ? server.env : server.headers
@@ -103,6 +123,35 @@ public struct McpServerDraft: Equatable, Sendable {
             .filter { !$0.trimmed.isEmpty }
     }
 
+    public var oauthScopes: [String] {
+        oauthScopeLines.split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmed }
+            .filter { !$0.isEmpty }
+    }
+
+    private var oauthAuthorizationParameters: [String: String] {
+        var values: [String: String] = [:]
+        for line in oauthAuthorizationParameterLines.split(separator: "\n", omittingEmptySubsequences: true) {
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            values[String(parts[0]).trimmed] = String(parts[1]).trimmed
+        }
+        return values
+    }
+
+    private var oauthAuthorizationParametersProblem: String? {
+        var seen = Set<String>()
+        for line in oauthAuthorizationParameterLines.split(separator: "\n", omittingEmptySubsequences: true) {
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return "OAuth parameters use name=value, one per line." }
+            let key = String(parts[0]).trimmed
+            let value = String(parts[1]).trimmed
+            if key.isEmpty || value.isEmpty { return "OAuth parameters need a name and value." }
+            if !seen.insert(key).inserted { return "OAuth parameter \(key) appears twice." }
+        }
+        return nil
+    }
+
     /// Rows that hold something; a row left empty is ignored.
     var activeRows: [McpKeyValueRow] { rows.filter { !$0.isBlank } }
 
@@ -111,11 +160,22 @@ public struct McpServerDraft: Equatable, Sendable {
         row.reference ?? "\(McpServer.secretPrefix)\(trimmedName)-\(row.key.trimmed)"
     }
 
+    private var oauthClientSecretConfigReference: String {
+        oauthClientSecretReference ?? "\(McpServer.secretPrefix)\(trimmedName)-oauth-client-secret"
+    }
+
     /// Secret values to store before the server is saved, by secret id.
     public var secretValues: [(id: String, value: String)] {
-        activeRows.filter { $0.isSecret && !$0.value.isEmpty }.map { row in
+        var values = activeRows.filter { $0.isSecret && !$0.value.isEmpty }.map { row in
             (id: String(reference(for: row).dropFirst(McpServer.secretPrefix.count)), value: row.value)
         }
+        if usesOAuth && !oauthClientSecret.isEmpty {
+            values.append((
+                id: String(oauthClientSecretConfigReference.dropFirst(McpServer.secretPrefix.count)),
+                value: oauthClientSecret
+            ))
+        }
+        return values
     }
 
     /// The first thing wrong with the draft, in plain words; nil when it can be saved.
@@ -124,6 +184,19 @@ public struct McpServerDraft: Equatable, Sendable {
         switch kind {
         case .local: if command.trimmed.isEmpty { return "Enter the command." }
         case .remote: if url.trimmed.isEmpty { return "Enter the address." }
+        }
+        if usesOAuth {
+            let hasSecret = !oauthClientSecret.isEmpty || oauthClientSecretReference != nil
+            if hasSecret && oauthClientID.trimmed.isEmpty { return "OAuth client secret needs a client ID." }
+            if !oauthCallbackPort.trimmed.isEmpty {
+                guard let port = Int(oauthCallbackPort), (1...65_535).contains(port) else {
+                    return "Enter a valid OAuth callback port."
+                }
+            }
+            if !oauthClientID.trimmed.isEmpty && oauthCallbackPort.trimmed.isEmpty {
+                return "Enter the registered OAuth callback port."
+            }
+            if let problem = oauthAuthorizationParametersProblem { return problem }
         }
         var seen = Set<String>()
         for row in activeRows {
@@ -150,17 +223,34 @@ public struct McpServerDraft: Equatable, Sendable {
             values[row.key.trimmed] = row.isSecret ? reference(for: row) : row.value
         }
         let hasValues = !values.isEmpty
+        let callbackPort = Int(oauthCallbackPort)
+        let hasOAuthSettings = !oauthClientID.trimmed.isEmpty
+            || oauthClientSecretReference != nil || !oauthClientSecret.isEmpty
+            || callbackPort != nil || !oauthScopes.isEmpty
+            || !oauthResourceMetadataURL.trimmed.isEmpty
+            || !oauthAuthorizationParameters.isEmpty
+        let oauthSettings = usesOAuth && hasOAuthSettings ? McpOAuthSettings(
+            clientID: oauthClientID.trimmed.isEmpty ? nil : oauthClientID.trimmed,
+            clientSecret: oauthClientSecret.isEmpty && oauthClientSecretReference == nil
+                ? nil : oauthClientSecretConfigReference,
+            callbackPort: callbackPort,
+            scopes: oauthScopes,
+            resourceMetadataURL: oauthResourceMetadataURL.trimmed.isEmpty
+                ? nil : oauthResourceMetadataURL.trimmed,
+            authorizationParams: oauthAuthorizationParameters
+        ) : nil
         switch kind {
         case .local:
             return McpServerDocument(
                 name: trimmedName, transport: McpTransport.stdio.rawValue, command: command.trimmed,
                 args: arguments, env: hasValues ? values : nil, cwd: cwd, url: nil, headers: nil,
-                auth: McpAuth.none.rawValue, enabled: enabled)
+                auth: McpAuth.none.rawValue, oauth: nil, enabled: enabled)
         case .remote:
             return McpServerDocument(
                 name: trimmedName, transport: McpTransport.http.rawValue, command: nil, args: nil, env: nil,
                 cwd: nil, url: url.trimmed, headers: hasValues ? values : nil,
-                auth: (usesOAuth ? McpAuth.oauth : McpAuth.none).rawValue, enabled: enabled)
+                auth: (usesOAuth ? McpAuth.oauth : McpAuth.none).rawValue,
+                oauth: oauthSettings, enabled: enabled)
         }
     }
 }

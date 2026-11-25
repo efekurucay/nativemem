@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::fake_oauth::FakeOauth;
-use nativemem_hub::config::{Auth, HubConfig, ServerSpec};
+use nativemem_hub::config::{Auth, HubConfig, OAuthSpec, ServerSpec};
 use nativemem_hub::connect::{connect, ConnectError};
 use nativemem_hub::oauth::{
     self, client_secret_id, login, logout, tokens_secret_id, AuthState, LoginOptions,
@@ -116,6 +116,63 @@ async fn login_discovers_registers_stores_and_the_bearer_reaches_the_upstream() 
     let access = tokens["token_response"]["access_token"].as_str().unwrap();
     assert!(fake.bearers().iter().any(|b| b == access));
     assert_eq!(fake.refreshes(), 0);
+}
+
+#[tokio::test]
+async fn a_preregistered_client_uses_fixed_callback_scopes_metadata_and_parameters() {
+    let fake = FakeOauth::start().await;
+    let t = tempfile::tempdir().unwrap();
+    let secrets = store(t.path());
+    secrets
+        .set("calendar-client-secret", "client-secret-value")
+        .unwrap();
+    let port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let redirect = format!("http://127.0.0.1:{port}/callback");
+    fake.add_client("calendar-client", Some("client-secret-value"), &redirect);
+
+    let mut spec = spec(&fake);
+    spec.oauth = Some(OAuthSpec {
+        client_id: Some("calendar-client".into()),
+        client_secret: Some("secret:calendar-client-secret".into()),
+        callback_port: Some(port),
+        scopes: vec!["calendar.readonly".into()],
+        resource_metadata_url: Some(format!(
+            "{}/.well-known/oauth-protected-resource/list_calendars",
+            fake.base
+        )),
+        authorization_params: std::collections::BTreeMap::from([
+            ("access_type".into(), "offline".into()),
+            ("prompt".into(), "consent".into()),
+        ]),
+    });
+
+    sign_in("calendar", &spec, &secrets, t.path()).await;
+
+    assert_eq!(fake.registrations(), 0);
+    assert_eq!(
+        fake.challenges(),
+        0,
+        "configured metadata skips the MCP probe"
+    );
+    let client = stored_json(secrets.as_ref(), &client_secret_id("calendar"));
+    assert_eq!(client["client_id"], "calendar-client");
+    assert_eq!(client["redirect_uri"], redirect);
+    let query = fake.authorization_queries().join("\n");
+    assert!(query.contains("access_type=offline"), "{query}");
+    assert!(query.contains("prompt=consent"), "{query}");
+    assert!(query.contains("scope=calendar.readonly"), "{query}");
+    assert!(fake
+        .token_requests()
+        .iter()
+        .any(|body| body.contains("client_secret=client-secret-value")));
+
+    let connected = connect("calendar", &spec, secrets, t.path())
+        .await
+        .unwrap_or_else(|e| panic!("connect failed: {e}"));
+    assert_eq!(connected.tools.len(), 1);
 }
 
 #[tokio::test]
@@ -270,7 +327,12 @@ async fn the_hub_reports_needs_login_and_its_tools_answer_with_the_sign_in_messa
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     assert_eq!(
         names,
-        ["nativemem_status", "subagents_list", "fake__whoami"]
+        [
+            "nativemem_status",
+            "mcp_server_add",
+            "subagents_list",
+            "fake__whoami"
+        ]
     );
 
     // The sign-in stops working during the session.
@@ -319,6 +381,7 @@ async fn a_server_that_starts_signed_out_exposes_the_sign_in_tool() {
         names,
         [
             "nativemem_status",
+            "mcp_server_add",
             "subagents_list",
             "fake__sign_in_required"
         ]

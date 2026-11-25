@@ -6,7 +6,7 @@ Record when session copies are written into OpenCode's database and why they loo
 
 ## Scope
 
-Session replicas whose target is OpenCode. Reading OpenCode sessions as originals follows the same probes.
+Session replicas and native continuations whose target is OpenCode. Reading follows the same probes.
 
 ## Decision
 
@@ -38,6 +38,11 @@ A replica is one `session_v2` row plus its `session_message` rows and `event_seq
 The marker is the extra key `nativemem_origin` in every row's `data` JSON, so a lost ledger still
 recognises a replica and the key stays out of the interface. Tool activity is readable text, as for
 every writer.
+
+An append to an existing session locks the database for writing, compares the native turns and
+timestamp against the plan, and verifies that the session is idle. It inserts rows with sequence
+numbers above the existing sequence and updates the sequence and idle timestamps. Each original
+message stays byte-for-byte intact. An original keeps its native id and receives unmarked rows.
 
 ## Why
 
@@ -75,7 +80,8 @@ every writer.
 ## Rules
 
 - MUST: Write OpenCode's database only through `opencode_sessions.rs`, only while the probes pass.
-- MUST: Never change or delete a row OpenCode created.
+- MUST: Preserve all message rows OpenCode created. An append may advance the sequence and idle
+  timestamps only after validating the existing history under the write transaction.
 - MUST: Bump `SESSION_WRITER_REVISION` in `opencode_sessions.rs` when the written rows change.
 - SHOULD: Record the outcome of the staged check on `wiki/agents/opencode.md`.
 
@@ -96,4 +102,4 @@ every writer.
 
 ## Last updated
 
-2026-11-11
+2026-11-22

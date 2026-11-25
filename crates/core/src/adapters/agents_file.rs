@@ -1,14 +1,13 @@
-//! Agents that only read a global `AGENTS.md` (OpenCode, Pi): instruction sections, and project
-//! memory stored below `<dir>/nativemem/memory/` and announced by a routing block in that file.
+//! Global `AGENTS.md` and application-managed project notes for OpenCode and Pi.
 //! An item file without a marker is an original of the agent.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::compat::Check;
 use crate::error::{Error, Result};
 use crate::fsx::BackupSession;
 use crate::model::{Adapter, AgentId, Item, ItemKey, Kind, Observed, Scope};
-use crate::session::{is_session_id, SessionOptions, SessionReport, SessionScan};
+use crate::session::{is_session_id, sha_hex, SessionOptions, SessionReport, SessionScan};
 
 use super::memory_store;
 use super::memory_store::MemoryStore;
@@ -18,7 +17,14 @@ use super::sections::InstructionFile;
 use super::skills::{self, skill_name, SkillReport, SkillStore};
 
 const INSTRUCTION_FILE: &str = "AGENTS.md";
-const MEMORY_DIR: &str = "nativemem/memory";
+
+pub(crate) fn memory_root(state: &Path, agent: &str, home: &Path) -> PathBuf {
+    let identity = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    state
+        .join("memory")
+        .join(agent)
+        .join(sha_hex(identity.as_os_str().as_encoded_bytes()))
+}
 
 pub struct AgentsFileAdapter {
     agent: AgentId,
@@ -37,6 +43,7 @@ impl AgentsFileAdapter {
     /// `dir` is the agent's home directory; the file is `<dir>/AGENTS.md`.
     pub fn new(id: &str, dir: PathBuf, state_dir: PathBuf, backups: BackupSession) -> Self {
         let agent = AgentId::new(id);
+        let memory = memory_root(&state_dir, id, &dir);
         AgentsFileAdapter {
             home: dir.clone(),
             search_path: crate::probe::process_path(),
@@ -46,13 +53,13 @@ impl AgentsFileAdapter {
             sessions: None,
             memory: MemoryStore::new(
                 agent.clone(),
-                dir.clone(),
+                state_dir.clone(),
                 state_dir.clone(),
                 backups.clone(),
-                dir.join(MEMORY_DIR),
-                dir.clone(),
-                dir.join(INSTRUCTION_FILE),
-            ),
+                memory.clone(),
+                memory,
+            )
+            .with_import_source(dir.join("nativemem/memory")),
             skills: {
                 let s = SkillStore::new(
                     agent.clone(),
@@ -84,6 +91,13 @@ impl AgentsFileAdapter {
             ),
             agent,
         }
+    }
+
+    pub fn adopt_memory_notes(&self) -> Result<()> {
+        if !self.blocked.contains(&Kind::Memory) {
+            self.memory.import()?;
+        }
+        Ok(())
     }
 
     /// Directories the agent also reads skills from; copies there are never written.
@@ -185,6 +199,16 @@ impl Adapter for AgentsFileAdapter {
         self.agent.clone()
     }
 
+    fn finish(&self) -> Result<Vec<(String, String)>> {
+        if !self.blocked.contains(&Kind::Instruction) {
+            self.instructions.reconcile()?;
+        }
+        if !self.blocked.contains(&Kind::Skill) {
+            self.skills.adopt_project_index()?;
+        }
+        Ok(Vec::new())
+    }
+
     fn version(&self) -> Option<String> {
         match self.agent.as_str() {
             "opencode" => opencode_probes::version(self.search_path.as_deref()),
@@ -260,8 +284,25 @@ impl Adapter for AgentsFileAdapter {
         self.skills.visible_copy(native_id)
     }
 
+    fn project_skill_dirs(&self) -> Option<(&Path, &[PathBuf])> {
+        self.skills.project_skill_dirs()
+    }
+
     fn skill_report(&self) -> Result<SkillReport> {
         self.skills.report()
+    }
+
+    fn can_append_session(&self, _target: &Observed, _turns: &[crate::session::Turn]) -> bool {
+        self.sessions
+            .as_ref()
+            .is_some_and(OpencodeSessions::is_enabled)
+    }
+
+    fn append_session(&self, target: &Observed, item: &Item) -> Result<()> {
+        self.sessions
+            .as_ref()
+            .ok_or_else(|| self.unsupported("append session"))?
+            .append(target, item)
     }
 
     fn write_replica(&self, key: &ItemKey, item: &Item) -> Result<(String, PathBuf)> {
@@ -403,8 +444,8 @@ mod tests {
                 .unwrap();
         assert_eq!(id, "AGENTS.md#claude:CLAUDE.md#a");
         assert_eq!(path, f.dir.join("AGENTS.md"));
-        assert!(text(&f).starts_with("<!-- nativemem:instructions:begin -->\n"));
-        assert!(!f.state.join("backups").exists());
+        assert_eq!(text(&f), "## A\n\na body\n");
+        assert!(!f.state.join("backups/T/pi/AGENTS.md").exists());
         let found = f.a.scan().unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].replica_of, Some(key("CLAUDE.md#a")));
@@ -456,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_replicas_live_below_the_base_with_a_routing_block() {
+    fn memory_replicas_leave_instructions_alone() {
         let f = fx();
         fs::write(f.dir.join("AGENTS.md"), "# Mine\n\n## Style\nkeep\n").unwrap();
         let (id, path) =
@@ -464,12 +505,10 @@ mod tests {
                 .unwrap();
         let (project, file) = id.split_once('/').unwrap();
         assert_eq!(file, "alpha.md");
-        let dir = f.dir.join("nativemem/memory").join(project);
+        let dir = memory_root(&f.state, "pi", &f.dir).join(project);
         assert_eq!(path, dir.join("alpha.md"));
         assert!(dir.join("MEMORY.md").is_file() && dir.join("scope.json").is_file());
-        let agents = text(&f);
-        assert!(agents.starts_with("# Mine\n\n## Style\nkeep\n\n<!-- nativemem:begin -->\n"));
-        assert!(agents.contains(&format!("- /w/app → {}\n", dir.join("MEMORY.md").display())));
+        assert_eq!(text(&f), "# Mine\n\n## Style\nkeep\n");
 
         let found = f.a.scan().unwrap();
         assert_eq!(found.len(), 2);
@@ -479,7 +518,7 @@ mod tests {
         f.a.remove(&id).unwrap();
         assert_eq!(text(&f), "# Mine\n\n## Style\nkeep\n");
         assert!(!f.dir.join("nativemem").exists());
-        assert!(f.state.join("backups/T/pi/nativemem/memory").is_dir());
+        assert!(f.state.join("backups/T/pi/memory/pi").is_dir());
     }
 
     #[test]
@@ -497,9 +536,7 @@ mod tests {
             (id.as_str(), path),
             ("AGENTS.md#fresh-rule", f.dir.join("AGENTS.md"))
         );
-        let at = before
-            .find("<!-- nativemem:instructions:begin -->")
-            .unwrap();
+        let at = before.find("## A\n").unwrap();
         assert_eq!(
             text(&f),
             format!(
@@ -530,13 +567,11 @@ mod tests {
     }
 
     fn store_dir(f: &Fx, id: &str) -> PathBuf {
-        f.dir
-            .join("nativemem/memory")
-            .join(id.split_once('/').unwrap().0)
+        memory_root(&f.state, "pi", &f.dir).join(id.split_once('/').unwrap().0)
     }
 
     #[test]
-    fn created_memory_is_an_original_with_index_scope_and_routing() {
+    fn created_memory_is_an_original_with_index_and_scope() {
         let f = fx();
         fs::write(f.dir.join("AGENTS.md"), "# Mine\n").unwrap();
         let mut it = memory("/w/app", "Alpha Note");
@@ -557,7 +592,7 @@ mod tests {
             fs::read_to_string(dir.join("scope.json")).unwrap(),
             "{\"cwd\":\"/w/app\"}"
         );
-        assert!(text(&f).contains(&format!("- /w/app → {}\n", dir.join("MEMORY.md").display())));
+        assert_eq!(text(&f), "# Mine\n");
 
         let found: Vec<_> = f.a.scan().unwrap();
         assert_eq!(found.len(), 1);
@@ -610,19 +645,12 @@ mod tests {
         assert!(fs::read_to_string(path.with_file_name("MEMORY.md"))
             .unwrap()
             .contains("- [alpha renamed](alpha.md)"));
-        let (project, file) = id.split_once('/').unwrap();
-        assert!(f
+        let backup = f
             .state
-            .join("backups/T/pi/nativemem/memory")
-            .join(project)
-            .join(file)
-            .is_file());
-        assert!(f
-            .state
-            .join("backups/T/pi/nativemem/memory")
-            .join(project)
-            .join("MEMORY.md")
-            .is_file());
+            .join("backups/T/pi")
+            .join(path.strip_prefix(&f.state).unwrap());
+        assert!(backup.is_file());
+        assert!(backup.with_file_name("MEMORY.md").is_file());
         assert!(matches!(
             f.a.write_original(&replica, &edited),
             Err(Error::Unsupported { .. })
@@ -634,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn store_original_is_removed_with_backup_and_its_routing() {
+    fn store_original_is_removed_with_backup() {
         let f = fx();
         fs::write(f.dir.join("AGENTS.md"), "# Mine\n").unwrap();
         let (id, path) = f.a.create_original(&memory("/w/app", "alpha")).unwrap();
@@ -642,13 +670,11 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(text(&f), "# Mine\n");
         assert!(!f.dir.join("nativemem").exists());
-        let (project, file) = id.split_once('/').unwrap();
-        assert!(f
+        let backup = f
             .state
-            .join("backups/T/pi/nativemem/memory")
-            .join(project)
-            .join(file)
-            .is_file());
+            .join("backups/T/pi")
+            .join(path.strip_prefix(&f.state).unwrap());
+        assert!(backup.is_file());
     }
 
     #[test]

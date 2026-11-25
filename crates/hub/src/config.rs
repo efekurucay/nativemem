@@ -58,7 +58,99 @@ fn enabled_by_default() -> bool {
     true
 }
 
-/// One upstream MCP server. Any string value may be `secret:<id>`.
+/// Optional details for an OAuth server. Without this block the hub uses dynamic client
+/// registration and discovers the protected resource from the server's initial 401 response.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// A client secret must be a `secret:<id>` reference, so it never enters `hub.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// The fixed loopback port registered with the authorization server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// Protected resource metadata for servers whose MCP endpoint itself does not answer 401.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_metadata_url: Option<String>,
+    /// Extra authorization URL parameters such as `access_type = "offline"`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authorization_params: BTreeMap<String, String>,
+}
+
+impl OAuthSpec {
+    fn values(&self) -> impl Iterator<Item = &str> {
+        self.client_id
+            .iter()
+            .map(String::as_str)
+            .chain(self.client_secret.iter().map(String::as_str))
+            .chain(self.resource_metadata_url.iter().map(String::as_str))
+    }
+
+    fn validate(&self) -> Result<()> {
+        let invalid = |m: &str| Err(HubError::Invalid(m.to_string()));
+        if self
+            .client_id
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return invalid("oauth client_id must not be empty");
+        }
+        if self.client_secret.is_some() && self.client_id.is_none() {
+            return invalid("oauth client_secret needs client_id");
+        }
+        if self.client_id.is_some() && self.callback_port.is_none() {
+            return invalid("a pre-registered oauth client needs callback_port");
+        }
+        if self.callback_port == Some(0) {
+            return invalid("oauth callback_port must be greater than zero");
+        }
+        if let Some(secret) = self.client_secret.as_deref() {
+            if secret_ref(secret).is_none() {
+                return invalid("oauth client_secret must be a secret:<id> reference");
+            }
+        }
+        if let Some(url) = self.resource_metadata_url.as_deref() {
+            if secret_ref(url).is_none()
+                && !(url.starts_with("http://") || url.starts_with("https://"))
+            {
+                return invalid("oauth resource_metadata_url must start with http:// or https://");
+            }
+        }
+        if self.scopes.iter().any(|scope| scope.trim().is_empty()) {
+            return invalid("oauth scopes must not be empty");
+        }
+        const RESERVED: &[&str] = &[
+            "client_id",
+            "redirect_uri",
+            "response_type",
+            "code_challenge",
+            "code_challenge_method",
+            "state",
+            "scope",
+            "resource",
+        ];
+        for (key, value) in &self.authorization_params {
+            if key.trim().is_empty() || value.trim().is_empty() {
+                return invalid("oauth authorization parameters need a name and value");
+            }
+            if RESERVED
+                .iter()
+                .any(|reserved| key.eq_ignore_ascii_case(reserved))
+            {
+                return Err(HubError::Invalid(format!(
+                    "oauth authorization parameter {key:?} is managed by the hub"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One upstream MCP server. Any connection string value may be `secret:<id>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerSpec {
@@ -77,6 +169,8 @@ pub struct ServerSpec {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub auth: Auth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthSpec>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
 }
@@ -92,6 +186,7 @@ impl ServerSpec {
             url: None,
             headers: BTreeMap::new(),
             auth: Auth::None,
+            oauth: None,
             enabled: true,
         }
     }
@@ -106,6 +201,7 @@ impl ServerSpec {
             url: Some(url.into()),
             headers: BTreeMap::new(),
             auth: Auth::None,
+            oauth: None,
             enabled: true,
         }
     }
@@ -120,6 +216,7 @@ impl ServerSpec {
             .chain(self.cwd.iter().map(String::as_str))
             .chain(self.url.iter().map(String::as_str))
             .chain(self.headers.values().map(String::as_str))
+            .chain(self.oauth.iter().flat_map(OAuthSpec::values))
     }
 
     /// The secret ids the spec refers to, sorted, without duplicates.
@@ -145,7 +242,7 @@ impl ServerSpec {
                 if self.url.is_some() || !self.headers.is_empty() {
                     return invalid("a stdio server takes no url or headers");
                 }
-                if self.auth != Auth::None {
+                if self.auth != Auth::None || self.oauth.is_some() {
                     return invalid("auth applies to http servers only");
                 }
                 if let Some(cwd) = self.cwd.as_deref() {
@@ -179,6 +276,12 @@ impl ServerSpec {
                         .any(|k| k.eq_ignore_ascii_case("authorization"))
                 {
                     return invalid("an oauth server takes no Authorization header");
+                }
+                if self.auth == Auth::None && self.oauth.is_some() {
+                    return invalid("oauth settings need auth = \"oauth\"");
+                }
+                if let Some(oauth) = &self.oauth {
+                    oauth.validate()?;
                 }
             }
         }
@@ -297,6 +400,16 @@ mod tests {
         let mut http = ServerSpec::http("https://mcp.example.com/v1");
         http.headers.insert("X-Api-Key".into(), "secret:api".into());
         http.auth = Auth::Oauth;
+        http.oauth = Some(OAuthSpec {
+            client_id: Some("client-id".into()),
+            client_secret: Some("secret:oauth-secret".into()),
+            callback_port: Some(53682),
+            scopes: vec!["calendar.readonly".into()],
+            resource_metadata_url: Some(
+                "https://mcp.example.com/.well-known/oauth-protected-resource/tool".into(),
+            ),
+            authorization_params: BTreeMap::from([("access_type".into(), "offline".into())]),
+        });
         http.enabled = false;
         let mut c = HubConfig::default();
         c.servers.insert("local".into(), stdio);
@@ -340,6 +453,11 @@ mod tests {
         assert!(text.contains("transport = \"stdio\""), "{text}");
         assert!(text.contains("TOKEN = \"secret:gh-token\""), "{text}");
         assert!(text.contains("auth = \"oauth\""), "{text}");
+        assert!(text.contains("[servers.remote.oauth]"), "{text}");
+        assert!(
+            text.contains("client_secret = \"secret:oauth-secret\""),
+            "{text}"
+        );
     }
 
     #[test]
@@ -358,6 +476,28 @@ mod tests {
         s.auth = Auth::Oauth;
         s.headers.insert("authorization".into(), "Bearer x".into());
         assert!(s.validate().is_err());
+        let mut s = ServerSpec::http("https://h/mcp");
+        s.oauth = Some(OAuthSpec::default());
+        assert!(s.validate().is_err());
+        s.auth = Auth::Oauth;
+        s.oauth.as_mut().unwrap().client_id = Some("id".into());
+        assert!(s.validate().is_err());
+        {
+            let oauth = s.oauth.as_mut().unwrap();
+            oauth.callback_port = Some(53682);
+            oauth.client_secret = Some("plain-secret".into());
+        }
+        assert!(s.validate().is_err());
+        {
+            let oauth = s.oauth.as_mut().unwrap();
+            oauth.client_secret = Some("secret:client".into());
+            oauth
+                .authorization_params
+                .insert("scope".into(), "bad".into());
+        }
+        assert!(s.validate().is_err());
+        s.oauth.as_mut().unwrap().authorization_params.clear();
+        assert!(s.validate().is_ok());
         assert!(validate_name("nativemem").is_err());
         assert!(validate_name("a b").is_err());
         assert!(validate_name("gh_hub-2").is_ok());
@@ -382,6 +522,10 @@ mod tests {
         s.args = vec!["secret:a".into(), "secret:a".into()];
         s.env.insert("K".into(), "secret:b".into());
         s.env.insert("L".into(), "plain".into());
-        assert_eq!(s.secret_ids(), vec!["a", "b", "cmd"]);
+        s.oauth = Some(OAuthSpec {
+            client_secret: Some("secret:oauth".into()),
+            ..OAuthSpec::default()
+        });
+        assert_eq!(s.secret_ids(), vec!["a", "b", "cmd", "oauth"]);
     }
 }

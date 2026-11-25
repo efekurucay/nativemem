@@ -21,11 +21,14 @@ struct SkillTextView: View {
                 ProgressView()
             }
         }
-        .task(id: item.id) {
+        .task(id: item.primary.hash) {
+            text = nil
+            failure = nil
             do {
-                text = try await model.skillText(of: item)
+                let loaded = try await model.skillText(of: item)
+                if !Task.isCancelled { text = loaded }
             } catch {
-                failure = error.localizedDescription
+                if !Task.isCancelled { failure = error.localizedDescription }
             }
         }
     }

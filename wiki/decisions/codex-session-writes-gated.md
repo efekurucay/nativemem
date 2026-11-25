@@ -6,7 +6,7 @@ Record when session copies are written into Codex and why a thread row is part o
 
 ## Scope
 
-Session replicas whose target is Codex. Reading Codex rollouts as originals is unaffected.
+Session replicas and native continuations whose target is Codex.
 
 ## Decision
 
@@ -52,6 +52,9 @@ that Codex's resume list needs.
 
 - MUST: Write Codex's database only through `codex_threads.rs`, only while the schema probes pass.
 - MUST: Never delete a row and never change a row of a thread this tool did not write.
+- MUST: Append to existing native threads only through the app-server, after checking the
+  planned history and taking a rollout backup. Check that the existing bytes remain intact
+  and the conversation reads back after the append.
 - SHOULD: Record the outcome of the staged check on `wiki/agents/codex.md`.
 
 ## Verification checklist
@@ -70,4 +73,4 @@ that Codex's resume list needs.
 
 ## Last updated
 
-2026-11-11
+2026-11-22

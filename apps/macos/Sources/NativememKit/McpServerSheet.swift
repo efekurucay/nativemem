@@ -96,6 +96,53 @@ struct McpServerSheet: View {
             .pickerStyle(.segmented)
             .fixedSize()
         }
+        if draft.usesOAuth { oauthFields }
+    }
+
+    private var oauthFields: some View {
+        GroupBox("OAuth client") {
+            VStack(alignment: .leading, spacing: 10) {
+                field("Client ID") {
+                    TextField("Optional for dynamic registration", text: $draft.oauthClientID)
+                        .font(.body.monospaced())
+                        .textFieldStyle(.roundedBorder)
+                }
+                field("Client secret") {
+                    SecureField("Keep the stored value when empty", text: $draft.oauthClientSecret)
+                        .textFieldStyle(.roundedBorder)
+                }
+                field("Callback port") {
+                    TextField("The port registered with the provider", text: $draft.oauthCallbackPort)
+                        .font(.body.monospaced())
+                        .textFieldStyle(.roundedBorder)
+                }
+                field("Protected resource metadata") {
+                    TextField("Optional metadata URL", text: $draft.oauthResourceMetadataURL)
+                        .font(.body.monospaced())
+                        .textFieldStyle(.roundedBorder)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Scopes").font(.subheadline).foregroundStyle(.secondary)
+                    TextEditor(text: $draft.oauthScopeLines)
+                        .font(.body.monospaced())
+                        .frame(height: 56)
+                    Text("One scope per line.").font(.caption).foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Authorization parameters").font(.subheadline).foregroundStyle(.secondary)
+                    TextEditor(text: $draft.oauthAuthorizationParameterLines)
+                        .font(.body.monospaced())
+                        .frame(height: 56)
+                    Text("One name=value per line, for example access_type=offline.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("The client secret is kept in your keychain. Register http://127.0.0.1:<port>/callback with the provider.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private var rowsEditor: some View {

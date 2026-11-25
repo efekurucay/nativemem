@@ -15,11 +15,11 @@ write safety in `wiki/architecture/safety.md`.
 | Piece | Role | Anchor |
 |---|---|---|
 | Adapter | One per agent (OpenCode and Pi share a generic one for `AGENTS.md`). Scans the agent's native store and writes, updates and removes entries in the agent's own format | `crates/core/src/model.rs` (`Adapter`), `crates/core/src/adapters/` |
-| Neutral model | `Item { kind, scope, name, description, category, body, source_dir }` and `Observed` (an item found on disk, with `replica_of` when it carries a marker) | `crates/core/src/model.rs` |
+| Neutral model | `Item { kind, scope, name, description, category, body, source_dir }` and `Observed` (an item found on disk, with `replica_of` when its replica identity is known) | `crates/core/src/model.rs` |
 | Ledger | SQLite file `<state dir>/ledger.db` | `crates/core/src/ledger.rs` |
 | Compatibility watch | Probes per adapter, `compat.json`, status and prompt; pauses the kinds of failing checks | `crates/core/src/compat.rs`, `wiki/architecture/compatibility.md` |
 | Engine | `plan` is pure; `apply` executes and updates the ledger. It knows nothing about formats | `crates/core/src/engine.rs` |
-| MCP hub | One local MCP server (`nativemem mcp serve`) that holds the real MCP servers and their secrets, signs in to OAuth servers once, and exposes their tools. `nativemem mcp install` registers it in each agent as one `nativemem` entry. It also offers the subagents defined in `<state dir>/subagents.toml` (a coding agent run headless with a chosen harness and model) as tools. Not a sync kind: no adapter, no engine, no ledger | `crates/hub/`, `wiki/architecture/hub.md`, `wiki/decisions/mcp-hub.md` |
+| MCP hub | One local MCP server (`nativemem mcp serve`) that holds the real MCP servers and their secrets, signs in to OAuth servers once, and exposes their tools. OAuth supports dynamic registration and pre-registered clients with fixed callbacks, explicit scopes, protected-resource metadata and provider parameters. `nativemem mcp install` registers it in each agent as one `nativemem` entry. An agent can add a disabled server definition through `mcp_server_add`; the user reviews and enables it. The hub also offers the subagents defined in `<state dir>/subagents.toml` (a coding agent run headless with a chosen harness and model) as tools. Not a sync kind: no adapter, no engine, no ledger | `crates/hub/`, `wiki/architecture/hub.md`, `wiki/decisions/mcp-hub.md` |
 | CLI | Resolves roots, takes the lock, prints text or one JSON document | `crates/cli/src/main.rs`, `crates/cli/src/mcp.rs`, `crates/cli/src/subagent.rs` |
 | Desktop app | A window onto the CLI; holds no sync logic | `docs/desktop.md`, `apps/macos/Sources/NativememKit/NativememCLI.swift` |
 
@@ -66,9 +66,9 @@ from the ledger hash of that side.
 | changed | unchanged | update replicas | `original_edit_updates_replica` |
 | unchanged | changed | write the edit back to the original, then to the other replicas | `replica_edit_updates_original_including_category` |
 | changed | changed (or two replicas changed) | conflict note, nothing written | `both_sides_edited_is_a_conflict` |
-| unchanged | file missing, ledger row present | remove the original and the other replicas, forget the item | `deleting_replica_removes_original_with_backup` |
+| unchanged | file missing, ledger row present | preserve memory copies and report for review; remove and forget for instructions and skills | `missing_memory_replica_preserves_original` |
 | changed, or another replica changed | file missing | conflict note "replica deleted, other side edited" | `crates/core/src/engine.rs` plan code |
-| missing, ledger row present | unchanged | remove replicas, forget the item | `deleting_original_removes_replica_and_routing` |
+| missing, ledger row present | unchanged | preserve memory copies and report for review; remove and forget for instructions and skills | `missing_memory_original_preserves_replica` |
 | missing | changed | conflict note "original missing, replica edited" | `crates/core/src/engine.rs` plan code |
 | any | marked, no ledger row | adopt: record it, write nothing | `lost_ledger_is_rebuilt_by_adoption` |
 | not found | marked, no ledger row | skipped note "orphan replica", nothing removed | `orphan_replica_is_reported_not_deleted` |
@@ -122,7 +122,7 @@ instruction sections (global scope) are creatable in all four agents; the defaul
 overridden). The ledger records the revision a replica was written with. A session replica with a
 lower revision is rewritten (the file is backed up first) while it is unmodified; a modified one is
 left alone. Adopted replicas are recorded at the current revision. Current values: Claude sessions
-1, Codex sessions 1, OpenCode sessions 1, Pi sessions 2, everything else 0
+2, Codex sessions 3, OpenCode sessions 2, Pi sessions 4, everything else 0
 (`SESSION_WRITER_REVISION` in the adapter files). Bump the constant whenever the written
 session format changes. Tests: `unmodified_replica_with_an_older_writer_revision_is_rewritten_once`,
 `modified_replica_with_an_older_writer_revision_is_left_alone`.
@@ -134,11 +134,11 @@ session format changes. Tests: `unmodified_replica_with_an_older_writer_revision
 | Memory | Faithful replication in both directions | Propagate, with backup | Written back to the original | `wiki/kinds/memory.md` |
 | Instruction | Faithful replication, one `## ` section per item | Propagate, with backup | Body written back; the heading is identity | `wiki/kinds/instruction-sections.md` |
 | Skill | Faithful replication of whole directories, no marker | Propagate, with backup of the directory | Written back to the origin and the others | `wiki/kinds/skills.md` |
-| Session | Snapshot: copy once, refresh while untouched | Never propagate | Never flow back | `wiki/kinds/sessions.md` |
+| Session | Copy once, refresh untouched copies, append compatible turns to native sessions | Never propagate | Keep local transcripts, report divergent continuations | `wiki/kinds/sessions.md` |
 
 ## CLI
 
-Commands: `status`, `snapshot --json`, `sync` (dry run unless `--apply`; `--notify` with `--apply`), `doctor`, `items`,
+Commands: `status`, `snapshot --json`, `sync` (dry run unless `--apply`; `--notify` with `--apply`; `--session-project <path>` for only one project's sessions), `doctor`, `items`,
 `delete`, `add`, `edit`, `skill show`, `session show`, `mcp serve|list|add|edit|remove|enable|disable|set-secret|delete-secret|test|login|logout|install|uninstall|status|import`
 (`wiki/architecture/hub.md`), `subagent list|add|edit|remove|run` (`wiki/architecture/hub.md`, "Subagents"), `schedule install|uninstall|status` (macOS). Root flags and variables: `--claude-home`, `--codex-home`,
 `--opencode-home`, `--opencode-data-home`, `--pi-home`, `--state-dir` (`NATIVEMEM_CLAUDE_HOME`, `NATIVEMEM_CODEX_HOME`,
@@ -194,10 +194,32 @@ filtered out of the memory views (`MemoryIndex.init` in the same file); `status`
 separately. Selecting a project folder shows a "Memory & skills" / "Sessions (N)" control above the list:
 the Sessions list (`SessionIndex.swift`, from `items --kind session --json`) covers the folder and
 below, sectioned by project, newest first, and the detail pane (`SessionDetailView.swift`) loads the
-read-only transcript through `nativemem session show`. There is no edit and no delete for sessions. The "MCP & Integrations" sidebar row opens the hub screen (`McpView.swift`, `McpModel.swift`): which agents have the hub (`mcp install` / `uninstall` / `status`), the servers with their state from `mcp list` and `mcp test`, sign-in, add, edit, remove and import (`wiki/architecture/hub.md`). The app finds the binary through app settings, `NATIVEMEM_BIN`, a
+read-only transcript through `nativemem session show`. There is no edit and no delete for sessions. The "MCP & Integrations" sidebar row opens the hub screen (`McpView.swift`, `McpModel.swift`): which agents have the hub (`mcp install` / `uninstall` / `status`), the servers with their state from `mcp list` and `mcp test`, sign-in, add, edit, remove and import. OAuth server forms include pre-registered client settings and keep the client secret in the secret store (`wiki/architecture/hub.md`). The app finds the binary through app settings, `NATIVEMEM_BIN`, a
 file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebrew/bin`
 (`apps/macos/Sources/NativememKit/NativememCLI.swift`). Compatibility notices from the snapshot's
 `doctor` member appear on Overview (`wiki/architecture/compatibility.md`).
+
+**Context Maintenance** runs from Review in the existing project, global, and skill lists. Findings
+appear on existing rows. The snapshot groups identical memory bodies within a project and identifies
+linked copies with different hashes. Item detail provides source and copy paths, edits, and backed-up
+removals. Skill usage is shown as unknown. The Sync toolbar previews propagation. Claude Code index
+findings open a repair preview in the same list. The CLI checks the preview token under the state lock
+before changing a native index, and backs up an existing index before writing it.
+Review Cards opens a one-entry-at-a-time review with keep, edit, remove and skip.
+Findings include guidance on what to check. On editable memory and instruction cards, Ask Subagent
+sends the entry name, description and body to an explicitly selected configured subagent. An edit
+recommendation can populate the editor. The existing save and removal actions own disk writes.
+The completed review records entry IDs, names, hashes and skipped cards in the desktop preferences
+for that scope. The next review prioritizes skipped cards and new, changed or absent entries.
+Review Updates in the Review Cards menu shows only those entries and cards with a finding.
+A scope without a completed baseline opens the full card list. Both actions use the same progress
+and completion baseline for that scope.
+An in-progress review records its decisions and content fingerprints in the same scoped preferences.
+Reopening it skips completed cards whose fingerprints still match and shows cards that changed.
+Sync preview and results report unresolved conflicts and skipped items alongside applied changes.
+Skill editing compares directory manifests and writes the chosen copy's SKILL.md with a backup.
+Ask Subagent in the skill editor reviews its current SKILL.md draft and can return an edit to that
+same editor for the user's review.
 
 ## Source anchors
 
@@ -242,4 +264,4 @@ file next to the executable, then `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebr
 
 ## Last updated
 
-2026-11-11
+2026-11-25

@@ -139,6 +139,22 @@ fn fake_spec(name: &str) -> String {
 }
 
 #[test]
+fn listing_configuration_can_skip_secret_store_entirely() {
+    let fx = Fx::new();
+    let spec = json!({
+        "name": "docs", "transport": "http", "url": "http://127.0.0.1:1/mcp", "auth": "oauth",
+    })
+    .to_string();
+    assert_eq!(fx.json(&["add", "--json"], &spec).0, 0);
+    fs::create_dir_all(fx.secrets()).unwrap();
+    fs::write(fx.secrets().join("secrets.json"), "invalid test data").unwrap();
+    assert_eq!(fx.json(&["list", "--json"], "").0, 1);
+    let (code, listing) = fx.json(&["list", "--no-auth-check", "--json"], "");
+    assert_eq!(code, 0);
+    assert_eq!(listing["servers"][0]["auth_state"], "unchecked");
+}
+
+#[test]
 fn add_list_edit_enable_disable_remove() {
     let fx = Fx::new();
     let (code, doc) = fx.json(&["add", "--json"], &fake_spec("alpha"));
@@ -157,6 +173,14 @@ fn add_list_edit_enable_disable_remove() {
         "name": "beta", "transport": "http", "url": "https://mcp.example.com/mcp",
         "headers": { "X-Api-Key": "secret:beta-token", "X-Plain": "plain-header-value" },
         "auth": "oauth",
+        "oauth": {
+            "client_id": "client-id",
+            "client_secret": "secret:beta-oauth-secret",
+            "callback_port": 53682,
+            "scopes": ["calendar.readonly"],
+            "resource_metadata_url": "https://mcp.example.com/.well-known/oauth-protected-resource/tool",
+            "authorization_params": { "access_type": "offline" }
+        }
     });
     let (code, _) = fx.json(&["add", "--json"], &spec.to_string());
     assert_eq!(code, 0);
@@ -173,9 +197,17 @@ fn add_list_edit_enable_disable_remove() {
     assert_eq!(beta["transport"], "http");
     assert_eq!(beta["auth"], "oauth");
     assert_eq!(beta["enabled"], true);
-    assert_eq!(beta["secrets"], json!(["beta-token"]));
+    assert_eq!(beta["secrets"], json!(["beta-oauth-secret", "beta-token"]));
     assert_eq!(beta["headers"]["X-Api-Key"], "secret:beta-token");
     assert_eq!(beta["auth_state"], "needs_login");
+    assert_eq!(beta["oauth"]["client_id"], "client-id");
+    assert_eq!(beta["oauth"]["client_secret"], "secret:beta-oauth-secret");
+    assert_eq!(beta["oauth"]["callback_port"], 53682);
+    assert_eq!(beta["oauth"]["scopes"], json!(["calendar.readonly"]));
+    assert_eq!(
+        beta["oauth"]["authorization_params"]["access_type"],
+        "offline"
+    );
     // A literal value may be a secret: it is never printed.
     assert_eq!(beta["headers"]["X-Plain"], "<literal>");
     assert!(!doc.to_string().contains("plain-header-value"));
@@ -333,6 +365,7 @@ async fn serve_proxies_the_fake_server_over_a_child_process() {
         names,
         [
             "nativemem_status",
+            "mcp_server_add",
             "subagents_list",
             "fake__echo",
             "fake__env_matches"
